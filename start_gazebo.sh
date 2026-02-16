@@ -1,10 +1,9 @@
+#!/bin/bash
+# Updated for Gazebo Harmonic
 
-GZ_VERSION=$(gazebo --version | grep -Po "(?<=version )(\d)" | head -1)
-
-source /usr/share/gazebo-${GZ_VERSION}/setup.sh
 gazebo_assets=../aeroloop_gazebo
-export GAZEBO_MODEL_PATH=${gazebo_assets}/models:${GAZEBO_MODEL_PATH}
-export GAZEBO_RESOURCE_PATH=${gazebo_assets}/resources:${GAZEBO_RESOURCE_PATH}
-export GAZEBO_PLUGIN_PATH=${gazebo_assets}/plugins:${GAZEBO_PLUGIN_PATH}
-gazebo --verbose # ${gazebo_assets}/worlds/betaloop_iris_arducopter_demo.world
+export SDF_PATH=${gazebo_assets}/models:${SDF_PATH}
+export GZ_SIM_RESOURCE_PATH=${gazebo_assets}/worlds:${GZ_SIM_RESOURCE_PATH}
+export GZ_SIM_SYSTEM_PLUGIN_PATH=${gazebo_assets}/plugins/build:${GZ_SIM_SYSTEM_PLUGIN_PATH}
+gz sim -r -v 4 # ${gazebo_assets}/worlds/betaloop_iris_arducopter_demo.world
 
