@@ -140,8 +140,11 @@ class Betaloop:
 
 
     def start_transmitter(self, transmitter):
-        p = subprocess.Popen(["node", transmitter], shell=False)
-        self.pids.append(p.pid)
+        try:
+            p = subprocess.Popen(["node", transmitter], shell=False)
+            self.pids.append(p.pid)
+        except Exception as e:
+            logger.warning("Transmitter failed to start: {}. Send RC via UDP 9004 instead.".format(e))
 
 
     def start(self, world=None):
@@ -159,6 +162,8 @@ class Betaloop:
         # Finally we can connect our radio, after FC has started
         logger.info("Starting the transmitter...")
         self.start_transmitter(self.transmitter)
+
+        logger.info("Stack is running. Send RC via UDP 9004. Press Ctrl-C to stop.")
 
         # Start up timing doesnt matter, when stream exists it will be displayed
         if not self.show_gzclient:
