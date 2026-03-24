@@ -36,12 +36,33 @@ logging.basicConfig(
 log = logging.getLogger("start_fpv")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-AEROLOOP_HOME = os.environ.get("AEROLOOP_HOME", "/opt/aeroloop_gazebo")
-BF_ELF = os.environ.get("BF_ELF", "/opt/betaflight/obj/main/betaflight_SITL.elf")
-MSP_RADIO_HOME = os.environ.get("MSP_RADIO_HOME", "/opt/msp_virtualradio")
+# Auto-detect paths: if running from the repo (betaloop/ dir), resolve relative
+# to the repo root. Otherwise fall back to Docker paths (/opt/...).
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+
+def _default_path(env_var, repo_relative, docker_absolute):
+    """Return env override, or repo-relative path if it exists, else Docker path."""
+    if os.environ.get(env_var):
+        return os.environ[env_var]
+    repo_path = os.path.join(_REPO_ROOT, repo_relative)
+    if os.path.exists(repo_path):
+        return repo_path
+    return docker_absolute
+
+AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
+BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
+                        "/opt/betaflight/obj/main/betaflight_SITL.elf")
+MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
+                               "/opt/msp_virtualradio")
 FPV_WORLD = "fpv_demo_harmonic.sdf"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
+
+
+def _is_container():
+    """Detect if running inside a Docker container."""
+    return os.path.exists("/.dockerenv") or os.environ.get("container") == "docker"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -189,9 +210,9 @@ def main():
     parser.add_argument("--port", type=int, default=STREAM_PORT,
                         help="Stream output port (default: 8554)")
     parser.add_argument("--rtsp", action="store_true",
-                        help="Use RTSP streaming via mediamtx (otherwise TCP MPEG-TS)")
+                        help="Use RTSP streaming via mediamtx")
     parser.add_argument("--output", default=None,
-                        help="Override output: 'tcp', 'rtsp', or 'file:<path>'")
+                        help="Override output: 'udp' (default), 'tcp', 'rtsp', or 'file:<path>'")
     parser.add_argument("--gazebo", action="store_true",
                         help="Show the Gazebo GUI (default: headless)")
     parser.add_argument("--no-transmitter", action="store_true",
@@ -206,7 +227,7 @@ def main():
     elif args.rtsp:
         output_mode = "rtsp"
     else:
-        output_mode = "tcp"
+        output_mode = "udp"
 
     pm = ProcessManager()
 
@@ -223,44 +244,52 @@ def main():
 
     # ── 1b. GPU detection & rendering setup ──
     gpu_available = has_nvidia_gpu()
+    in_container = _is_container()
+
     if gpu_available:
         log.info("NVIDIA GPU detected — using GPU-accelerated rendering")
-        # Remove software rendering override — Mesa software path segfaults
-        # when the NVIDIA container toolkit has replaced Gallium drivers.
         os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
-        # Force both EGL and GLX to use the NVIDIA vendor ICD.
-        # Without these, Mesa's DRI2 path is tried first and fails.
+
+        # Force NVIDIA EGL vendor ICD everywhere — Ogre2's camera sensor uses
+        # EGL for off-screen rendering.  Without this, Mesa's DRI2 path is
+        # tried and falls back to software ("failed to create dri2 screen").
+        # This is safe on the host: it only affects EGL, not GLX.
         nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
         if os.path.isfile(nvidia_icd):
             os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
-        os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
-        log.info("Forcing NVIDIA EGL + GLX vendor")
-        # Ensure the current user can access /dev/dri render nodes.
-        _fix_dri_permissions()
+            log.info("Forcing NVIDIA EGL vendor ICD")
+
+        if in_container:
+            # Inside Docker we must also force GLX to use NVIDIA — the
+            # container toolkit injects replacement libs that Mesa can't use.
+            os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+            log.info("Container detected — also forcing NVIDIA GLX vendor")
+            _fix_dri_permissions()
+        else:
+            log.info("Host detected — native GLX, forced EGL")
     else:
         log.info("No GPU detected — using software rendering (llvmpipe)")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
-    # If headless with no DISPLAY, start Xvfb.  Ogre2's camera sensor needs
-    # a display context to render frames — even with an NVIDIA GPU.
-    # Xvfb provides the virtual display; the GPU still does the actual rendering.
-    # When --gazebo (GUI) is requested, we use the host's real display instead.
+    # ── 1c. Display setup ──
+    # Ogre2's camera sensor needs a display context to render frames.
     if args.gazebo:
         # GUI mode — need the host's real X display
         if not os.environ.get("DISPLAY"):
             log.error(
-                "No DISPLAY set — the Gazebo GUI needs X11 forwarding from the host.\n"
-                "  Run the container with:\n"
-                "    -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix"
+                "No DISPLAY set — the Gazebo GUI needs a display.\n"
+                "  In Docker, run with: -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix"
             )
             sys.exit(1)
-        # Don't force __GLX_VENDOR_LIBRARY_NAME when talking to the host X server —
-        # it prevents GLX context creation through the forwarded socket.
+        # Don't force __GLX_VENDOR_LIBRARY_NAME when talking to the host X server
         os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
-        log.info("Using host display %s for Gazebo GUI", os.environ["DISPLAY"])
+        log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
+    elif not in_container and os.environ.get("DISPLAY"):
+        # Host headless mode — use the native display (low latency, no Xvfb).
+        # Native NVIDIA GLX works fine here since we didn't set __GLX_VENDOR_LIBRARY_NAME.
+        log.info("Using native display %s (low-latency host mode)", os.environ["DISPLAY"])
     else:
-        # Headless mode — ALWAYS use Xvfb (even if DISPLAY is set from the host,
-        # the host display causes NV-GLX BadValue errors for headless rendering).
+        # Container headless or no display — start Xvfb
         for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:
             try:
                 os.remove(lockfile)
@@ -376,6 +405,22 @@ def main():
     log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
     # ── 8. Start ffmpeg ──
+    # Try NVENC hardware encoder first (RTX/GTX GPUs), fall back to libx264.
+    use_nvenc = False
+    if gpu_available:
+        try:
+            probe = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if "h264_nvenc" in probe.stdout:
+                use_nvenc = True
+                log.info("Using NVENC hardware encoder (h264_nvenc)")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    if not use_nvenc:
+        log.info("Using software encoder (libx264 ultrafast)")
+
     ffmpeg_input = [
         "ffmpeg",
         "-y",
@@ -384,14 +429,43 @@ def main():
         "-s", f"{width}x{height}",
         "-r", str(args.fps),
         "-i", "pipe:0",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-g", str(args.fps),  # keyframe interval = 1 second
+        "-pix_fmt", "yuv420p",     # convert to standard 4:2:0 (not 4:4:4)
     ]
+    if use_nvenc:
+        ffmpeg_input += [
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",        # fastest NVENC preset
+            "-tune", "ull",         # ultra-low-latency
+            "-rc", "cbr",
+            "-b:v", "4M",
+            "-g", "1",              # every frame is a keyframe
+            "-bf", "0",
+            "-delay", "0",          # zero encoder-internal frame delay
+            "-zerolatency", "1",    # disable reordering
+        ]
+    else:
+        ffmpeg_input += [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-g", "1",
+        ]
+    ffmpeg_input += ["-flush_packets", "1"]  # flush every packet immediately
 
-    if output_mode == "tcp":
-        ffmpeg_output = ["-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1"]
+    if output_mode == "udp":
+        # UDP + MPEG-TS with zero mux delay — fire-and-forget, lowest latency.
+        # ffmpeg never blocks: packets are silently dropped if no viewer is
+        # listening.  When ffplay starts it gets the very next frame.
+        ffmpeg_output = [
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
+        ]
+        viewer_url = f"udp://@:{args.port}"  # ffplay bind syntax
+    elif output_mode == "tcp":
+        ffmpeg_output = [
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
+        ]
         viewer_url = f"tcp://<host>:{args.port}"
     elif output_mode == "rtsp":
         ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/fpv"]
@@ -428,10 +502,13 @@ def main():
     print(f"  Camera topic : {topic}")
     print(f"  Resolution   : {width}x{height} @ {args.fps} fps")
     print()
-    if output_mode == "tcp":
-        print(f"  View with:  ffplay tcp://<host>:{args.port}")
+    low_lat = "-fflags nobuffer -flags low_delay -framedrop"
+    if output_mode == "udp":
+        print(f"  View with:  ffplay {low_lat} udp://@:{args.port}")
+    elif output_mode == "tcp":
+        print(f"  View with:  ffplay {low_lat} tcp://<host>:{args.port}")
     elif output_mode == "rtsp":
-        print(f"  View with:  ffplay rtsp://<host>:{args.port}/fpv")
+        print(f"  View with:  ffplay {low_lat} rtsp://<host>:{args.port}/fpv")
         print(f"       or:    vlc rtsp://<host>:{args.port}/fpv")
     print()
     print("  Press Ctrl-C to stop")
@@ -446,15 +523,11 @@ def main():
                 log.warning("Image bridge exited (code %d)", bridge_proc.returncode)
                 break
 
-            # ffmpeg exits when the TCP viewer disconnects — restart it so
-            # a new viewer can connect without killing the whole simulation.
+            # With UDP, ffmpeg runs indefinitely (fire-and-forget).
+            # With TCP, ffmpeg exits when the viewer disconnects — restart it.
             if ffmpeg_proc.poll() is not None:
                 rc = ffmpeg_proc.returncode
-                if rc != 0:
-                    log.info("ffmpeg exited (code %d) — restarting for next viewer connection …", rc)
-                else:
-                    log.info("ffmpeg finished — restarting …")
-                # Remove dead process from the manager
+                log.info("ffmpeg exited (code %d) — restarting …", rc)
                 if ffmpeg_proc in pm.procs:
                     pm.procs.remove(ffmpeg_proc)
                 time.sleep(1)

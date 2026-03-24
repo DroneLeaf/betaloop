@@ -1,3 +1,17 @@
 *.bin
 *.log
 config.txt
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# OS generated files
+.DS_Store
+
+# Exclude IDE/editor metadata
+.idea/
+.vscode/
