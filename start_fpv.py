@@ -120,7 +120,7 @@ def setup_gazebo_env():
     _prepend("GZ_SIM_SYSTEM_PLUGIN_PATH", plugins, "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
     _prepend("LD_LIBRARY_PATH", "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
 
-    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    # os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
 
 def has_nvidia_gpu():
@@ -277,9 +277,15 @@ def main():
             _fix_dri_permissions()
         else:
             log.info("Host detected — native GLX, forced EGL")
+    # else:
+    #     log.info("No GPU detected — using software rendering (llvmpipe)")
+    #     os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+
     else:
-        log.info("No GPU detected — using software rendering (llvmpipe)")
-        os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+        log.info("No NVIDIA GPU detected — using default Mesa rendering")
+        os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
+        os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
+        os.environ.pop("__EGL_VENDOR_LIBRARY_FILENAMES", None)
 
     # ── 1c. Display setup ──
     # Ogre2's camera sensor needs a display context to render frames.
