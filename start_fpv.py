@@ -151,8 +151,11 @@ def _fix_dri_permissions():
         subprocess.run(["sudo", "chmod", "666", node], capture_output=True)
 
 
-def discover_camera_topic(timeout=30):
-    """List Gazebo topics and find the camera image topic."""
+def discover_camera_topic(name_hint="fpv_cam", timeout=30):
+    """List Gazebo topics and find a camera image topic matching *name_hint*.
+
+    If *name_hint* is None, returns the first ``*/image`` topic found.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -162,8 +165,11 @@ def discover_camera_topic(timeout=30):
             )
             for line in result.stdout.strip().splitlines():
                 line = line.strip()
-                if line.endswith("/image") and "sensor" in line:
-                    return line
+                if not line.endswith("/image"):
+                    continue
+                if name_hint and name_hint not in line:
+                    continue
+                return line
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         time.sleep(2)
@@ -219,6 +225,10 @@ def main():
                         help="Skip starting the MSP virtual radio")
     parser.add_argument("--fps", type=int, default=30,
                         help="Output stream FPS (default: 30)")
+    parser.add_argument("--chase-cam", action="store_true",
+                        help="Also stream the chase camera (3rd-person view)")
+    parser.add_argument("--chase-port", type=int, default=8555,
+                        help="Chase-cam stream port (default: 8555)")
     args = parser.parse_args()
 
     # Determine output mode
@@ -361,9 +371,9 @@ def main():
             log.warning("MSP Virtual Radio not found at %s — skipping", radio_index)
     time.sleep(2)
 
-    # ── 6. Discover camera topic ──
-    log.info("Discovering camera image topic …")
-    topic = discover_camera_topic(timeout=30)
+    # ── 6. Discover camera topics ──
+    log.info("Discovering FPV camera image topic …")
+    topic = discover_camera_topic(name_hint="fpv_cam", timeout=30)
     if not topic:
         log.error(
             "Could not find a camera image topic. "
@@ -371,7 +381,16 @@ def main():
         )
         pm.shutdown()
         sys.exit(1)
-    log.info("Found camera topic: %s", topic)
+    log.info("Found FPV camera topic: %s", topic)
+
+    chase_topic = None
+    if args.chase_cam:
+        log.info("Discovering chase camera image topic …")
+        chase_topic = discover_camera_topic(name_hint="chase_cam", timeout=30)
+        if not chase_topic:
+            log.warning("Chase camera topic not found — only FPV stream will run")
+        else:
+            log.info("Found chase camera topic: %s", chase_topic)
 
     # ── 7. Start image bridge ──
     if not os.path.isfile(IMAGE_BRIDGE):
@@ -489,45 +508,124 @@ def main():
         stderr=subprocess.DEVNULL,
     )
 
-    # ── 9. Print connection info ──
+    # ── 9a. Chase camera pipeline (optional) ──
+    chase_bridge_proc = None
+    chase_ffmpeg_proc = None
+    chase_viewer_url = None
+    chase_ffmpeg_cmd = None
+    if chase_topic:
+        log.info("Starting chase camera bridge")
+        chase_bridge_proc = pm.spawn(
+            [IMAGE_BRIDGE, chase_topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        chase_flags = fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_GETFL)
+        fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_SETFL, chase_flags | os.O_NONBLOCK)
+
+        log.info("Waiting for first chase camera frame …")
+        cw, ch, cpf = read_image_meta(chase_bridge_proc, timeout=30)
+        if cw is None:
+            log.warning("No chase camera metadata — chase stream disabled")
+            chase_bridge_proc = None
+        else:
+            log.info("Chase camera: %dx%d %s", cw, ch, cpf)
+
+            chase_ffmpeg_input = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-pix_fmt", cpf,
+                "-s", f"{cw}x{ch}", "-r", str(args.fps),
+                "-i", "pipe:0", "-pix_fmt", "yuv420p",
+            ]
+            if use_nvenc:
+                chase_ffmpeg_input += [
+                    "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
+                    "-rc", "cbr", "-b:v", "4M", "-g", "1", "-bf", "0",
+                    "-delay", "0", "-zerolatency", "1",
+                ]
+            else:
+                chase_ffmpeg_input += [
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency", "-g", "1",
+                ]
+            chase_ffmpeg_input += ["-flush_packets", "1"]
+
+            if output_mode == "udp":
+                chase_ffmpeg_output = [
+                    "-muxdelay", "0", "-muxpreload", "0",
+                    "-f", "mpegts", f"udp://127.0.0.1:{args.chase_port}?pkt_size=1316",
+                ]
+                chase_viewer_url = f"udp://@:{args.chase_port}"
+            elif output_mode == "tcp":
+                chase_ffmpeg_output = [
+                    "-muxdelay", "0", "-muxpreload", "0",
+                    "-f", "mpegts", f"tcp://0.0.0.0:{args.chase_port}?listen=1&tcp_nodelay=1",
+                ]
+                chase_viewer_url = f"tcp://<host>:{args.chase_port}"
+            elif output_mode == "rtsp":
+                chase_ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
+                chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
+            else:
+                chase_ffmpeg_output = ffmpeg_output  # file — same as FPV
+                chase_viewer_url = "(same as FPV)"
+
+            chase_ffmpeg_cmd = chase_ffmpeg_input + chase_ffmpeg_output
+            log.info("Starting chase camera ffmpeg → %s", output_mode)
+            chase_ffmpeg_proc = pm.spawn(
+                chase_ffmpeg_cmd,
+                stdin=chase_bridge_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    # ── 10. Print connection info ──
     print()
     print("=" * 60)
     print("  FPV Simulation Running")
     print("=" * 60)
     print()
-    print(f"  Video stream : {viewer_url}")
+    print(f"  FPV stream   : {viewer_url}")
+    if chase_viewer_url:
+        print(f"  Chase stream : {chase_viewer_url}")
     print(f"  RC input     : UDP 127.0.0.1:9004  (flight_test.py)")
     print(f"  BF CLI       : TCP 127.0.0.1:5761")
     print(f"  BF Configurator: TCP 127.0.0.1:5760")
-    print(f"  Camera topic : {topic}")
+    print(f"  FPV topic    : {topic}")
+    if chase_topic:
+        print(f"  Chase topic  : {chase_topic}")
     print(f"  Resolution   : {width}x{height} @ {args.fps} fps")
     print()
     low_lat = "-fflags nobuffer -flags low_delay -framedrop"
     if output_mode == "udp":
-        print(f"  View with:  ffplay {low_lat} udp://@:{args.port}")
+        print(f"  FPV view:   ffplay {low_lat} udp://@:{args.port}")
+        if chase_viewer_url:
+            print(f"  Chase view: ffplay {low_lat} udp://@:{args.chase_port}")
     elif output_mode == "tcp":
-        print(f"  View with:  ffplay {low_lat} tcp://<host>:{args.port}")
+        print(f"  FPV view:   ffplay {low_lat} tcp://<host>:{args.port}")
+        if chase_viewer_url:
+            print(f"  Chase view: ffplay {low_lat} tcp://<host>:{args.chase_port}")
     elif output_mode == "rtsp":
-        print(f"  View with:  ffplay {low_lat} rtsp://<host>:{args.port}/fpv")
+        print(f"  FPV view:   ffplay {low_lat} rtsp://<host>:{args.port}/fpv")
+        if chase_viewer_url:
+            print(f"  Chase view: ffplay {low_lat} rtsp://<host>:{args.port}/chase")
         print(f"       or:    vlc rtsp://<host>:{args.port}/fpv")
     print()
     print("  Press Ctrl-C to stop")
     print("=" * 60)
     print()
 
-    # ── 10. Keep alive (auto-restart ffmpeg on viewer disconnect) ──
+    # ── 11. Keep alive (auto-restart ffmpeg on viewer disconnect) ──
     try:
         while True:
-            # Bridge is the critical process — if it dies, we're done
+            # FPV bridge is critical — if it dies, we're done
             if bridge_proc.poll() is not None:
-                log.warning("Image bridge exited (code %d)", bridge_proc.returncode)
+                log.warning("FPV image bridge exited (code %d)", bridge_proc.returncode)
                 break
 
-            # With UDP, ffmpeg runs indefinitely (fire-and-forget).
-            # With TCP, ffmpeg exits when the viewer disconnects — restart it.
+            # Auto-restart FPV ffmpeg (e.g. TCP viewer disconnect)
             if ffmpeg_proc.poll() is not None:
                 rc = ffmpeg_proc.returncode
-                log.info("ffmpeg exited (code %d) — restarting …", rc)
+                log.info("FPV ffmpeg exited (code %d) — restarting …", rc)
                 if ffmpeg_proc in pm.procs:
                     pm.procs.remove(ffmpeg_proc)
                 time.sleep(1)
@@ -537,6 +635,25 @@ def main():
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+
+            # Auto-restart chase camera ffmpeg
+            if chase_ffmpeg_proc and chase_ffmpeg_cmd:
+                if chase_bridge_proc and chase_bridge_proc.poll() is not None:
+                    log.warning("Chase camera bridge exited (code %d)", chase_bridge_proc.returncode)
+                    chase_ffmpeg_proc = None
+                    chase_bridge_proc = None
+                elif chase_ffmpeg_proc.poll() is not None:
+                    rc = chase_ffmpeg_proc.returncode
+                    log.info("Chase ffmpeg exited (code %d) — restarting …", rc)
+                    if chase_ffmpeg_proc in pm.procs:
+                        pm.procs.remove(chase_ffmpeg_proc)
+                    time.sleep(1)
+                    chase_ffmpeg_proc = pm.spawn(
+                        chase_ffmpeg_cmd,
+                        stdin=chase_bridge_proc.stdout,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
 
             time.sleep(2)
     except KeyboardInterrupt:
