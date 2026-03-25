@@ -38,37 +38,19 @@ class Betaloop:
         return os.environ[name] if name in os.environ else ""
 
     def load_gazebo_vars(self):
-        # Copied from https://github.com/wil3/gymfc/blob/master/gymfc/envs/gazebo_env.py
-
-        # TODO is supporting Gazebo 9 just replacing 8->9?
-        # Taken from /usr/share/gazebo-8/setup.sh
-        ld_library_path = self._get_env_var("LD_LIBRARY_PATH")
-
-        # If loaded previously
-        gz_resource =   self._get_env_var("GAZEBO_RESOURCE_PATH")  
-        gz_plugins = self._get_env_var("GAZEBO_PLUGIN_PATH")
-        gz_models = self._get_env_var("GAZEBO_MODEL_PATH")
-
-        os.environ["GAZEBO_MASTER_URI"] = "http://{}:{}".format(self.host, self.gz_port)
-        os.environ["GAZEBO_MODEL_DATABASE_URI"] = "http://gazebosim.org/models"
-
-        # FIXME Remove hardcoded paths and pull this from somewhere so its 
-        # cross platform
-        os.environ["GAZEBO_RESOURCE_PATH"] = "/usr/share/gazebo-8" + os.pathsep + gz_resource
-        os.environ["GAZEBO_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/gazebo-8/plugins" + os.pathsep + gz_plugins
-        os.environ["GAZEBO_MODEL_PATH"] = "/usr/share/gazebo-8/models" + os.pathsep + gz_models
-
-        os.environ["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu/gazebo-8/plugins" + os.pathsep + ld_library_path
-        os.environ["OGRE_RESOURCE_PATH"] = "/usr/lib/x86_64-linux-gnu/OGRE-1.9.0"
-
-        # Now load assets
-
+        """Set environment variables for Gazebo Harmonic (gz-sim8)."""
         models = os.path.join(self.gz_assets, "models")
         plugins = os.path.join(self.gz_assets, "plugins", "build")
         self.world_dir = os.path.join(self.gz_assets, "worlds")
-        os.environ["GAZEBO_MODEL_PATH"] = "{}:{}".format(models, os.environ["GAZEBO_MODEL_PATH"])
-        os.environ["GAZEBO_RESOURCE_PATH"] = "{}:{}".format(self.world_dir, os.environ["GAZEBO_RESOURCE_PATH"])
-        os.environ["GAZEBO_PLUGIN_PATH"] = "{}:{}".format(plugins, os.environ["GAZEBO_PLUGIN_PATH"])
+
+        def _prepend(var, *paths):
+            existing = self._get_env_var(var)
+            os.environ[var] = os.pathsep.join(list(paths) + ([existing] if existing else []))
+
+        _prepend("SDF_PATH", models, "/usr/share/gz/gz-sim8/models")
+        _prepend("GZ_SIM_RESOURCE_PATH", self.world_dir, "/usr/share/gz/gz-sim8")
+        _prepend("GZ_SIM_SYSTEM_PLUGIN_PATH", plugins, "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
+        _prepend("LD_LIBRARY_PATH", "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
 
 
     def _start_and_block_until(self, arguments, output_condition, cwd=None):
@@ -100,14 +82,12 @@ class Betaloop:
         """
 
     def start_gazebo(self, world, show_gzclient):
-        #self._start_and_block_until(["gzserver", "--verbose", world], "Connected to gazebo master")
-        exe = None
-        if show_gzclient:
-            exe = "gazebo"
-        else:
-            exe = "gzserver"
-        p = subprocess.Popen([exe, "--verbose", world], shell=False)
-        #                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT) 
+        """Start Gazebo Harmonic (gz sim)."""
+        gz_args = ["gz", "sim"]
+        if not show_gzclient:
+            gz_args.append("-s")  # headless (server only)
+        gz_args.extend(["-r", "-v", "3", world])
+        p = subprocess.Popen(gz_args, shell=False)
         self.pids.append(p.pid)
         time.sleep(10)
 
@@ -170,7 +150,7 @@ class Betaloop:
 
     def list_worlds(self):
         i = 0 
-        world_files = [f for f in os.listdir(self.world_dir) if f.endswith(".world")]
+        world_files = [f for f in os.listdir(self.world_dir) if f.endswith((".sdf", ".world"))]
         if len(world_files) == 0:
             print("Could not find any world files, have you configured config.txt to point to the Aeroloop Gazebo?")
             return
