@@ -53,7 +53,7 @@ def _default_path(env_var, repo_relative, docker_absolute):
 AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
 BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
                         "/opt/betaflight/obj/main/betaflight_SITL.elf")
-MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
+MSP_RADIO_HOME = _default_path("MspVirtualRadioHome", os.path.join("..", "..", "msp_virtualradio"),
                                "/opt/msp_virtualradio")
 FPV_WORLD = "fpv_demo_harmonic.sdf"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
