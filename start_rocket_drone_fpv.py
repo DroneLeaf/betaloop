@@ -250,6 +250,10 @@ def main():
                         help="Use this exact Gazebo image topic for chase-cam (skip auto-discovery)")
     parser.add_argument("--topic-model-hint", default=TOPIC_MODEL_HINT_DEFAULT,
                         help="Prefer topics that contain this model path segment (e.g. betaflight_vehicle)")
+    parser.add_argument("--osd", action="store_true",
+                        help="Enable Betaflight OSD overlay on the FPV stream")
+    parser.add_argument("--msp-port", type=int, default=5762,
+                        help="Betaflight MSP TCP port for OSD telemetry (default: 5762 = UART2)")
     args = parser.parse_args()
 
     # Determine output mode
@@ -444,8 +448,13 @@ def main():
         pm.shutdown()
         sys.exit(1)
 
+    bridge_cmd = [IMAGE_BRIDGE, topic]
+    if args.osd:
+        bridge_cmd += ["--osd", "--msp-port", str(args.msp_port)]
+        log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
+
     bridge_proc = pm.spawn(
-        [IMAGE_BRIDGE, topic],
+        bridge_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
