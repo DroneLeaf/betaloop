@@ -1,58 +1,61 @@
 # Betaloop
 
-Betaloop is a flight simulator with the  goal of providing accurate
-and realistic flight performance primarily to be used in hardware/software in the loop testing for UAVs. This specific
-implementation is for testing the
-[Betaflight](https://github.com/betaflight/betaflight) flight controller in
-[Gazebo](http://gazebosim.org/). 
-![Betaloop](https://raw.githubusercontent.com/Aeroloop/betaloop/master/images/screenshot.png)
+Simulation launcher and orchestrator for
+[Betaflight](https://github.com/betaflight/betaflight) SITL +
+[Gazebo Harmonic](https://gazebosim.org/). Manages the full stack: Gazebo,
+Betaflight SITL, image bridges, ffmpeg video pipelines, and the virtual radio.
 
-collection of programs and scripts with the
-# Features
+## Features
 
-1. Uses real flight control firmware (Betaflight)  
-2. Supports first person view (FPV) flight
-3. Use your own radio controller!  
+1. Uses real Betaflight firmware (SITL target)
+2. FPV camera with OSD overlay (battery, attitude, flight mode, timer)
+3. Chase camera (3rd-person view)
+4. Low-latency `--raw` mode (bypasses ffmpeg, pipes directly to ffplay)
+5. NVENC hardware encoding when an NVIDIA GPU is available
+6. UDP, TCP, and RTSP streaming modes
 
-# Requirements
+## Launchers
 
-1. Gazebo 8 
-2. [Aeroloop Gazebo resources](https://github.com/Aeroloop/aeroloop_gazebo)
-2. [Betaflight](https://github.com/betaflight/betaflight) [compiled for
-   SITL](https://github.com/betaflight/betaflight/tree/master/src/main/target/SITL)
-3. Python3
-4. [VidRecv](https://github.com/Aeroloop/vidrecv)
-5. [MSP virtual radio](https://github.com/Aeroloop/msp_virtualradio) 
+| Script | World | Description |
+|---|---|---|
+| `start_fpv.py` | Iris FPV demo | Lightweight quad with obstacles and gate |
+| `start_rocket_drone_fpv.py` | Rocket drone | Heavy quad chasing an orbiting target |
+| `start_rocket_drone_collision.py` | Collision test | Heavy quad with static target above |
 
-# Instructions
-For required software part of Aeroloop make sure to follow the install
-instructions specified by their respective README file.
-For ease of use, add your arguments to config.txt, if needed these can be
-overridden by command line arguments. 
+### Quick start
 
-Run the script to start the simulator,
+```bash
+# Iris FPV (lowest latency — raw mode)
+python3 start_fpv.py --gazebo --chase-cam --osd --raw
+
+# Rocket drone (encoded stream)
+python3 start_rocket_drone_fpv.py --gazebo --chase-cam --osd
+
+# Watch encoded streams in a separate terminal:
+ffplay -probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext udp://@:8554
 ```
-python3 start.py
-```
 
-# Notes
-When Betaflight is started a .bin is created and the configuration settings are
-saved here. This is saved in the *current* directory. Be careful as this can
-currently cause a .bin to be overwritten if testing multiple builds.
+### Key flags
 
-# Motor Mapping
-This will be changed in the future so they match however current mappings are,
+| Flag | Effect |
+|---|---|
+| `--gazebo` | Show the Gazebo GUI (default: headless) |
+| `--chase-cam` | Also stream the chase camera on port 8555 |
+| `--osd` | Enable Betaflight OSD telemetry overlay |
+| `--raw` | Bypass ffmpeg — pipe raw frames to ffplay (lowest latency) |
+| `--rtsp` | Use RTSP streaming via mediamtx |
+| `--fps N` | Output FPS (default: 30) |
 
-Gazebo 
+## Motor Mapping
 
-Rotor 0 = Front Right
-Rotor 1 = Back Left
-Rotor 2 = Front Left
-Rotor 3 = Back Right
+Gazebo:
+- Rotor 0 = Front Right
+- Rotor 1 = Back Left
+- Rotor 2 = Front Left
+- Rotor 3 = Back Right
 
-Standard BF Mixer
-
-Rotor 0 = Back Right
-Rotor 1 = Front Right
-Rotor 2 = Back Left
-Rotor 3 = Front Left
+Standard Betaflight Mixer:
+- Rotor 0 = Back Right
+- Rotor 1 = Front Right
+- Rotor 2 = Back Left
+- Rotor 3 = Front Left

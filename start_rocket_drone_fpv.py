@@ -254,6 +254,8 @@ def main():
                         help="Enable Betaflight OSD overlay on the FPV stream")
     parser.add_argument("--msp-port", type=int, default=5762,
                         help="Betaflight MSP TCP port for OSD telemetry (default: 5762 = UART2)")
+    parser.add_argument("--raw", action="store_true",
+                        help="Bypass ffmpeg: pipe raw frames directly to ffplay (latency test)")
     args = parser.parse_args()
 
     # Determine output mode
@@ -475,90 +477,115 @@ def main():
         sys.exit(1)
     log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-    # ── 8. Start ffmpeg ──
-    # Try NVENC hardware encoder first (RTX/GTX GPUs), fall back to libx264.
-    use_nvenc = False
-    if gpu_available:
-        try:
-            probe = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if "h264_nvenc" in probe.stdout:
-                use_nvenc = True
-                log.info("Using NVENC hardware encoder (h264_nvenc)")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    if not use_nvenc:
-        log.info("Using software encoder (libx264 ultrafast)")
-
-    ffmpeg_input = [
-        "ffmpeg",
-        "-y",
-        "-f", "rawvideo",
-        "-pix_fmt", pix_fmt,
-        "-s", f"{width}x{height}",
-        "-r", str(args.fps),
-        "-i", "pipe:0",
-        "-pix_fmt", "yuv420p",     # convert to standard 4:2:0 (not 4:4:4)
-    ]
-    if use_nvenc:
-        ffmpeg_input += [
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",        # fastest NVENC preset
-            "-tune", "ull",         # ultra-low-latency
-            "-rc", "cbr",
-            "-b:v", "4M",
-            "-g", "1",              # every frame is a keyframe
-            "-bf", "0",
-            "-delay", "0",          # zero encoder-internal frame delay
-            "-zerolatency", "1",    # disable reordering
+    # ── 8. Start ffmpeg (or raw ffplay in --raw mode) ──
+    if args.raw:
+        # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
+        # This isolates whether latency is in ffmpeg/muxer or elsewhere.
+        log.info("RAW MODE: bypassing ffmpeg, piping directly to ffplay")
+        ffplay_cmd = [
+            "ffplay",
+            "-f", "rawvideo",
+            "-pixel_format", pix_fmt,
+            "-video_size", f"{width}x{height}",
+            "-framerate", str(args.fps),
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-framedrop",
+            "-sync", "video",
+            "-window_title", f"FPV RAW {width}x{height}",
+            "-",
         ]
+        log.info("Starting: %s", " ".join(ffplay_cmd[:6]) + " ...")
+        ffmpeg_proc = pm.spawn(
+            ffplay_cmd,
+            stdin=bridge_proc.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        ffmpeg_cmd = ffplay_cmd  # for auto-restart
+        viewer_url = "(raw ffplay window)"
+        output_mode = "raw"
     else:
-        ffmpeg_input += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-g", "1",
-        ]
-    ffmpeg_input += ["-flush_packets", "1"]  # flush every packet immediately
+        # Try NVENC hardware encoder first (RTX/GTX GPUs), fall back to libx264.
+        use_nvenc = False
+        if gpu_available:
+            try:
+                probe = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "h264_nvenc" in probe.stdout:
+                    use_nvenc = True
+                    log.info("Using NVENC hardware encoder (h264_nvenc)")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        if not use_nvenc:
+            log.info("Using software encoder (libx264 ultrafast)")
 
-    if output_mode == "udp":
-        # UDP + MPEG-TS with zero mux delay — fire-and-forget, lowest latency.
-        # ffmpeg never blocks: packets are silently dropped if no viewer is
-        # listening.  When ffplay starts it gets the very next frame.
-        ffmpeg_output = [
-            "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
+        ffmpeg_input = [
+            "ffmpeg",
+            "-y",
+            "-f", "rawvideo",
+            "-pix_fmt", pix_fmt,
+            "-s", f"{width}x{height}",
+            "-r", str(args.fps),
+            "-i", "pipe:0",
+            "-pix_fmt", "yuv420p",
         ]
-        viewer_url = f"udp://@:{args.port}"  # ffplay bind syntax
-    elif output_mode == "tcp":
-        ffmpeg_output = [
-            "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
-        ]
-        viewer_url = f"tcp://<host>:{args.port}"
-    elif output_mode == "rtsp":
-        ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/fpv"]
-        viewer_url = f"rtsp://<host>:{args.port}/fpv"
-    elif output_mode.startswith("file:"):
-        filepath = output_mode[5:]
-        ffmpeg_output = ["-f", "mp4", filepath]
-        viewer_url = filepath
-    else:
-        log.error("Unknown output mode: %s", output_mode)
-        pm.shutdown()
-        sys.exit(1)
+        if use_nvenc:
+            ffmpeg_input += [
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "ull",
+                "-rc", "cbr",
+                "-b:v", "4M",
+                "-g", "1",
+                "-bf", "0",
+                "-delay", "0",
+                "-zerolatency", "1",
+            ]
+        else:
+            ffmpeg_input += [
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-g", "1",
+            ]
+        ffmpeg_input += ["-flush_packets", "1"]
 
-    ffmpeg_cmd = ffmpeg_input + ffmpeg_output
-    log.info("Starting ffmpeg → %s", output_mode)
+        if output_mode == "udp":
+            ffmpeg_output = [
+                "-muxdelay", "0", "-muxpreload", "0",
+                "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
+            ]
+            viewer_url = f"udp://@:{args.port}"
+        elif output_mode == "tcp":
+            ffmpeg_output = [
+                "-muxdelay", "0", "-muxpreload", "0",
+                "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
+            ]
+            viewer_url = f"tcp://<host>:{args.port}"
+        elif output_mode == "rtsp":
+            ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/fpv"]
+            viewer_url = f"rtsp://<host>:{args.port}/fpv"
+        elif output_mode.startswith("file:"):
+            filepath = output_mode[5:]
+            ffmpeg_output = ["-f", "mp4", filepath]
+            viewer_url = filepath
+        else:
+            log.error("Unknown output mode: %s", output_mode)
+            pm.shutdown()
+            sys.exit(1)
 
-    ffmpeg_proc = pm.spawn(
-        ffmpeg_cmd,
-        stdin=bridge_proc.stdout,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        ffmpeg_cmd = ffmpeg_input + ffmpeg_output
+        log.info("Starting ffmpeg → %s", output_mode)
+
+        ffmpeg_proc = pm.spawn(
+            ffmpeg_cmd,
+            stdin=bridge_proc.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     # ── 9a. Chase camera pipeline (optional) ──
     chase_bridge_proc = None
@@ -583,52 +610,76 @@ def main():
         else:
             log.info("Chase camera: %dx%d %s", cw, ch, cpf)
 
-            chase_ffmpeg_input = [
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-pix_fmt", cpf,
-                "-s", f"{cw}x{ch}", "-r", str(args.fps),
-                "-i", "pipe:0", "-pix_fmt", "yuv420p",
-            ]
-            if use_nvenc:
-                chase_ffmpeg_input += [
-                    "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
-                    "-rc", "cbr", "-b:v", "4M", "-g", "1", "-bf", "0",
-                    "-delay", "0", "-zerolatency", "1",
+            if args.raw:
+                chase_ffplay_cmd = [
+                    "ffplay",
+                    "-f", "rawvideo",
+                    "-pixel_format", cpf,
+                    "-video_size", f"{cw}x{ch}",
+                    "-framerate", str(args.fps),
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-framedrop",
+                    "-sync", "video",
+                    "-window_title", f"Chase RAW {cw}x{ch}",
+                    "-",
                 ]
+                log.info("Starting chase camera ffplay (raw)")
+                chase_ffmpeg_proc = pm.spawn(
+                    chase_ffplay_cmd,
+                    stdin=chase_bridge_proc.stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                chase_ffmpeg_cmd = chase_ffplay_cmd
+                chase_viewer_url = "(raw ffplay window)"
             else:
-                chase_ffmpeg_input += [
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-tune", "zerolatency", "-g", "1",
+                chase_ffmpeg_input = [
+                    "ffmpeg", "-y",
+                    "-f", "rawvideo", "-pix_fmt", cpf,
+                    "-s", f"{cw}x{ch}", "-r", str(args.fps),
+                    "-i", "pipe:0", "-pix_fmt", "yuv420p",
                 ]
-            chase_ffmpeg_input += ["-flush_packets", "1"]
+                if use_nvenc:
+                    chase_ffmpeg_input += [
+                        "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
+                        "-rc", "cbr", "-b:v", "4M", "-g", "1", "-bf", "0",
+                        "-delay", "0", "-zerolatency", "1",
+                    ]
+                else:
+                    chase_ffmpeg_input += [
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-tune", "zerolatency", "-g", "1",
+                    ]
+                chase_ffmpeg_input += ["-flush_packets", "1"]
 
-            if output_mode == "udp":
-                chase_ffmpeg_output = [
-                    "-muxdelay", "0", "-muxpreload", "0",
-                    "-f", "mpegts", f"udp://127.0.0.1:{args.chase_port}?pkt_size=1316",
-                ]
-                chase_viewer_url = f"udp://@:{args.chase_port}"
-            elif output_mode == "tcp":
-                chase_ffmpeg_output = [
-                    "-muxdelay", "0", "-muxpreload", "0",
-                    "-f", "mpegts", f"tcp://0.0.0.0:{args.chase_port}?listen=1&tcp_nodelay=1",
-                ]
-                chase_viewer_url = f"tcp://<host>:{args.chase_port}"
-            elif output_mode == "rtsp":
-                chase_ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
-                chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
-            else:
-                chase_ffmpeg_output = ffmpeg_output  # file — same as FPV
-                chase_viewer_url = "(same as FPV)"
+                if output_mode == "udp":
+                    chase_ffmpeg_output = [
+                        "-muxdelay", "0", "-muxpreload", "0",
+                        "-f", "mpegts", f"udp://127.0.0.1:{args.chase_port}?pkt_size=1316",
+                    ]
+                    chase_viewer_url = f"udp://@:{args.chase_port}"
+                elif output_mode == "tcp":
+                    chase_ffmpeg_output = [
+                        "-muxdelay", "0", "-muxpreload", "0",
+                        "-f", "mpegts", f"tcp://0.0.0.0:{args.chase_port}?listen=1&tcp_nodelay=1",
+                    ]
+                    chase_viewer_url = f"tcp://<host>:{args.chase_port}"
+                elif output_mode == "rtsp":
+                    chase_ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
+                    chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
+                else:
+                    chase_ffmpeg_output = ffmpeg_output
+                    chase_viewer_url = "(same as FPV)"
 
-            chase_ffmpeg_cmd = chase_ffmpeg_input + chase_ffmpeg_output
-            log.info("Starting chase camera ffmpeg → %s", output_mode)
-            chase_ffmpeg_proc = pm.spawn(
-                chase_ffmpeg_cmd,
-                stdin=chase_bridge_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+                chase_ffmpeg_cmd = chase_ffmpeg_input + chase_ffmpeg_output
+                log.info("Starting chase camera ffmpeg → %s", output_mode)
+                chase_ffmpeg_proc = pm.spawn(
+                    chase_ffmpeg_cmd,
+                    stdin=chase_bridge_proc.stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
     # ── 10. Print connection info ──
     print()
@@ -646,9 +697,13 @@ def main():
     if chase_topic:
         print(f"  Chase topic  : {chase_topic}")
     print(f"  Resolution   : {width}x{height} @ {args.fps} fps")
+    if args.raw:
+        print(f"  Mode         : RAW (no ffmpeg, direct ffplay)")
     print()
-    low_lat = "-fflags nobuffer -flags low_delay -framedrop"
-    if output_mode == "udp":
+    low_lat = "-probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext"
+    if output_mode == "raw":
+        print("  FPV + Chase: displayed in ffplay windows directly (no encoding)")
+    elif output_mode == "udp":
         print(f"  FPV view:   ffplay {low_lat} udp://@:{args.port}")
         if chase_viewer_url:
             print(f"  Chase view: ffplay {low_lat} udp://@:{args.chase_port}")
