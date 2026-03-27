@@ -105,14 +105,24 @@ class ProcessManager:
 
     def shutdown(self):
         log.info("Shutting down %d processes …", len(self.procs))
+        # First pass: SIGTERM (graceful)
         for p in reversed(self.procs):
             if p.poll() is None:
                 p.terminate()
+        # Second pass: wait for exit, then SIGKILL if stuck
         for p in reversed(self.procs):
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait(timeout=2)
+        # Safety net: kill any orphaned simulation processes that escaped
+        # the process tree (e.g. Gazebo server threads, gz-transport nodes)
+        for pattern in ["gz sim", "ruby.*gz", "gz_image_bridge"]:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True, timeout=3,
+            )
 
 
 def wait_for_port(host, port, timeout=30):
