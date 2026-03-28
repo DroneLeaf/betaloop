@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shahed Drone Chase Camera Launcher — Gazebo + Camera → RTSP/TCP/UDP stream.
 
-Starts Gazebo with the rocket_drone_park world and streams the Shahed drone's
+Starts Gazebo with the shahed_chase_park world and streams the Shahed drone's
 chase camera feed.
 """
 
@@ -38,7 +38,7 @@ def _default_path(env_var, repo_relative, docker_absolute):
     return docker_absolute
 
 AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
-TARGET_WORLD = "rocket_drone_park.world"
+TARGET_WORLD = "shahed_chase_park.world"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
 TOPIC_MODEL_HINT_DEFAULT = "shahed_drone"
@@ -878,6 +878,12 @@ def _run_recording_mode(args, pm, chase_topic):
     success = _encode_pngs_to_mp4(frames_dir, args.record, args.fps, selected_frames=selected_frames)
     if success:
         log.info("Recording complete: %s", args.record)
+        try:
+            import shutil
+            shutil.rmtree(frames_dir)
+            log.info("Removed temporary frames directory: %s", frames_dir)
+        except OSError as e:
+            log.warning("Could not remove temporary frames directory %s: %s", frames_dir, e)
     else:
         log.error("Failed to encode MP4")
 
