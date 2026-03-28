@@ -124,6 +124,31 @@ def setup_gazebo_env():
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
 
+def cleanup_before_start():
+    """Clean up any existing processes from previous runs."""
+    log.info("Cleaning up from previous runs...")
+
+    cleanup_cmds = [
+        ("existing Gazebo processes", "pkill -9 -f 'gz sim' 2>/dev/null || true"),
+        ("existing ffmpeg processes", "pkill -9 ffmpeg 2>/dev/null || true"),
+        ("existing image bridge processes", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"),
+        ("existing Betaflight SITL processes", "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true"),
+        ("existing MSP Virtual Radio processes", "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true"),
+        ("existing mediamtx processes", "pkill -9 -f mediamtx 2>/dev/null || true"),
+        ("existing Xvfb processes", "pkill -9 Xvfb 2>/dev/null || true"),
+    ]
+
+    for label, cmd in cleanup_cmds:
+        try:
+            subprocess.run(["bash", "-c", cmd], capture_output=True, timeout=5)
+            log.info("Stopped %s", label)
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    log.info("Cleanup complete")
+
+
 def has_nvidia_gpu():
     """Check if an NVIDIA GPU is accessible inside this environment."""
     try:
@@ -257,6 +282,9 @@ def main():
     parser.add_argument("--raw", action="store_true",
                         help="Bypass ffmpeg: pipe raw frames directly to ffplay (latency test)")
     args = parser.parse_args()
+
+    # Clean up any existing processes before starting new ones.
+    cleanup_before_start()
 
     # Determine output mode
     if args.output:
