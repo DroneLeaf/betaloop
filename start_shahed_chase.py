@@ -271,17 +271,81 @@ def read_image_meta(proc, timeout=30):
     return None, None, None
 
 
-def _monitor_pose_and_stop_recording(jpeg_proc, return_threshold=1, confirmation_frames=1):
+def _latest_captured_frame_index(frames_dir):
+    """Return highest frame index from frame_XXXXXX.png files, or None if none exist."""
+    max_idx = None
+    for frame_path in glob.glob(os.path.join(frames_dir, "frame_*.png")):
+        name = os.path.basename(frame_path)
+        try:
+            idx = int(name.split("_")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        if max_idx is None or idx > max_idx:
+            max_idx = idx
+    return max_idx
+
+
+def _sorted_frame_paths(frames_dir):
+    frame_paths = glob.glob(os.path.join(frames_dir, "frame_*.png"))
+
+    def _frame_idx(path):
+        name = os.path.basename(path)
+        try:
+            return int(name.split("_")[1].split(".")[0])
+        except (IndexError, ValueError):
+            return float("inf")
+
+    return sorted(frame_paths, key=_frame_idx)
+
+
+def _select_frames_until_time(frames_dir, stop_time=None, trim_back_frames=0):
+    """Select frame paths up to stop_time (mtime <= stop_time), then trim back N frames."""
+    all_frames = _sorted_frame_paths(frames_dir)
+    if not all_frames:
+        return []
+
+    if stop_time is None:
+        selected = list(all_frames)
+    else:
+        selected = [p for p in all_frames if os.path.getmtime(p) <= stop_time]
+        if not selected:
+            # Fallback in case of coarse mtime timing edge case.
+            selected = [all_frames[0]]
+
+    trim_n = max(0, int(trim_back_frames or 0))
+    if trim_n > 0 and len(selected) > trim_n:
+        selected = selected[:-trim_n]
+
+    return selected
+
+
+def _frame_index_from_path(frame_path):
+    name = os.path.basename(frame_path)
+    try:
+        return int(name.split("_")[1].split(".")[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def _monitor_pose_and_stop_recording(
+    png_proc,
+    return_threshold=0.1,
+    confirmation_frames=1,
+    frames_dir=None,
+    stop_info=None,
+):
     """Monitors SHAHED DRONE geranium_link pose via /world/default/pose/info topic.
-    
+
     Recording starts immediately (as soon as first position received).
-    Enforces minimum 3 second recording duration before allowing stop detection.
-    Stops when drone returns to home within threshold.
-    
+    Stops INSTANTLY when drone returns to home within threshold,
+    but only after it first leaves the home zone.
+
     Parameters:
-      return_threshold: Distance in meters to detect return to home (default 0.6m)
-      confirmation_frames: Number of consecutive frames below threshold before stopping (default 1)
-    
+      return_threshold: Distance in meters to detect return to home (default 0.33m)
+      away_threshold: Computed as max(return_threshold * 1.5, return_threshold + 0.5)
+                      to prevent immediate false stop near takeoff.
+      confirmation_frames: Deprecated — termination is now instant (kept for API compatibility)
+
     Parses protobuf pose message format to extract geranium_link position (actual drone body).
     Format:
         pose {
@@ -293,21 +357,23 @@ def _monitor_pose_and_stop_recording(jpeg_proc, return_threshold=1, confirmation
           }
         }
     """
-    log.info("Pose monitor started - tracking SHAHED DRONE geranium_link")
-    log.info("  Recording starts immediately (frame received)")
-    log.info("  Minimum duration: 3 seconds before stop detection allowed")
-    log.info("  Return threshold: %.2fm (stops when within this distance)", return_threshold)
-    log.info("Listening to world pose topic: /world/default/pose/info")
-    
     home_pos = None
     message_count = 0
     pose_proc = None
-    close_frames = 0  # Counter for consecutive frames below threshold
     last_logged_dist = None
     recording_start_time = None  # Time when first position received (recording began)
-    
+    has_left_home_zone = False
+    away_threshold = max(return_threshold * 1.5, return_threshold + 0.5)
+
+    log.info("Pose monitor started - tracking SHAHED DRONE geranium_link")
+    log.info("  Recording starts immediately (frame received)")
+    log.info("  Leave-home threshold: %.2fm (must exceed once before return-stop)", away_threshold)
+    log.info("  Termination: INSTANT when drone returns within threshold")
+    log.info("  Return threshold: %.2fm (stops when within this distance)", return_threshold)
+    log.info("Listening to world pose topic: /world/default/pose/info")
+
     import re
-    
+
     try:
         # Subscribe to world pose info that broadcasts all entities
         pose_proc = subprocess.Popen(
@@ -317,19 +383,19 @@ def _monitor_pose_and_stop_recording(jpeg_proc, return_threshold=1, confirmation
             text=True,
             bufsize=1  # Line-buffered for real-time data
         )
-        
+
         buffer = []
-        
+
         for line in pose_proc.stdout:
             line = line.rstrip()  # Keep leading whitespace for structure
-            
+
             # Accumulate lines into buffer
             buffer.append(line)
-            
+
             # Check if we've hit the end of a pose block (closing brace at start of line)
             if line.strip() == "}":
                 full_text = "\n".join(buffer)
-                
+
                 # Check if this pose block is for geranium_link
                 if 'name: "geranium_link"' in full_text:
                     try:
@@ -337,60 +403,63 @@ def _monitor_pose_and_stop_recording(jpeg_proc, return_threshold=1, confirmation
                         x_match = re.search(r'x:\s*([-\d.eE+]+)', full_text)
                         y_match = re.search(r'y:\s*([-\d.eE+]+)', full_text)
                         z_match = re.search(r'z:\s*([-\d.eE+]+)', full_text)
-                        
+
                         if x_match and y_match and z_match:
                             x = float(x_match.group(1))
                             y = float(y_match.group(1))
                             z = float(z_match.group(1))
-                            
+
                             message_count += 1
                             current_pos = (x, y, z)
-                            
+
                             if home_pos is None:
                                 # First pose: set home position and start time, recording active now
                                 home_pos = current_pos
                                 recording_start_time = time.time()
-                                log.info("🏠 HOME POSITION SET: (%.2f, %.2f, %.2f) — RECORDING STARTED", *home_pos)
+                                log.info("HOME POSITION SET: (%.2f, %.2f, %.2f) - RECORDING STARTED", *home_pos)
                             else:
                                 dist = math.sqrt((x-home_pos[0])**2 + (y-home_pos[1])**2 + (z-home_pos[2])**2)
                                 elapsed = time.time() - recording_start_time
-                                
+
                                 # Log distance changes (only when change is significant)
                                 if last_logged_dist is None or abs(dist - last_logged_dist) >= 0.05:
-                                    log.info("Distance: %.3fm (%.1fs recording, close_frames: %d/%d)", dist, elapsed, close_frames, confirmation_frames)
+                                    log.info("Distance: %.3fm (%.1fs recording)", dist, elapsed)
                                     last_logged_dist = dist
-                                
-                                # Only check for return after 3 seconds of recording
-                                if elapsed >= 3.0:
-                                    if dist < return_threshold:
-                                        close_frames += 1
-                                        if close_frames >= confirmation_frames:
-                                            log.info("✈️  DRONE RETURNED (%.3fm from home, %.1fs recording). Stopping.", dist, elapsed)
-                                            jpeg_proc.terminate()
-                                            try:
-                                                jpeg_proc.wait(timeout=5)
-                                            except subprocess.TimeoutExpired:
-                                                jpeg_proc.kill()
-                                            return
-                                    else:
-                                        # Reset counter if drone moves away
-                                        if close_frames > 0:
-                                            log.info("Drone moved away (%.3fm) — confirming return cancelled", dist)
-                                        close_frames = 0
-                        
+
+                                if not has_left_home_zone and dist > away_threshold:
+                                    has_left_home_zone = True
+                                    log.info("Drone left home zone at %.3fm (return-stop armed)", dist)
+
+                                # Check for return - INSTANT termination only after leaving home zone once
+                                if has_left_home_zone and dist <= return_threshold:
+                                    stop_frame = _latest_captured_frame_index(frames_dir) if frames_dir else None
+                                    if stop_info is not None:
+                                        stop_info["triggered"] = True
+                                        stop_info["stop_frame"] = stop_frame
+                                        stop_info["stop_time"] = time.time()
+                                    log.info("DRONE RETURNED (%.3fm from home, %.1fs recording). STOPPING INSTANTLY.", dist, elapsed)
+                                    if stop_frame is not None:
+                                        log.info("Marked stop frame index: %d", stop_frame)
+                                    png_proc.terminate()
+                                    try:
+                                        png_proc.wait(timeout=5)
+                                    except subprocess.TimeoutExpired:
+                                        png_proc.kill()
+                                    return
+
                     except (ValueError, AttributeError) as e:
                         log.debug("Parse error: %s", e)
-                
+
                 # Clear buffer after processing pose block
                 buffer = []
-            
-            # Safety: Check if JPEG process died
-            if jpeg_proc.poll() is not None:
-                log.info("JPEG process exited, pose monitor ending")
+
+            # Safety: Check if PNG process died
+            if png_proc.poll() is not None:
+                log.info("PNG process exited, pose monitor ending")
                 return
-        
+
         log.warning("Pose stream ended (received %d messages)", message_count)
-            
+
     except Exception as e:
         log.error("Pose monitor error: %s", e, exc_info=True)
     finally:
@@ -403,14 +472,36 @@ def _monitor_pose_and_stop_recording(jpeg_proc, return_threshold=1, confirmation
         log.info("Pose monitor stopped (received %d messages total)", message_count)
 
 
-def _encode_jpegs_to_mp4(frames_dir, output_file, fps=30):
-    """Convert JPEG frames to MP4 file."""
-    log.info("Encoding %d JPEG frames to MP4: %s", len(os.listdir(frames_dir)), output_file)
+def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
+    """Convert PNG frames to MP4 file, optionally using an explicit selected frame list."""
+    log.info("Encoding %d PNG frames to MP4: %s", len(os.listdir(frames_dir)), output_file)
     try:
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(fps),
-            "-i", os.path.join(frames_dir, "frame_%06d.jpg"),
+        if selected_frames:
+            stop_frame = _frame_index_from_path(selected_frames[-1])
+            if stop_frame is not None and stop_frame > 0:
+                log.info("Encoding selected frame window via image sequence: 1..%d (%d selected)", stop_frame, len(selected_frames))
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(fps),
+                    "-start_number", "1",
+                    "-i", os.path.join(frames_dir, "frame_%06d.png"),
+                    "-frames:v", str(stop_frame),
+                ]
+            else:
+                log.warning("Could not parse selected stop frame; falling back to full sequence encode")
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(fps),
+                    "-i", os.path.join(frames_dir, "frame_%06d.png"),
+                ]
+        else:
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-framerate", str(fps),
+                "-i", os.path.join(frames_dir, "frame_%06d.png"),
+            ]
+
+        ffmpeg_cmd += [
             "-pix_fmt", "yuv420p",
             "-c:v", "libx264", "-preset", "fast",
             "-crf", "20",
@@ -452,6 +543,8 @@ def main():
                         help="Prefer topics that contain this model path segment")
     parser.add_argument("--record", default=None,
                         help="Optional: Output MP4 file path. Automatically stops when drone returns home.")
+    parser.add_argument("--trim-back-frames", type=int, default=3,
+                        help="Trim this many frames before stop trigger when encoding (default: 3)")
     args = parser.parse_args()
 
     # Clean up any existing processes and temporary files before starting
@@ -573,9 +666,9 @@ def main():
             log.info("Found chase camera topic: %s", chase_topic)
 
 
-    # ── RECORDING MODE (jpeg capture) ──
+    # ── RECORDING MODE (png capture) ──
     if args.record:
-        log.info("Recording mode: jpeg capture pipeline")
+        log.info("Recording mode: png capture pipeline")
         
         # Create frames directory
         record_dir = os.path.dirname(os.path.abspath(args.record))
@@ -583,10 +676,10 @@ def main():
         os.makedirs(frames_dir, exist_ok=True)
         log.info("Frames will be saved to: %s", frames_dir)
         
-        # Start image bridge for jpeg capture only
-        log.info("Starting image bridge for jpeg capture")
+        # Start image bridge for png capture only
+        log.info("Starting image bridge for png capture")
         try:
-            jpeg_bridge_proc = pm.spawn(
+            png_bridge_proc = pm.spawn(
                 [IMAGE_BRIDGE, chase_topic],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -596,15 +689,15 @@ def main():
             pm.shutdown()
             sys.exit(1)
             
-        jpeg_flags = fcntl.fcntl(jpeg_bridge_proc.stderr, fcntl.F_GETFL)
-        fcntl.fcntl(jpeg_bridge_proc.stderr, fcntl.F_SETFL, jpeg_flags | os.O_NONBLOCK)
+        png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
+        fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
         
         log.info("Waiting for first frame metadata …")
-        cw, ch, cpf = read_image_meta(jpeg_bridge_proc, timeout=30)
+        cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
         if cw is None:
             # Try to read stderr for more details on the error
             try:
-                _, stderr = jpeg_bridge_proc.communicate(timeout=2)
+                _, stderr = png_bridge_proc.communicate(timeout=2)
                 log.error("Image bridge stderr: %s", stderr.decode() if stderr else "No error details")
             except:
                 pass
@@ -616,11 +709,11 @@ def main():
             log.info("✓ Camera metadata received: %dx%d %s", cw, ch, cpf)
         
         # Verify image bridge is still alive
-        if jpeg_bridge_proc.poll() is not None:
-            returncode = jpeg_bridge_proc.returncode
+        if png_bridge_proc.poll() is not None:
+            returncode = png_bridge_proc.returncode
             log.error("✗ Image bridge crashed with return code %d", returncode)
             try:
-                stderr_data = jpeg_bridge_proc.stderr.read()
+                stderr_data = png_bridge_proc.stderr.read()
                 if stderr_data:
                     log.error("Bridge stderr: %s", stderr_data.decode('utf-8', errors='ignore'))
             except:
@@ -628,19 +721,19 @@ def main():
         else:
             log.info("✓ Image bridge is running")
         
-        # Start jpeg capture using ffmpeg
-        jpeg_cmd = [
+        # Start png capture using ffmpeg
+        png_cmd = [
             "ffmpeg", "-y",
             "-f", "rawvideo", "-pix_fmt", cpf,
             "-s", f"{cw}x{ch}", "-r", str(args.fps),
             "-i", "pipe:0",
-            "-f", "image2", "-q:v", "5",
-            os.path.join(frames_dir, "frame_%06d.jpg")
+            "-f", "image2", "-compression_level", "9",
+            os.path.join(frames_dir, "frame_%06d.png")
         ]
-        log.info("Starting JPEG frame capture: %s/frame_*.jpg (quality 5)", frames_dir)
-        jpeg_capture_proc = pm.spawn(
-            jpeg_cmd,
-            stdin=jpeg_bridge_proc.stdout,
+        log.info("Starting PNG frame capture: %s/frame_*.png (compression 9)", frames_dir)
+        png_capture_proc = pm.spawn(
+            png_cmd,
+            stdin=png_bridge_proc.stdout,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -649,22 +742,27 @@ def main():
         time.sleep(2)
         
         # Check if ffmpeg process is alive and frames are being created
-        if jpeg_capture_proc.poll() is not None:
-            log.error("✗ JPEG capture process died immediately")
+        if png_capture_proc.poll() is not None:
+            log.error("✗ PNG capture process died immediately")
             pm.shutdown()
             sys.exit(1)
         else:
-            log.info("✓ JPEG capture process started")
+            log.info("✓ PNG capture process started")
         
         # Check if any frames have been created yet
-        initial_frames = len([f for f in os.listdir(frames_dir) if f.endswith(".jpg")])
+        initial_frames = len([f for f in os.listdir(frames_dir) if f.endswith(".png")])
         log.info("Initial frame count: %d frames in %s", initial_frames, frames_dir)
         
-        # Wait for drone to return home, then stop jpeg capture
+        # Wait for drone to return home, then stop png capture
         log.info("Recording in progress (waiting for drone to return)...")
+        stop_info = {}
         monitor_thread = threading.Thread(
             target=_monitor_pose_and_stop_recording,
-            args=(jpeg_capture_proc,),  # Uses defaults: return_threshold=0.6m, confirmation_frames=1
+            kwargs={
+                "png_proc": png_capture_proc,
+                "frames_dir": frames_dir,
+                "stop_info": stop_info,
+            },
             daemon=False
         )
         monitor_thread.start()
@@ -674,7 +772,7 @@ def main():
         last_frame_count = 0
         while monitor_thread.is_alive():
             time.sleep(3)
-            frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".jpg")]
+            frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".png")]
             current_count = len(frame_files)
             if current_count > last_frame_count:
                 elapsed = time.time() - start_recording_time
@@ -686,15 +784,15 @@ def main():
         
         monitor_thread.join()
         
-        # Wait for jpeg process to finish
+        # Wait for png process to finish
         try:
-            jpeg_capture_proc.wait(timeout=10)
+            png_capture_proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            jpeg_capture_proc.kill()
+            png_capture_proc.kill()
         
         # Count captured frames and encode to MP4
-        frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".jpg")])
-        log.info("Total captured: %d JPEG frames", len(frame_files))
+        frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".png")])
+        log.info("Total captured: %d PNG frames", len(frame_files))
         
         if len(frame_files) == 0:
             log.error("✗ No frames were captured! Check:")
@@ -705,8 +803,26 @@ def main():
             sys.exit(1)
         
         if frame_files:
-            log.info("Converting jpeg frames to MP4: %s", args.record)
-            success = _encode_jpegs_to_mp4(frames_dir, args.record, args.fps)
+            log.info("Converting PNG frames to MP4: %s", args.record)
+            selected_frames = None
+            if stop_info.get("triggered"):
+                stop_time = stop_info.get("stop_time")
+                selected_frames = _select_frames_until_time(
+                    frames_dir,
+                    stop_time=stop_time,
+                    trim_back_frames=args.trim_back_frames,
+                )
+                if selected_frames:
+                    first_idx = os.path.basename(selected_frames[0])
+                    last_idx = os.path.basename(selected_frames[-1])
+                    log.info(
+                        "Encoding by stop_time with trim-back=%d: %d frames (%s .. %s)",
+                        args.trim_back_frames,
+                        len(selected_frames),
+                        first_idx,
+                        last_idx,
+                    )
+            success = _encode_pngs_to_mp4(frames_dir, args.record, args.fps, selected_frames=selected_frames)
             if success:
                 log.info("Recording complete: %s", args.record)
             else:
@@ -736,16 +852,16 @@ def main():
     
     # ── 5. Chase camera pipeline ──
     log.info("Starting chase camera bridge")
-    chase_bridge_proc = pm.spawn(
+    png_bridge_proc = pm.spawn(
         [IMAGE_BRIDGE, chase_topic],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    chase_flags = fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_GETFL)
-    fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_SETFL, chase_flags | os.O_NONBLOCK)
+    png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
+    fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
 
     log.info("Waiting for first chase camera frame …")
-    cw, ch, cpf = read_image_meta(chase_bridge_proc, timeout=30)
+    cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
     if cw is None:
         log.warning("No chase camera metadata — using fallback defaults (1920x1080 rgb24)")
         log.warning("Camera bridge may not be functioning correctly")
@@ -754,15 +870,15 @@ def main():
         log.info("✓ Camera metadata received: %dx%d %s", cw, ch, cpf)
     
     # Verify chase bridge is still alive
-    if chase_bridge_proc.poll() is not None:
-        log.error("✗ Chase camera bridge crashed with return code %d", chase_bridge_proc.returncode)
+    if png_bridge_proc.poll() is not None:
+        log.error("✗ Chase camera bridge crashed with return code %d", png_bridge_proc.returncode)
         pm.shutdown()
         sys.exit(1)
     else:
         log.info("✓ Chase camera bridge is running")
 
         if args.raw:
-            chase_ffplay_cmd = [
+            png_ffplay_cmd = [
                 "ffplay",
                 "-f", "rawvideo",
                 "-pixel_format", cpf,
@@ -776,17 +892,17 @@ def main():
                 "-",
             ]
             log.info("Starting chase camera ffplay (raw)")
-            chase_ffmpeg_proc = pm.spawn(
-                chase_ffplay_cmd,
-                stdin=chase_bridge_proc.stdout,
+            png_ffmpeg_proc = pm.spawn(
+                png_ffplay_cmd,
+                stdin=png_bridge_proc.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            chase_ffmpeg_cmd = chase_ffplay_cmd
+            png_ffmpeg_cmd = png_ffplay_cmd
             chase_viewer_url = "(raw ffplay window)"
         else:
             # Build base ffmpeg input (rawvideo -> yuv420p)
-            chase_ffmpeg_input = [
+            png_ffmpeg_input = [
                 "ffmpeg", "-y",
                 "-f", "rawvideo", "-pix_fmt", cpf,
                 "-s", f"{cw}x{ch}", "-r", str(args.fps),
@@ -844,7 +960,7 @@ def main():
                 chase_viewer_url = output_mode
 
             # Build complete ffmpeg command
-            chase_ffmpeg_cmd = chase_ffmpeg_input + streaming_opts
+            png_ffmpeg_cmd = png_ffmpeg_input + streaming_opts
 
             # Add recording output if specified
             if args.record:
@@ -854,18 +970,18 @@ def main():
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-f", "mp4", args.record
                 ]
-                chase_ffmpeg_cmd += record_opts
+                png_ffmpeg_cmd += record_opts
                 log.info("Secondary output: Recording to %s", args.record)
             
             log.info("Starting Chase camera FFmpeg pipeline (input: %dx%d %s)", cw, ch, cpf)
-            chase_ffmpeg_proc = pm.spawn(
-                chase_ffmpeg_cmd,
-                stdin=chase_bridge_proc.stdout,
+            png_ffmpeg_proc = pm.spawn(
+                png_ffmpeg_cmd,
+                stdin=png_bridge_proc.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             
-            if chase_ffmpeg_proc.poll() is None:
+            if png_ffmpeg_proc.poll() is None:
                 log.info("✓ FFmpeg streaming process started")
             else:
                 log.error("✗ FFmpeg process failed to start")
@@ -874,7 +990,7 @@ def main():
                 log.info("Starting pose monitor for auto-stop on return to home")
                 monitor_thread = threading.Thread(
                     target=_monitor_pose_and_stop_recording,
-                    args=(chase_ffmpeg_proc, 0.6, 1),  # return_threshold=0.6m, confirmation_frames=1
+                    args=(png_ffmpeg_proc, 0.6, 1),  # return_threshold=0.6m, confirmation_frames=1
                     daemon=False
                 )
                 monitor_thread.start()
@@ -933,31 +1049,31 @@ def main():
             # Periodic health check logging
             now = time.time()
             if now - last_health_check >= health_check_interval:
-                if chase_ffmpeg_proc and chase_ffmpeg_proc.poll() is None:
-                    log.debug("✓ Chase FFmpeg process alive")
-                if chase_bridge_proc and chase_bridge_proc.poll() is None:
+                if png_ffmpeg_proc and png_ffmpeg_proc.poll() is None:
+                    log.debug("✓ PNG FFmpeg process alive")
+                if png_bridge_proc and png_bridge_proc.poll() is None:
                     log.debug("✓ Camera bridge process alive")
                 last_health_check = now
             
             # Auto-restart chase camera ffmpeg
-            if chase_ffmpeg_proc and chase_ffmpeg_cmd:
-                if chase_bridge_proc and chase_bridge_proc.poll() is not None:
-                    log.error("✗ Chase camera bridge exited with code %d", chase_bridge_proc.returncode)
+            if png_ffmpeg_proc and png_ffmpeg_cmd:
+                if png_bridge_proc and png_bridge_proc.poll() is not None:
+                    log.error("✗ PNG camera bridge exited with code %d", png_bridge_proc.returncode)
                     break
-                elif chase_ffmpeg_proc.poll() is not None:
-                    rc = chase_ffmpeg_proc.returncode
-                    log.warning("⚠ Chase FFmpeg exited (code %d) — attempting restart …", rc)
-                    if chase_ffmpeg_proc in pm.procs:
-                        pm.procs.remove(chase_ffmpeg_proc)
+                elif png_ffmpeg_proc.poll() is not None:
+                    rc = png_ffmpeg_proc.returncode
+                    log.warning("⚠ PNG FFmpeg exited (code %d) — attempting restart …", rc)
+                    if png_ffmpeg_proc in pm.procs:
+                        pm.procs.remove(png_ffmpeg_proc)
                     time.sleep(1)
-                    log.info("Restarting Chase FFmpeg pipeline")
-                    chase_ffmpeg_proc = pm.spawn(
-                        chase_ffmpeg_cmd,
-                        stdin=chase_bridge_proc.stdout,
+                    log.info("Restarting PNG FFmpeg pipeline")
+                    png_ffmpeg_proc = pm.spawn(
+                        png_ffmpeg_cmd,
+                        stdin=png_bridge_proc.stdout,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    if chase_ffmpeg_proc.poll() is None:
+                    if png_ffmpeg_proc.poll() is None:
                         log.info("✓ FFmpeg restarted successfully")
 
             time.sleep(2)
