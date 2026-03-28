@@ -42,6 +42,19 @@ TARGET_WORLD = "rocket_drone_park.world"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
 TOPIC_MODEL_HINT_DEFAULT = "shahed_drone"
+MAX_STREAM_RESTARTS = 5
+
+_LAST_LOG_TIMES = {}
+
+
+def _log_rate_limited(key, interval_s, level, message, *args):
+    """Log recurring status lines no more than once per interval."""
+    now = time.time()
+    last = _LAST_LOG_TIMES.get(key, 0.0)
+    if now - last < interval_s:
+        return
+    _LAST_LOG_TIMES[key] = now
+    getattr(log, level)(message, *args)
 
 def _is_container():
     return os.path.exists("/.dockerenv") or os.environ.get("container") == "docker"
@@ -125,8 +138,8 @@ def wait_for_gazebo_ready(timeout=90):
                         if "shahed_drone" in model_result.stdout:
                             log.info("Gazebo is ready! Models loaded and responsive (%d attempts)", attempt)
                             return True
-                    except:
-                        pass  # Model check failed, keep waiting
+                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                        log.debug("Model list check failed during startup: %s", e)
                     
                 elapsed = time.time() - start_time
                 if elapsed - (last_log_time - start_time) >= 10:  # Log every 10 seconds
@@ -138,8 +151,8 @@ def wait_for_gazebo_ready(timeout=90):
             if elapsed - (last_log_time - start_time) >= 10:
                 log.info("Gazebo still initializing (timeout in subprocess, %.1fs elapsed)", elapsed)
                 last_log_time = time.time()
-        except Exception as e:
-            pass
+        except OSError as e:
+            log.debug("Gazebo readiness probe failed: %s", e)
         
         time.sleep(1)  # Increased from 0.5 to 1 second
     
@@ -148,45 +161,27 @@ def wait_for_gazebo_ready(timeout=90):
 
 
 def cleanup_before_start():
-    """Clean up any existing processes and temporary files."""
+    """Clean up any existing processes from previous runs."""
     log.info("Cleaning up from previous runs...")
-    
-    # Kill any existing gz sim processes (parent=1 means don't inherit from this script)
-    try:
-        subprocess.run(["bash", "-c", "pkill -9 -f 'gz sim' 2>/dev/null || true"], capture_output=True, timeout=5)
-        log.info("Stopped any existing Gazebo processes")
-    except:
-        pass
-    
-    time.sleep(0.5)
-    
-    # Kill any existing ffmpeg image capture processes
-    try:
-        subprocess.run(["bash", "-c", "pkill -9 ffmpeg 2>/dev/null || true"], capture_output=True, timeout=5)
-        log.info("Stopped any existing ffmpeg processes")
-    except:
-        pass
-    
-    time.sleep(0.5)
-    
-    # Kill any existing gz_image_bridge processes
-    try:
-        subprocess.run(["bash", "-c", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"], capture_output=True, timeout=5)
-        log.info("Stopped any existing image bridge processes")
-    except:
-        pass
-    
-    # Remove frames_temp directory if it exists
-    try:
-        frames_dir = os.path.expanduser("~/frames_temp")
-        if os.path.exists(frames_dir):
-            import shutil
-            shutil.rmtree(frames_dir)
-            log.info("Cleaned up existing frames directory: %s", frames_dir)
-    except Exception as e:
-        log.warning("Could not clean frames directory: %s", e)
-    
-    time.sleep(0.5)  # Give processes time to fully terminate
+
+    cleanup_cmds = [
+        ("existing Gazebo processes", "pkill -9 -f 'gz sim' 2>/dev/null || true"),
+        ("existing ffmpeg processes", "pkill -9 ffmpeg 2>/dev/null || true"),
+        ("existing image bridge processes", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"),
+        ("existing Betaflight SITL processes", "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true"),
+        ("existing MSP Virtual Radio processes", "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true"),
+        ("existing mediamtx processes", "pkill -9 -f mediamtx 2>/dev/null || true"),
+        ("existing Xvfb processes", "pkill -9 Xvfb 2>/dev/null || true"),
+    ]
+
+    for label, cmd in cleanup_cmds:
+        try:
+            subprocess.run(["bash", "-c", cmd], capture_output=True, timeout=5)
+            log.debug("Stopped %s", label)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.debug("Cleanup command failed for %s: %s", label, e)
+        time.sleep(0.2)
+
     log.info("Cleanup complete")
 
 
@@ -365,12 +360,8 @@ def _monitor_pose_and_stop_recording(
     has_left_home_zone = False
     away_threshold = max(return_threshold * 1.5, return_threshold + 0.5)
 
-    log.info("Pose monitor started - tracking SHAHED DRONE geranium_link")
-    log.info("  Recording starts immediately (frame received)")
-    log.info("  Leave-home threshold: %.2fm (must exceed once before return-stop)", away_threshold)
-    log.info("  Termination: INSTANT when drone returns within threshold")
-    log.info("  Return threshold: %.2fm (stops when within this distance)", return_threshold)
-    log.info("Listening to world pose topic: /world/default/pose/info")
+    log.info("Pose monitor started for geranium_link")
+    log.info("Return threshold=%.2fm, arm threshold=%.2fm", return_threshold, away_threshold)
 
     import re
 
@@ -422,8 +413,15 @@ def _monitor_pose_and_stop_recording(
                                 elapsed = time.time() - recording_start_time
 
                                 # Log distance changes (only when change is significant)
-                                if last_logged_dist is None or abs(dist - last_logged_dist) >= 0.05:
-                                    log.info("Distance: %.3fm (%.1fs recording)", dist, elapsed)
+                                if last_logged_dist is None or abs(dist - last_logged_dist) >= 0.10:
+                                    _log_rate_limited(
+                                        "pose_distance",
+                                        3,
+                                        "info",
+                                        "Distance from home: %.3fm (%.1fs)",
+                                        dist,
+                                        elapsed,
+                                    )
                                     last_logged_dist = dist
 
                                 if not has_left_home_zone and dist > away_threshold:
@@ -437,9 +435,9 @@ def _monitor_pose_and_stop_recording(
                                         stop_info["triggered"] = True
                                         stop_info["stop_frame"] = stop_frame
                                         stop_info["stop_time"] = time.time()
-                                    log.info("DRONE RETURNED (%.3fm from home, %.1fs recording). STOPPING INSTANTLY.", dist, elapsed)
+                                    log.info("Drone returned to home zone (%.3fm, %.1fs), stopping capture", dist, elapsed)
                                     if stop_frame is not None:
-                                        log.info("Marked stop frame index: %d", stop_frame)
+                                        log.debug("Marked stop frame index: %d", stop_frame)
                                     png_proc.terminate()
                                     try:
                                         png_proc.wait(timeout=5)
@@ -467,9 +465,9 @@ def _monitor_pose_and_stop_recording(
             pose_proc.terminate()
             try:
                 pose_proc.wait(timeout=2)
-            except:
+            except subprocess.TimeoutExpired:
                 pose_proc.kill()
-        log.info("Pose monitor stopped (received %d messages total)", message_count)
+        log.info("Pose monitor stopped (messages=%d)", message_count)
 
 
 def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
@@ -521,7 +519,7 @@ def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="Shahed Chase Camera Streaming Launcher")
     parser.add_argument("--world", default=TARGET_WORLD,
                         help=f"World SDF file (default: {TARGET_WORLD})")
@@ -545,38 +543,26 @@ def main():
                         help="Optional: Output MP4 file path. Automatically stops when drone returns home.")
     parser.add_argument("--trim-back-frames", type=int, default=3,
                         help="Trim this many frames before stop trigger when encoding (default: 3)")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Clean up any existing processes and temporary files before starting
-    cleanup_before_start()
 
-    # Determine output mode
+def _resolve_output_mode(args):
     if args.output:
-        output_mode = args.output
-    elif args.rtsp:
-        output_mode = "rtsp"
-    else:
-        output_mode = "udp"
+        return args.output
+    if args.rtsp:
+        return "rtsp"
+    return "udp"
 
-    pm = ProcessManager()
 
-    def on_signal(sig, frame):
-        pm.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, on_signal)
-    signal.signal(signal.SIGTERM, on_signal)
-
-    # ── 1. Environment ──
+def _configure_runtime(args, pm):
     log.info("Setting up Gazebo environment")
     setup_gazebo_env()
 
-    # ── 1b. GPU detection & rendering setup ──
     gpu_available = has_nvidia_gpu()
     in_container = _is_container()
 
     if gpu_available:
-        log.info("NVIDIA GPU detected — using GPU-accelerated rendering")
+        log.info("NVIDIA GPU detected, using GPU rendering")
         os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
         nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
         if os.path.isfile(nvidia_icd):
@@ -585,18 +571,17 @@ def main():
             os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
             _fix_dri_permissions()
     else:
-        log.info("No GPU detected — using software rendering (llvmpipe)")
+        log.info("No GPU detected, using software rendering")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
-    # ── 1c. Display setup ──
     if args.gazebo:
         if not os.environ.get("DISPLAY"):
-            log.error("No DISPLAY set — the Gazebo GUI needs a display.")
+            log.error("No DISPLAY set, Gazebo GUI needs a display")
             sys.exit(1)
         os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
         log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
     elif not in_container and os.environ.get("DISPLAY"):
-        log.info("Using native display %s (low-latency host mode)", os.environ["DISPLAY"])
+        log.info("Using native display %s", os.environ["DISPLAY"])
     else:
         for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:
             try:
@@ -613,245 +598,300 @@ def main():
         )
         time.sleep(1)
         if xvfb.poll() is not None:
-            log.error("Xvfb failed to start — camera rendering requires a display")
+            log.error("Xvfb failed to start, camera rendering requires a display")
             sys.exit(1)
         os.environ["DISPLAY"] = ":99"
 
-    # ── 2. RTSP server (optional) ──
-    if output_mode == "rtsp" and not args.record:
-        mediamtx = "/usr/local/bin/mediamtx"
-        if os.path.isfile(mediamtx):
-            log.info("Starting mediamtx RTSP server")
-            pm.spawn([mediamtx], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(2)
+    return gpu_available
 
-    # ── 3. Gazebo ──
+
+def _start_optional_rtsp_server(output_mode, args, pm):
+    if output_mode != "rtsp" or args.record:
+        return
+    mediamtx = "/usr/local/bin/mediamtx"
+    if os.path.isfile(mediamtx):
+        log.info("Starting mediamtx RTSP server")
+        pm.spawn([mediamtx], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+
+
+def _start_gazebo(args, pm):
     world_path = args.world
     if not os.path.isabs(world_path):
         world_path = os.path.join(AEROLOOP_HOME, "worlds", world_path)
 
     gz_args = ["gz", "sim"]
     if not args.gazebo:
-        gz_args.append("-s")  # headless by default
+        gz_args.append("-s")
     gz_args.extend(["-r", "-v", "3", world_path])
 
-    log.info("Starting Gazebo%s: %s", " (GUI)" if args.gazebo else " (headless)", os.path.basename(world_path))
+    log.info("Starting Gazebo: %s", os.path.basename(world_path))
     pm.spawn(gz_args)
-    
-    # Wait for Gazebo to be fully initialized and responsive
     if not wait_for_gazebo_ready(timeout=90):
-        log.error("Gazebo failed to initialize properly")
+        log.error("Gazebo failed to initialize")
         pm.shutdown()
         sys.exit(1)
 
-    # ── 4. Discover camera topic ──
+
+def _resolve_chase_topic(args, pm):
     if args.chase_topic:
-        chase_topic = args.chase_topic
-        log.info("Using explicit chase camera topic: %s", chase_topic)
-    else:
-        log.info("Discovering chase camera image topic …")
-        chase_candidates = list_camera_topics(name_hint="chase_cam")
-        if chase_candidates:
-            log.info("Chase candidates: %s", ", ".join(chase_candidates))
-        chase_topic = discover_camera_topic(
-            name_hint="chase_cam",
-            timeout=30,
-            model_hint=args.topic_model_hint,
-        )
-        if not chase_topic:
-            log.error("Chase camera topic not found.")
-            pm.shutdown()
-            sys.exit(1)
-        else:
-            log.info("Found chase camera topic: %s", chase_topic)
+        log.info("Using explicit chase camera topic: %s", args.chase_topic)
+        return args.chase_topic
 
-
-    # ── RECORDING MODE (png capture) ──
-    if args.record:
-        log.info("Recording mode: png capture pipeline")
-        
-        # Create frames directory
-        record_dir = os.path.dirname(os.path.abspath(args.record))
-        frames_dir = os.path.join(record_dir, "frames_temp")
-        os.makedirs(frames_dir, exist_ok=True)
-        log.info("Frames will be saved to: %s", frames_dir)
-        
-        # Start image bridge for png capture only
-        log.info("Starting image bridge for png capture")
-        try:
-            png_bridge_proc = pm.spawn(
-                [IMAGE_BRIDGE, chase_topic],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except Exception as e:
-            log.error("Failed to start image bridge: %s", e)
-            pm.shutdown()
-            sys.exit(1)
-            
-        png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
-        fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
-        
-        log.info("Waiting for first frame metadata …")
-        cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
-        if cw is None:
-            # Try to read stderr for more details on the error
-            try:
-                _, stderr = png_bridge_proc.communicate(timeout=2)
-                log.error("Image bridge stderr: %s", stderr.decode() if stderr else "No error details")
-            except:
-                pass
-            log.warning("No image metadata from bridge. Falling back to defaults (1920x1080 rgb24)")
-            log.warning("Image bridge may not be running correctly (missing GStreamer plugins?)")
-            # Fallback to standard camera defaults
-            cw, ch, cpf = 1920, 1080, "rgb24"
-        else:
-            log.info("✓ Camera metadata received: %dx%d %s", cw, ch, cpf)
-        
-        # Verify image bridge is still alive
-        if png_bridge_proc.poll() is not None:
-            returncode = png_bridge_proc.returncode
-            log.error("✗ Image bridge crashed with return code %d", returncode)
-            try:
-                stderr_data = png_bridge_proc.stderr.read()
-                if stderr_data:
-                    log.error("Bridge stderr: %s", stderr_data.decode('utf-8', errors='ignore'))
-            except:
-                pass
-        else:
-            log.info("✓ Image bridge is running")
-        
-        # Start png capture using ffmpeg
-        png_cmd = [
-            "ffmpeg", "-y",
-            "-f", "rawvideo", "-pix_fmt", cpf,
-            "-s", f"{cw}x{ch}", "-r", str(args.fps),
-            "-i", "pipe:0",
-            "-f", "image2", "-compression_level", "9",
-            os.path.join(frames_dir, "frame_%06d.png")
-        ]
-        log.info("Starting PNG frame capture: %s/frame_*.png (compression 9)", frames_dir)
-        png_capture_proc = pm.spawn(
-            png_cmd,
-            stdin=png_bridge_proc.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        
-        # Give it a moment to start capturing
-        time.sleep(2)
-        
-        # Check if ffmpeg process is alive and frames are being created
-        if png_capture_proc.poll() is not None:
-            log.error("✗ PNG capture process died immediately")
-            pm.shutdown()
-            sys.exit(1)
-        else:
-            log.info("✓ PNG capture process started")
-        
-        # Check if any frames have been created yet
-        initial_frames = len([f for f in os.listdir(frames_dir) if f.endswith(".png")])
-        log.info("Initial frame count: %d frames in %s", initial_frames, frames_dir)
-        
-        # Wait for drone to return home, then stop png capture
-        log.info("Recording in progress (waiting for drone to return)...")
-        stop_info = {}
-        monitor_thread = threading.Thread(
-            target=_monitor_pose_and_stop_recording,
-            kwargs={
-                "png_proc": png_capture_proc,
-                "frames_dir": frames_dir,
-                "stop_info": stop_info,
-            },
-            daemon=False
-        )
-        monitor_thread.start()
-        
-        # Monitor frame count in background during recording
-        start_recording_time = time.time()
-        last_frame_count = 0
-        while monitor_thread.is_alive():
-            time.sleep(3)
-            frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".png")]
-            current_count = len(frame_files)
-            if current_count > last_frame_count:
-                elapsed = time.time() - start_recording_time
-                fps = current_count / elapsed if elapsed > 0 else 0
-                log.info("Recording: %d frames (%d new, %.1f fps actual)", current_count, current_count - last_frame_count, fps)
-                last_frame_count = current_count
-            elif last_frame_count > 0:
-                log.warning("⚠ No new frames captured in last 3 seconds (stuck at %d)", current_count)
-        
-        monitor_thread.join()
-        
-        # Wait for png process to finish
-        try:
-            png_capture_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            png_capture_proc.kill()
-        
-        # Count captured frames and encode to MP4
-        frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".png")])
-        log.info("Total captured: %d PNG frames", len(frame_files))
-        
-        if len(frame_files) == 0:
-            log.error("✗ No frames were captured! Check:")
-            log.error("  1. Image bridge is running and receiving camera data")
-            log.error("  2. FFmpeg process stayed alive during recording")
-            log.error("  3. GStreamer plugins installed (gstreamer1.0-plugins-bad, etc)")
-            pm.shutdown()
-            sys.exit(1)
-        
-        if frame_files:
-            log.info("Converting PNG frames to MP4: %s", args.record)
-            selected_frames = None
-            if stop_info.get("triggered"):
-                stop_time = stop_info.get("stop_time")
-                selected_frames = _select_frames_until_time(
-                    frames_dir,
-                    stop_time=stop_time,
-                    trim_back_frames=args.trim_back_frames,
-                )
-                if selected_frames:
-                    first_idx = os.path.basename(selected_frames[0])
-                    last_idx = os.path.basename(selected_frames[-1])
-                    log.info(
-                        "Encoding by stop_time with trim-back=%d: %d frames (%s .. %s)",
-                        args.trim_back_frames,
-                        len(selected_frames),
-                        first_idx,
-                        last_idx,
-                    )
-            success = _encode_pngs_to_mp4(frames_dir, args.record, args.fps, selected_frames=selected_frames)
-            if success:
-                log.info("Recording complete: %s", args.record)
-            else:
-                log.error("Failed to encode MP4")
-        else:
-            log.error("No frames captured")
-        
+    log.info("Discovering chase camera image topic")
+    chase_candidates = list_camera_topics(name_hint="chase_cam")
+    if chase_candidates:
+        log.debug("Chase candidates: %s", ", ".join(chase_candidates))
+    chase_topic = discover_camera_topic(
+        name_hint="chase_cam",
+        timeout=30,
+        model_hint=args.topic_model_hint,
+    )
+    if not chase_topic:
+        log.error("Chase camera topic not found")
         pm.shutdown()
-        sys.exit(0)
-    
-    # ── STREAMING MODE ──
-    log.info("Streaming mode: live broadcast pipeline")
-    
-    # Try NVENC hardware encoder first (RTX/GTX GPUs), fall back to libx264.
-    use_nvenc = False
-    if gpu_available:
+        sys.exit(1)
+    log.info("Using chase camera topic: %s", chase_topic)
+    return chase_topic
+
+
+def _build_png_capture_cmd(cw, ch, cpf, fps, frames_dir):
+    return [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", cpf,
+        "-s", f"{cw}x{ch}", "-r", str(fps),
+        "-i", "pipe:0",
+        "-f", "image2", "-compression_level", "9",
+        os.path.join(frames_dir, "frame_%06d.png"),
+    ]
+
+
+def _has_nvenc_encoder(gpu_available):
+    if not gpu_available:
+        return False
+    try:
+        probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "h264_nvenc" in probe.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _build_encoder_opts(use_nvenc):
+    opts = ["-pix_fmt", "yuv420p"]
+    if use_nvenc:
+        opts += [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-tune", "hq",
+            "-rc", "vbr",
+            "-b:v", "10M",
+            "-maxrate", "15M",
+            "-g", "30", "-bf", "0",
+            "-delay", "0", "-zerolatency", "1",
+            "-aud", "1",
+        ]
+    else:
+        opts += [
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "18",
+            "-tune", "zerolatency", "-g", "1",
+        ]
+    opts += ["-flush_packets", "1"]
+    return opts
+
+
+def _build_stream_ffmpeg_cmd(cw, ch, cpf, args, output_mode, use_nvenc):
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", cpf,
+        "-s", f"{cw}x{ch}", "-r", str(args.fps),
+        "-i", "pipe:0",
+    ]
+
+    cmd += _build_encoder_opts(use_nvenc)
+
+    if output_mode == "udp":
+        cmd += [
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-mpegts_copyts", "1",
+            "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
+        ]
+        viewer_url = f"udp://@:{args.port}"
+    elif output_mode == "tcp":
+        cmd += [
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
+        ]
+        viewer_url = f"tcp://<host>:{args.port}"
+    elif output_mode == "rtsp":
+        cmd += ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
+        viewer_url = f"rtsp://<host>:{args.port}/chase"
+    else:
+        cmd += ["-f", "mp4", output_mode[5:]]
+        viewer_url = output_mode
+
+    if args.record:
+        cmd += [
+            "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-f", "mp4", args.record,
+        ]
+
+    return cmd, viewer_url
+
+
+def _log_stream_summary(output_mode, args, chase_viewer_url, chase_topic, cw, ch):
+    log.info("Shahed chase stream ready")
+    log.info("Chase stream: %s", chase_viewer_url)
+    if args.record:
+        log.info("Recording file: %s (auto-stop on return)", args.record)
+    log.info("Camera topic: %s", chase_topic)
+    log.info("Resolution: %dx%d @ %d fps", cw, ch, args.fps)
+    if output_mode == "udp":
+        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop udp://@:%d", args.port)
+    elif output_mode == "tcp":
+        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop tcp://<host>:%d", args.port)
+    elif output_mode == "rtsp":
+        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop rtsp://<host>:%d/chase", args.port)
+    log.info("Streaming active. Press Ctrl-C to stop")
+
+
+def _run_recording_mode(args, pm, chase_topic):
+    log.info("Recording mode enabled")
+
+    record_dir = os.path.dirname(os.path.abspath(args.record))
+    frames_dir = os.path.join(record_dir, "frames_temp")
+    os.makedirs(frames_dir, exist_ok=True)
+
+    try:
+        png_bridge_proc = pm.spawn(
+            [IMAGE_BRIDGE, chase_topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except Exception as e:
+        log.error("Failed to start image bridge: %s", e)
+        pm.shutdown()
+        sys.exit(1)
+
+    png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
+    fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
+
+    log.info("Waiting for first frame metadata")
+    cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
+    if cw is None:
         try:
-            probe = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=5,
+            _, stderr = png_bridge_proc.communicate(timeout=2)
+            log.debug("Image bridge stderr: %s", stderr.decode() if stderr else "No details")
+        except Exception as e:
+            log.debug("Could not read image bridge stderr: %s", e)
+        log.warning("No image metadata from bridge, using 1920x1080 rgb24")
+        cw, ch, cpf = 1920, 1080, "rgb24"
+
+    if png_bridge_proc.poll() is not None:
+        log.error("Image bridge exited early with return code %d", png_bridge_proc.returncode)
+        pm.shutdown()
+        sys.exit(1)
+
+    png_cmd = _build_png_capture_cmd(cw, ch, cpf, args.fps, frames_dir)
+    png_capture_proc = pm.spawn(
+        png_cmd,
+        stdin=png_bridge_proc.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    time.sleep(2)
+    if png_capture_proc.poll() is not None:
+        log.error("PNG capture process exited immediately")
+        pm.shutdown()
+        sys.exit(1)
+
+    stop_info = {}
+    monitor_thread = threading.Thread(
+        target=_monitor_pose_and_stop_recording,
+        kwargs={
+            "png_proc": png_capture_proc,
+            "frames_dir": frames_dir,
+            "stop_info": stop_info,
+        },
+        daemon=False,
+    )
+    monitor_thread.start()
+
+    start_recording_time = time.time()
+    last_frame_count = 0
+    while monitor_thread.is_alive():
+        time.sleep(3)
+        frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".png")]
+        current_count = len(frame_files)
+        if current_count > last_frame_count:
+            elapsed = time.time() - start_recording_time
+            fps = current_count / elapsed if elapsed > 0 else 0
+            _log_rate_limited(
+                "record_progress",
+                8,
+                "info",
+                "Recording progress: %d frames (%.1f fps)",
+                current_count,
+                fps,
             )
-            if "h264_nvenc" in probe.stdout:
-                use_nvenc = True
-                log.info("Using NVENC hardware encoder (h264_nvenc)")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    
-    # ── 5. Chase camera pipeline ──
-    log.info("Starting chase camera bridge")
+            last_frame_count = current_count
+        elif last_frame_count > 0:
+            _log_rate_limited(
+                "record_stalled",
+                15,
+                "warning",
+                "No new frames captured, still at %d",
+                current_count,
+            )
+
+    monitor_thread.join()
+
+    try:
+        png_capture_proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        png_capture_proc.kill()
+
+    frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".png")])
+    log.info("Captured %d PNG frames", len(frame_files))
+
+    if not frame_files:
+        log.error("No frames were captured")
+        pm.shutdown()
+        sys.exit(1)
+
+    selected_frames = None
+    if stop_info.get("triggered"):
+        stop_time = stop_info.get("stop_time")
+        selected_frames = _select_frames_until_time(
+            frames_dir,
+            stop_time=stop_time,
+            trim_back_frames=args.trim_back_frames,
+        )
+        if selected_frames:
+            log.info("Encoding trimmed frame window (%d frames)", len(selected_frames))
+
+    success = _encode_pngs_to_mp4(frames_dir, args.record, args.fps, selected_frames=selected_frames)
+    if success:
+        log.info("Recording complete: %s", args.record)
+    else:
+        log.error("Failed to encode MP4")
+
+    pm.shutdown()
+    sys.exit(0)
+
+
+def _run_stream_mode(args, pm, chase_topic, output_mode, gpu_available):
+    use_nvenc = _has_nvenc_encoder(gpu_available)
+    if use_nvenc:
+        log.info("Using NVENC hardware encoder")
+    else:
+        log.info("Using libx264 software encoder")
+
     png_bridge_proc = pm.spawn(
         [IMAGE_BRIDGE, chase_topic],
         stdout=subprocess.PIPE,
@@ -860,230 +900,146 @@ def main():
     png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
     fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
 
-    log.info("Waiting for first chase camera frame …")
+    log.info("Waiting for first chase camera frame")
     cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
     if cw is None:
-        log.warning("No chase camera metadata — using fallback defaults (1920x1080 rgb24)")
-        log.warning("Camera bridge may not be functioning correctly")
+        log.warning("No chase camera metadata, using 1920x1080 rgb24")
         cw, ch, cpf = 1920, 1080, "rgb24"
     else:
-        log.info("✓ Camera metadata received: %dx%d %s", cw, ch, cpf)
-    
-    # Verify chase bridge is still alive
+        log.info("Camera metadata: %dx%d %s", cw, ch, cpf)
+
     if png_bridge_proc.poll() is not None:
-        log.error("✗ Chase camera bridge crashed with return code %d", png_bridge_proc.returncode)
+        log.error("Chase camera bridge exited with return code %d", png_bridge_proc.returncode)
         pm.shutdown()
         sys.exit(1)
+
+    if args.raw:
+        png_ffmpeg_cmd = [
+            "ffplay",
+            "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pixel_format", cpf,
+            "-video_size", f"{cw}x{ch}",
+            "-framerate", str(args.fps),
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-framedrop",
+            "-sync", "video",
+            "-window_title", f"Chase RAW {cw}x{ch}",
+            "-",
+        ]
+        chase_viewer_url = "(raw ffplay window)"
     else:
-        log.info("✓ Chase camera bridge is running")
+        png_ffmpeg_cmd, chase_viewer_url = _build_stream_ffmpeg_cmd(
+            cw,
+            ch,
+            cpf,
+            args,
+            output_mode,
+            use_nvenc,
+        )
 
-        if args.raw:
-            png_ffplay_cmd = [
-                "ffplay",
-                "-f", "rawvideo",
-                "-pixel_format", cpf,
-                "-video_size", f"{cw}x{ch}",
-                "-framerate", str(args.fps),
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-framedrop",
-                "-sync", "video",
-                "-window_title", f"Chase RAW {cw}x{ch}",
-                "-",
-            ]
-            log.info("Starting chase camera ffplay (raw)")
-            png_ffmpeg_proc = pm.spawn(
-                png_ffplay_cmd,
-                stdin=png_bridge_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+    png_ffmpeg_proc = pm.spawn(
+        png_ffmpeg_cmd,
+        stdin=png_bridge_proc.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    if png_ffmpeg_proc.poll() is not None:
+        log.error("Chase stream process failed to start")
+        pm.shutdown()
+        sys.exit(1)
+
+    if args.record:
+        monitor_thread = threading.Thread(
+            target=_monitor_pose_and_stop_recording,
+            args=(png_ffmpeg_proc, 0.6, 1),
+            daemon=False,
+        )
+        monitor_thread.start()
+
+    _log_stream_summary(output_mode, args, chase_viewer_url, chase_topic, cw, ch)
+    return png_bridge_proc, png_ffmpeg_proc, png_ffmpeg_cmd
+
+
+def _supervise_stream(pm, png_bridge_proc, png_ffmpeg_proc, png_ffmpeg_cmd):
+    restart_attempts = 0
+    while True:
+        if png_bridge_proc and png_bridge_proc.poll() is not None:
+            log.error("Camera bridge exited with code %d", png_bridge_proc.returncode)
+            break
+
+        if png_ffmpeg_proc and png_ffmpeg_cmd and png_ffmpeg_proc.poll() is not None:
+            rc = png_ffmpeg_proc.returncode
+            if restart_attempts >= MAX_STREAM_RESTARTS:
+                log.error("Chase stream exited (code %d) and restart limit reached", rc)
+                break
+
+            restart_attempts += 1
+            backoff_s = min(8, 2 ** (restart_attempts - 1))
+            log.warning(
+                "Chase stream exited (code %d), restart %d/%d in %ds",
+                rc,
+                restart_attempts,
+                MAX_STREAM_RESTARTS,
+                backoff_s,
             )
-            png_ffmpeg_cmd = png_ffplay_cmd
-            chase_viewer_url = "(raw ffplay window)"
-        else:
-            # Build base ffmpeg input (rawvideo -> yuv420p)
-            png_ffmpeg_input = [
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-pix_fmt", cpf,
-                "-s", f"{cw}x{ch}", "-r", str(args.fps),
-                "-i", "pipe:0",
-            ]
-
-            # Define encoder options (will apply to first output)
-            encoder_opts = ["-pix_fmt", "yuv420p"]
-            if use_nvenc:
-                log.info("✓ Using NVENC encoder (h264_nvenc)")
-                encoder_opts += [
-                    "-c:v", "h264_nvenc", 
-                    "-preset", "p4",
-                    "-tune", "hq",
-                    "-rc", "vbr",
-                    "-b:v", "10M",
-                    "-maxrate", "15M",
-                    "-g", "30", "-bf", "0",
-                    "-delay", "0", "-zerolatency", "1",
-                    "-aud", "1",
-                ]
-            else:
-                log.info("✓ Using libx264 software encoder (ultrafast preset)")
-                encoder_opts += [
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-crf", "18",
-                    "-tune", "zerolatency", "-g", "1",
-                ]
-            encoder_opts += ["-flush_packets", "1"]
-
-            # Build streaming output
-            streaming_opts = encoder_opts.copy()
-            if output_mode == "udp":
-                log.info("Streaming mode: UDP/MPEGTS to 127.0.0.1:%d", args.port)
-                streaming_opts += [
-                    "-muxdelay", "0", "-muxpreload", "0",
-                    "-mpegts_copyts", "1",
-                    "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
-                ]
-                chase_viewer_url = f"udp://@:{args.port}"
-            elif output_mode == "tcp":
-                log.info("Streaming mode: TCP/MPEGTS listening on port %d", args.port)
-                streaming_opts += [
-                    "-muxdelay", "0", "-muxpreload", "0",
-                    "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
-                ]
-                chase_viewer_url = f"tcp://<host>:{args.port}"
-            elif output_mode == "rtsp":
-                log.info("Streaming mode: RTSP on rtsp://127.0.0.1:%d/chase", args.port)
-                streaming_opts += ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
-                chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
-            else:
-                log.info("Streaming mode: MP4 file output to %s", output_mode[5:])
-                streaming_opts += ["-f", "mp4", output_mode[5:]]
-                chase_viewer_url = output_mode
-
-            # Build complete ffmpeg command
-            png_ffmpeg_cmd = png_ffmpeg_input + streaming_opts
-
-            # Add recording output if specified
-            if args.record:
-                # Separate encoder for MP4 output (different quality settings)
-                record_opts = [
-                    "-pix_fmt", "yuv420p",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-f", "mp4", args.record
-                ]
-                png_ffmpeg_cmd += record_opts
-                log.info("Secondary output: Recording to %s", args.record)
-            
-            log.info("Starting Chase camera FFmpeg pipeline (input: %dx%d %s)", cw, ch, cpf)
+            if png_ffmpeg_proc in pm.procs:
+                pm.procs.remove(png_ffmpeg_proc)
+            time.sleep(backoff_s)
             png_ffmpeg_proc = pm.spawn(
                 png_ffmpeg_cmd,
                 stdin=png_bridge_proc.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            
             if png_ffmpeg_proc.poll() is None:
-                log.info("✓ FFmpeg streaming process started")
-            else:
-                log.error("✗ FFmpeg process failed to start")
-            
-            if args.record:
-                log.info("Starting pose monitor for auto-stop on return to home")
-                monitor_thread = threading.Thread(
-                    target=_monitor_pose_and_stop_recording,
-                    args=(png_ffmpeg_proc, 0.6, 1),  # return_threshold=0.6m, confirmation_frames=1
-                    daemon=False
-                )
-                monitor_thread.start()
+                log.info("Chase stream restarted")
 
-    # ── 10. Print connection info ──
-    log.info("═" * 60)
-    log.info("SHAHED CHASE SIMULATION RUNNING")
-    log.info("═" * 60)
-    log.info("Chase stream    : %s", chase_viewer_url)
-    if args.record:
-        log.info("Recording file  : %s (Auto-stops on return)", args.record)
-    log.info("Camera topic    : %s", chase_topic)
-    log.info("Resolution      : %dx%d @ %d fps", cw, ch, args.fps)
-    if output_mode == "udp":
-        log.info("View command    : ffplay -fflags nobuffer -flags low_delay -framedrop udp://@:%d", args.port)
-    elif output_mode == "tcp":
-        log.info("View command    : ffplay -fflags nobuffer -flags low_delay -framedrop tcp://<host>:%d", args.port)
-    elif output_mode == "rtsp":
-        log.info("View command    : ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://<host>:%d/chase", args.port)
-    log.info("═" * 60)
-    log.info("Streaming active. Press Ctrl-C to stop")
-    log.info("═" * 60)
-    
-    print()
-    print("=" * 60)
-    print("  Shahed Chase Simulation Running")
-    print("=" * 60)
-    print()
-    if chase_viewer_url:
-        print(f"  Chase stream : {chase_viewer_url}")
-    if args.record:
-        print(f"  Recording to : {args.record} (Auto-stops on return)")
-    print(f"  Chase topic  : {chase_topic}")
-    print(f"  Resolution   : {cw}x{ch} @ {args.fps} fps")
-    print()
-    low_lat = "-loglevel quiet -fflags nobuffer -flags low_delay -framedrop"
-    if output_mode == "udp":
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} udp://@:{args.port}")
-    elif output_mode == "tcp":
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} tcp://<host>:{args.port}")
-    elif output_mode == "rtsp":
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} rtsp://<host>:{args.port}/chase")
-    print()
-    print("  Press Ctrl-C to stop")
-    print("=" * 60)
-    print()
+        _log_rate_limited("stream_health", 20, "debug", "Stream health check: bridge and stream alive")
+        time.sleep(2)
 
-    # ── 11. Keep alive (auto-restart ffmpeg on viewer disconnect) ──
-    last_health_check = time.time()
-    health_check_interval = 5  # Log health every 5 seconds
+
+def main():
+    args = parse_args()
+
+    cleanup_before_start()
+    output_mode = _resolve_output_mode(args)
+
+    pm = ProcessManager()
+
+    def on_signal(sig, frame):
+        pm.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    gpu_available = _configure_runtime(args, pm)
+    _start_optional_rtsp_server(output_mode, args, pm)
+    _start_gazebo(args, pm)
+    chase_topic = _resolve_chase_topic(args, pm)
+
+    if args.record:
+        _run_recording_mode(args, pm, chase_topic)
+
+    png_bridge_proc, png_ffmpeg_proc, png_ffmpeg_cmd = _run_stream_mode(
+        args,
+        pm,
+        chase_topic,
+        output_mode,
+        gpu_available,
+    )
+
     try:
-        while True:
-            # Periodic health check logging
-            now = time.time()
-            if now - last_health_check >= health_check_interval:
-                if png_ffmpeg_proc and png_ffmpeg_proc.poll() is None:
-                    log.debug("✓ PNG FFmpeg process alive")
-                if png_bridge_proc and png_bridge_proc.poll() is None:
-                    log.debug("✓ Camera bridge process alive")
-                last_health_check = now
-            
-            # Auto-restart chase camera ffmpeg
-            if png_ffmpeg_proc and png_ffmpeg_cmd:
-                if png_bridge_proc and png_bridge_proc.poll() is not None:
-                    log.error("✗ PNG camera bridge exited with code %d", png_bridge_proc.returncode)
-                    break
-                elif png_ffmpeg_proc.poll() is not None:
-                    rc = png_ffmpeg_proc.returncode
-                    log.warning("⚠ PNG FFmpeg exited (code %d) — attempting restart …", rc)
-                    if png_ffmpeg_proc in pm.procs:
-                        pm.procs.remove(png_ffmpeg_proc)
-                    time.sleep(1)
-                    log.info("Restarting PNG FFmpeg pipeline")
-                    png_ffmpeg_proc = pm.spawn(
-                        png_ffmpeg_cmd,
-                        stdin=png_bridge_proc.stdout,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    if png_ffmpeg_proc.poll() is None:
-                        log.info("✓ FFmpeg restarted successfully")
-
-            time.sleep(2)
+        _supervise_stream(pm, png_bridge_proc, png_ffmpeg_proc, png_ffmpeg_cmd)
     except KeyboardInterrupt:
         log.info("Received interrupt signal")
 
     pm.shutdown()
-    log.info("═" * 60)
     log.info("Simulation stopped cleanly")
-    log.info("═" * 60)
+    return
 
 if __name__ == "__main__":
     main()
