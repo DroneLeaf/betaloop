@@ -9,6 +9,7 @@ import argparse
 import logging
 import math
 import os
+import random
 import signal
 import socket
 import subprocess
@@ -41,7 +42,7 @@ AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop
 TARGET_WORLD = "shahed_chase_park.world"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
-TOPIC_MODEL_HINT_DEFAULT = "shahed_drone"
+TOPIC_MODEL_HINT_DEFAULT = "chase_cam"
 MAX_STREAM_RESTARTS = 5
 
 _LAST_LOG_TIMES = {}
@@ -641,14 +642,23 @@ def _resolve_chase_topic(args, pm):
         return args.chase_topic
 
     log.info("Discovering chase camera image topic")
-    chase_candidates = list_camera_topics(name_hint="chase_cam")
+    hint = args.topic_model_hint or "chase_cam"
+    chase_candidates = list_camera_topics(name_hint=hint)
+    if not chase_candidates:
+        # Fallback for worlds where topic path doesn't include model hint.
+        chase_candidates = list_camera_topics(name_hint="chase_cam")
+    if not chase_candidates:
+        chase_candidates = list_camera_topics(name_hint=None)
     if chase_candidates:
         log.debug("Chase candidates: %s", ", ".join(chase_candidates))
-    chase_topic = discover_camera_topic(
-        name_hint="chase_cam",
-        timeout=30,
-        model_hint=args.topic_model_hint,
-    )
+        preferred = [t for t in chase_candidates if "chase_cam" in t]
+        chase_topic = preferred[0] if preferred else chase_candidates[0]
+    else:
+        chase_topic = discover_camera_topic(
+            name_hint=hint,
+            timeout=30,
+            model_hint=args.topic_model_hint,
+        )
     if not chase_topic:
         log.error("Chase camera topic not found")
         pm.shutdown()
@@ -668,6 +678,72 @@ def _build_png_capture_cmd(cw, ch, cpf, fps, frames_dir):
         "-q:v", "3",
         os.path.join(frames_dir, "frame_%06d.jpg"),
     ]
+
+
+def _drive_random_top_back_yaw(stop_event, model_name="shahed_drone", joint_name="top_back_yaw_joint"):
+    """Publish position-aware velocity to reach random target angles."""
+    topic = f"/model/{model_name}/joint/{joint_name}/cmd_vel"
+    log.info("Position-aware yaw driver active: %s", topic)
+
+    min_angle = -0.349066  # ±20° limit
+    max_angle = 0.349066
+
+    alternate_left = True  # Strict alternation: left, right, left, right, ...
+    current_angle = 0.0  # Start at center
+    constant_speed = 0.50  # rad/s - constant traversal speed
+
+    while not stop_event.is_set():
+        # STRICT ALTERNATION: left-right-left-right pattern
+        if alternate_left:
+            target_angle = random.uniform(0.1, max_angle)
+        else:
+            target_angle = random.uniform(min_angle, -0.1)
+        alternate_left = not alternate_left  # Flip for next iteration
+
+        # Calculate time needed at constant speed
+        angle_diff = target_angle - current_angle
+        time_to_reach = abs(angle_diff) / constant_speed if abs(angle_diff) > 0.01 else 0.05
+        velocity = constant_speed if angle_diff > 0 else -constant_speed
+
+        # Publish velocity command
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", f"data: {velocity:.4f}"],
+                capture_output=True,
+                timeout=3,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            log.debug("Yaw publish failed: %s", e)
+
+        # Wait for motion to complete
+        if stop_event.wait(time_to_reach):
+            break
+
+        # Current angle becomes previous target
+        current_angle = target_angle
+
+        # Brief settle phase
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", "data: 0.0"],
+                capture_output=True,
+                timeout=2,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        if stop_event.wait(random.uniform(0.5, 1.5)):
+            break
+
+    # Stop on exit
+    try:
+        subprocess.run(
+            ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", "data: 0.0"],
+            capture_output=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
 
 
 def _has_nvenc_encoder(gpu_available):
@@ -1018,8 +1094,13 @@ def main():
     output_mode = _resolve_output_mode(args)
 
     pm = ProcessManager()
+    yaw_stop_event = threading.Event()
+    yaw_thread = None
 
     def on_signal(sig, frame):
+        yaw_stop_event.set()
+        if yaw_thread is not None:
+            yaw_thread.join(timeout=1.0)
         pm.shutdown()
         sys.exit(0)
 
@@ -1029,6 +1110,15 @@ def main():
     gpu_available = _configure_runtime(args, pm)
     _start_optional_rtsp_server(output_mode, args, pm)
     _start_gazebo(args, pm)
+
+    if os.path.basename(args.world) == TARGET_WORLD:
+        yaw_thread = threading.Thread(
+            target=_drive_random_top_back_yaw,
+            args=(yaw_stop_event,),
+            daemon=True,
+        )
+        yaw_thread.start()
+
     chase_topic = _resolve_chase_topic(args, pm)
 
     if args.record:
@@ -1046,6 +1136,10 @@ def main():
         _supervise_stream(pm, png_bridge_proc, png_ffmpeg_proc, png_ffmpeg_cmd)
     except KeyboardInterrupt:
         log.info("Received interrupt signal")
+
+    yaw_stop_event.set()
+    if yaw_thread is not None:
+        yaw_thread.join(timeout=1.0)
 
     pm.shutdown()
     log.info("Simulation stopped cleanly")
