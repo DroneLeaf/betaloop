@@ -267,9 +267,9 @@ def read_image_meta(proc, timeout=30):
 
 
 def _latest_captured_frame_index(frames_dir):
-    """Return highest frame index from frame_XXXXXX.png files, or None if none exist."""
+    """Return highest frame index from frame_XXXXXX.jpg files, or None if none exist."""
     max_idx = None
-    for frame_path in glob.glob(os.path.join(frames_dir, "frame_*.png")):
+    for frame_path in glob.glob(os.path.join(frames_dir, "frame_*.jpg")):
         name = os.path.basename(frame_path)
         try:
             idx = int(name.split("_")[1].split(".")[0])
@@ -281,7 +281,7 @@ def _latest_captured_frame_index(frames_dir):
 
 
 def _sorted_frame_paths(frames_dir):
-    frame_paths = glob.glob(os.path.join(frames_dir, "frame_*.png"))
+    frame_paths = glob.glob(os.path.join(frames_dir, "frame_*.jpg"))
 
     def _frame_idx(path):
         name = os.path.basename(path)
@@ -324,7 +324,7 @@ def _frame_index_from_path(frame_path):
 
 def _monitor_pose_and_stop_recording(
     png_proc,
-    return_threshold=0.1,
+    return_threshold=3,
     confirmation_frames=1,
     frames_dir=None,
     stop_info=None,
@@ -451,9 +451,9 @@ def _monitor_pose_and_stop_recording(
                 # Clear buffer after processing pose block
                 buffer = []
 
-            # Safety: Check if PNG process died
+            # Safety: Check if JPEG capture process died
             if png_proc.poll() is not None:
-                log.info("PNG process exited, pose monitor ending")
+                log.info("JPEG capture process exited, pose monitor ending")
                 return
 
         log.warning("Pose stream ended (received %d messages)", message_count)
@@ -471,8 +471,9 @@ def _monitor_pose_and_stop_recording(
 
 
 def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
-    """Convert PNG frames to MP4 file, optionally using an explicit selected frame list."""
-    log.info("Encoding %d PNG frames to MP4: %s", len(os.listdir(frames_dir)), output_file)
+    """Convert JPG frames to MP4 file, optionally using an explicit selected frame list."""
+    jpg_count = len([f for f in os.listdir(frames_dir) if f.endswith(".jpg")])
+    log.info("Encoding %d JPG frames to MP4: %s", jpg_count, output_file)
     try:
         if selected_frames:
             stop_frame = _frame_index_from_path(selected_frames[-1])
@@ -482,7 +483,7 @@ def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
                     "ffmpeg", "-y",
                     "-framerate", str(fps),
                     "-start_number", "1",
-                    "-i", os.path.join(frames_dir, "frame_%06d.png"),
+                    "-i", os.path.join(frames_dir, "frame_%06d.jpg"),
                     "-frames:v", str(stop_frame),
                 ]
             else:
@@ -490,13 +491,13 @@ def _encode_pngs_to_mp4(frames_dir, output_file, fps=30, selected_frames=None):
                 ffmpeg_cmd = [
                     "ffmpeg", "-y",
                     "-framerate", str(fps),
-                    "-i", os.path.join(frames_dir, "frame_%06d.png"),
+                    "-i", os.path.join(frames_dir, "frame_%06d.jpg"),
                 ]
         else:
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
                 "-framerate", str(fps),
-                "-i", os.path.join(frames_dir, "frame_%06d.png"),
+                "-i", os.path.join(frames_dir, "frame_%06d.jpg"),
             ]
 
         ffmpeg_cmd += [
@@ -623,7 +624,8 @@ def _start_gazebo(args, pm):
     gz_args = ["gz", "sim"]
     if not args.gazebo:
         gz_args.append("-s")
-    gz_args.extend(["-r", "-v", "3", world_path])
+    # Keep Gazebo output quiet: hide info/warning messages.
+    gz_args.extend(["-r", "-v", "1", world_path])
 
     log.info("Starting Gazebo: %s", os.path.basename(world_path))
     pm.spawn(gz_args)
@@ -661,8 +663,10 @@ def _build_png_capture_cmd(cw, ch, cpf, fps, frames_dir):
         "-f", "rawvideo", "-pix_fmt", cpf,
         "-s", f"{cw}x{ch}", "-r", str(fps),
         "-i", "pipe:0",
-        "-f", "image2", "-compression_level", "9",
-        os.path.join(frames_dir, "frame_%06d.png"),
+        "-f", "image2",
+        # JPEG quality scale: 2 is best quality/largest file, 31 is lowest quality.
+        "-q:v", "3",
+        os.path.join(frames_dir, "frame_%06d.jpg"),
     ]
 
 
@@ -751,11 +755,11 @@ def _log_stream_summary(output_mode, args, chase_viewer_url, chase_topic, cw, ch
     log.info("Camera topic: %s", chase_topic)
     log.info("Resolution: %dx%d @ %d fps", cw, ch, args.fps)
     if output_mode == "udp":
-        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop udp://@:%d", args.port)
+        log.info("View: ffplay -loglevel quiet -fflags nobuffer -flags low_delay -framedrop udp://@:%d", args.port)
     elif output_mode == "tcp":
-        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop tcp://<host>:%d", args.port)
+        log.info("View: ffplay -loglevel quiet -fflags nobuffer -flags low_delay -framedrop tcp://<host>:%d", args.port)
     elif output_mode == "rtsp":
-        log.info("View: ffplay -loglevel error -fflags nobuffer -flags low_delay -framedrop rtsp://<host>:%d/chase", args.port)
+        log.info("View: ffplay -loglevel quiet -fflags nobuffer -flags low_delay -framedrop rtsp://<host>:%d/chase", args.port)
     log.info("Streaming active. Press Ctrl-C to stop")
 
 
@@ -806,7 +810,7 @@ def _run_recording_mode(args, pm, chase_topic):
 
     time.sleep(2)
     if png_capture_proc.poll() is not None:
-        log.error("PNG capture process exited immediately")
+        log.error("JPEG capture process exited immediately")
         pm.shutdown()
         sys.exit(1)
 
@@ -826,7 +830,7 @@ def _run_recording_mode(args, pm, chase_topic):
     last_frame_count = 0
     while monitor_thread.is_alive():
         time.sleep(3)
-        frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".png")]
+        frame_files = [f for f in os.listdir(frames_dir) if f.endswith(".jpg")]
         current_count = len(frame_files)
         if current_count > last_frame_count:
             elapsed = time.time() - start_recording_time
@@ -856,8 +860,8 @@ def _run_recording_mode(args, pm, chase_topic):
     except subprocess.TimeoutExpired:
         png_capture_proc.kill()
 
-    frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".png")])
-    log.info("Captured %d PNG frames", len(frame_files))
+    frame_files = sorted([f for f in os.listdir(frames_dir) if f.startswith("frame_") and f.endswith(".jpg")])
+    log.info("Captured %d JPG frames", len(frame_files))
 
     if not frame_files:
         log.error("No frames were captured")
@@ -922,7 +926,7 @@ def _run_stream_mode(args, pm, chase_topic, output_mode, gpu_available):
     if args.raw:
         png_ffmpeg_cmd = [
             "ffplay",
-            "-loglevel", "error",
+            "-loglevel", "quiet",
             "-f", "rawvideo",
             "-pixel_format", cpf,
             "-video_size", f"{cw}x{ch}",
