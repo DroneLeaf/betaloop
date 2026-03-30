@@ -9,9 +9,9 @@ Architecture:
                                                               ──► RTSP/TCP stream
 
 Usage (inside the Docker container):
-    python3 start_rocket_drone_fpv.py                      # TCP stream on :8554
-    python3 start_rocket_drone_fpv.py --rtsp               # RTSP via mediamtx on :8554
-    python3 start_rocket_drone_fpv.py --output file:out.mp4  # record to file
+    python3 start_rocket_drone_fpv_park.py                      # TCP stream on :8554
+    python3 start_rocket_drone_fpv_park.py --rtsp               # RTSP via mediamtx on :8554
+    python3 start_rocket_drone_fpv_park.py --output file:out.mp4  # record to file
 
 Viewer examples:
     ffplay tcp://<host>:8554                  # TCP mode (default)
@@ -33,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("start_rocket_drone_fpv")
+log = logging.getLogger("start_rocket_drone_fpv_park")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 # Auto-detect paths: if running from the repo (betaloop/ dir), resolve relative
@@ -55,7 +55,7 @@ BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "beta
                         "/opt/betaflight/obj/main/betaflight_SITL.elf")
 MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
                                "/opt/msp_virtualradio")
-FPV_WORLD = "rocket_drone.world"
+FPV_WORLD = "rocket_drone_park.world"
 TOPIC_MODEL_HINT_DEFAULT = "betaflight_vehicle"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554

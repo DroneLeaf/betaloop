@@ -21,6 +21,8 @@ Betaflight SITL, image bridges, ffmpeg video pipelines, and the virtual radio.
 | `start_fpv.py` | Iris FPV demo | Lightweight quad with obstacles and gate |
 | `start_rocket_drone_fpv.py` | Rocket drone | Heavy quad chasing an orbiting target |
 | `start_rocket_drone_collision.py` | Collision test | Heavy quad with static target above |
+| `start_rocket_drone_fpv_park.py` | Rocket drone park | Heavy quad over park terrain with Shahed target |
+| `start_simulink_park.py` | Simulink rocket drone park | Simulink dynamics over park terrain with Shahed target |
 
 ### Quick start
 
