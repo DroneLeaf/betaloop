@@ -746,6 +746,80 @@ def _drive_random_top_back_yaw(stop_event, model_name="shahed_drone", joint_name
         pass
 
 
+def _drive_random_top_back_pitch(stop_event, model_name="shahed_drone", joint_name="top_back_arm_joint"):
+    """Publish constant-speed up/down pitch motion with random target angles."""
+    topic = f"/model/{model_name}/joint/{joint_name}/cmd_vel"
+    log.info("Position-aware arm-pitch driver active: %s", topic)
+
+    center_angle = 0
+    half_span = math.radians(15.0)
+    min_angle = center_angle - half_span
+    max_angle = center_angle + half_span
+
+    # Split around center for strict down/up alternation.
+    down_min_angle = center_angle + 0.05
+    down_max_angle = max_angle
+    up_min_angle = min_angle
+    up_max_angle = center_angle - 0.05
+
+    alternate_down = True  # Strict alternation: down, up, down, up, ...
+    current_angle = center_angle
+    constant_speed = 0.45  # rad/s - constant traversal speed
+
+    while not stop_event.is_set():
+        # STRICT ALTERNATION: down-up-down-up pattern
+        if alternate_down:
+            target_angle = random.uniform(down_min_angle, down_max_angle)
+        else:
+            target_angle = random.uniform(up_min_angle, up_max_angle)
+        alternate_down = not alternate_down  # Flip for next iteration
+
+        # Calculate time needed at constant speed
+        angle_diff = target_angle - current_angle
+        time_to_reach = abs(angle_diff) / constant_speed if abs(angle_diff) > 0.01 else 0.05
+        velocity = constant_speed if angle_diff > 0 else -constant_speed
+
+        # Publish velocity command
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", f"data: {velocity:.4f}"],
+                capture_output=True,
+                timeout=3,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            log.debug("Pitch publish failed: %s", e)
+
+        # Wait for motion to complete
+        if stop_event.wait(time_to_reach):
+            break
+
+        # Current angle becomes previous target
+        current_angle = target_angle
+
+        # Brief settle phase
+        try:
+            subprocess.run(
+                ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", "data: 0.0"],
+                capture_output=True,
+                timeout=2,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        if stop_event.wait(random.uniform(1.8, 3.2)):
+            break
+
+    # Stop on exit
+    try:
+        subprocess.run(
+            ["gz", "topic", "-t", topic, "-m", "gz.msgs.Double", "-p", "data: 0.0"],
+            capture_output=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+
 def _has_nvenc_encoder(gpu_available):
     if not gpu_available:
         return False
@@ -1095,12 +1169,17 @@ def main():
 
     pm = ProcessManager()
     yaw_stop_event = threading.Event()
+    pitch_stop_event = threading.Event()
     yaw_thread = None
+    pitch_thread = None
 
     def on_signal(sig, frame):
         yaw_stop_event.set()
+        pitch_stop_event.set()
         if yaw_thread is not None:
             yaw_thread.join(timeout=1.0)
+        if pitch_thread is not None:
+            pitch_thread.join(timeout=1.0)
         pm.shutdown()
         sys.exit(0)
 
@@ -1118,6 +1197,13 @@ def main():
             daemon=True,
         )
         yaw_thread.start()
+
+        pitch_thread = threading.Thread(
+            target=_drive_random_top_back_pitch,
+            args=(pitch_stop_event,),
+            daemon=True,
+        )
+        pitch_thread.start()
 
     chase_topic = _resolve_chase_topic(args, pm)
 
@@ -1138,8 +1224,11 @@ def main():
         log.info("Received interrupt signal")
 
     yaw_stop_event.set()
+    pitch_stop_event.set()
     if yaw_thread is not None:
         yaw_thread.join(timeout=1.0)
+    if pitch_thread is not None:
+        pitch_thread.join(timeout=1.0)
 
     pm.shutdown()
     log.info("Simulation stopped cleanly")
