@@ -233,6 +233,10 @@ def main():
                         help="Enable Betaflight OSD overlay on the FPV stream")
     parser.add_argument("--msp-port", type=int, default=5762,
                         help="Betaflight MSP TCP port for OSD telemetry (default: 5762 = UART2)")
+    parser.add_argument("--osd-server-port", type=int, default=0,
+                        help="TCP port for companion OSD server (LeafFC/HEAR), 0=disabled")
+    parser.add_argument("--osd-grid", default="53x20",
+                        help="OSD grid size for companion OSD (default: 53x20)")
     parser.add_argument("--raw", action="store_true",
                         help="Bypass ffmpeg: pipe raw frames directly to ffplay (lowest latency)")
     args = parser.parse_args()
@@ -417,6 +421,11 @@ def main():
     if args.osd:
         bridge_cmd += ["--osd", "--msp-port", str(args.msp_port)]
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
+    if args.osd_server_port:
+        bridge_cmd += ["--osd-server-port", str(args.osd_server_port),
+                       "--osd-grid", args.osd_grid]
+        log.info("Companion OSD server on port %d (grid %s)",
+                 args.osd_server_port, args.osd_grid)
 
     bridge_proc = pm.spawn(
         bridge_cmd,
