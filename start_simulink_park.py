@@ -285,6 +285,8 @@ def main():
                         help="OSD grid size for companion OSD (default: 53x20)")
     parser.add_argument("--raw", action="store_true",
                         help="Bypass ffmpeg: pipe raw frames to ffplay (latency test)")
+    parser.add_argument("--display", action="store_true",
+                        help="Render in SDL2 window inside gz_image_bridge (lowest latency)")
     parser.add_argument("--stream", default="",
                         help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
@@ -491,10 +493,13 @@ def main():
         if args.stream:
             img_bridge_cmd += ["--stream", args.stream]
             log.info("Streaming raw frames to udp://%s", args.stream)
+        if args.display:
+            img_bridge_cmd += ["--display"]
+            log.info("SDL2 direct display mode (zero-latency)")
 
         bridge_proc = pm.spawn(
             img_bridge_cmd,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         flags = fcntl.fcntl(bridge_proc.stderr, fcntl.F_GETFL)
@@ -523,7 +528,13 @@ def main():
         if not use_nvenc:
             log.info("Using software encoder (libx264 ultrafast)")
 
-        if args.raw:
+        if args.display:
+            log.info("DISPLAY MODE: bridge renders directly via SDL2 (no ffmpeg)")
+            ffmpeg_proc = None
+            ffmpeg_cmd = None
+            viewer_url = "(SDL2 window \u2014 zero-latency)"
+            output_mode = "display"
+        elif args.raw:
             ffplay_cmd = [
                 "ffplay",
                 "-f", "rawvideo",
@@ -694,7 +705,11 @@ def main():
     print()
     if not args.no_video:
         low_lat = "-probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext"
-        if output_mode == "raw":
+        if output_mode == "display":
+            print("  FPV: rendered in SDL2 window by gz_image_bridge (zero-latency)")
+            if args.stream:
+                print(f"  Companion stream: udp://{args.stream} (H.264 mpegts)")
+        elif output_mode == "raw":
             print("  Video displayed in ffplay windows (no encoding)")
         elif output_mode == "udp":
             print(f"  FPV view:   ffplay {low_lat} udp://@:{args.port}")

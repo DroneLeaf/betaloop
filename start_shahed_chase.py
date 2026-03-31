@@ -537,6 +537,8 @@ def parse_args():
                         help="Output stream FPS (default: 30)")
     parser.add_argument("--raw", action="store_true",
                         help="Skip ffmpeg entirely, pipe raw frames directly into ffplay")
+    parser.add_argument("--display", action="store_true",
+                        help="Render in SDL2 window inside gz_image_bridge (lowest latency)")
     parser.add_argument("--chase-topic", default=None,
                         help="Use this exact Gazebo image topic for chase-cam (skip auto-discovery)")
     parser.add_argument("--topic-model-hint", default=TOPIC_MODEL_HINT_DEFAULT,
@@ -910,6 +912,8 @@ def _log_stream_summary(output_mode, args, chase_viewer_url, chase_topic, cw, ch
         log.info("View: ffplay -loglevel quiet -fflags nobuffer -flags low_delay -framedrop tcp://<host>:%d", args.port)
     elif output_mode == "rtsp":
         log.info("View: ffplay -loglevel quiet -fflags nobuffer -flags low_delay -framedrop rtsp://<host>:%d/chase", args.port)
+    elif output_mode == "display":
+        log.info("FPV: rendered in SDL2 window by gz_image_bridge (zero-latency)")
     log.info("Streaming active. Press Ctrl-C to stop")
 
 
@@ -1053,63 +1057,79 @@ def _run_stream_mode(args, pm, chase_topic, output_mode, gpu_available):
         log.info("Using libx264 software encoder")
 
     png_bridge_proc = pm.spawn(
-        [IMAGE_BRIDGE, chase_topic],
-        stdout=subprocess.PIPE,
+        [IMAGE_BRIDGE, chase_topic] + (["--display"] if args.display else []),
+        stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
-    fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
 
-    log.info("Waiting for first chase camera frame")
-    cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
-    if cw is None:
-        log.warning("No chase camera metadata, using 1920x1080 rgb24")
-        cw, ch, cpf = 1920, 1080, "rgb24"
+    if args.display:
+        # Display mode: bridge renders directly via SDL2, no ffmpeg needed.
+        # Still need metadata for summary logging.
+        png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
+        fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
+        log.info("Waiting for first chase camera frame")
+        cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
+        if cw is None:
+            cw, ch, cpf = 1920, 1080, "rgb24"
+        log.info("DISPLAY MODE: bridge renders directly via SDL2 (no ffmpeg)")
+        png_ffmpeg_proc = None
+        png_ffmpeg_cmd = None
+        chase_viewer_url = "(SDL2 window — zero-latency)"
+        output_mode = "display"
     else:
-        log.info("Camera metadata: %dx%d %s", cw, ch, cpf)
+        png_flags = fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_GETFL)
+        fcntl.fcntl(png_bridge_proc.stderr, fcntl.F_SETFL, png_flags | os.O_NONBLOCK)
 
-    if png_bridge_proc.poll() is not None:
-        log.error("Chase camera bridge exited with return code %d", png_bridge_proc.returncode)
-        pm.shutdown()
-        sys.exit(1)
+        log.info("Waiting for first chase camera frame")
+        cw, ch, cpf = read_image_meta(png_bridge_proc, timeout=30)
+        if cw is None:
+            log.warning("No chase camera metadata, using 1920x1080 rgb24")
+            cw, ch, cpf = 1920, 1080, "rgb24"
+        else:
+            log.info("Camera metadata: %dx%d %s", cw, ch, cpf)
 
-    if args.raw:
-        png_ffmpeg_cmd = [
-            "ffplay",
-            "-loglevel", "quiet",
-            "-f", "rawvideo",
-            "-pixel_format", cpf,
-            "-video_size", f"{cw}x{ch}",
-            "-framerate", str(args.fps),
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-framedrop",
-            "-sync", "video",
-            "-window_title", f"Chase RAW {cw}x{ch}",
-            "-",
-        ]
-        chase_viewer_url = "(raw ffplay window)"
-    else:
-        png_ffmpeg_cmd, chase_viewer_url = _build_stream_ffmpeg_cmd(
-            cw,
-            ch,
-            cpf,
-            args,
-            output_mode,
-            use_nvenc,
+        if png_bridge_proc.poll() is not None:
+            log.error("Chase camera bridge exited with return code %d", png_bridge_proc.returncode)
+            pm.shutdown()
+            sys.exit(1)
+
+        if args.raw:
+            png_ffmpeg_cmd = [
+                "ffplay",
+                "-loglevel", "quiet",
+                "-f", "rawvideo",
+                "-pixel_format", cpf,
+                "-video_size", f"{cw}x{ch}",
+                "-framerate", str(args.fps),
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-framedrop",
+                "-sync", "video",
+                "-window_title", f"Chase RAW {cw}x{ch}",
+                "-",
+            ]
+            chase_viewer_url = "(raw ffplay window)"
+        else:
+            png_ffmpeg_cmd, chase_viewer_url = _build_stream_ffmpeg_cmd(
+                cw,
+                ch,
+                cpf,
+                args,
+                output_mode,
+                use_nvenc,
+            )
+
+        png_ffmpeg_proc = pm.spawn(
+            png_ffmpeg_cmd,
+            stdin=png_bridge_proc.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
-    png_ffmpeg_proc = pm.spawn(
-        png_ffmpeg_cmd,
-        stdin=png_bridge_proc.stdout,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    if png_ffmpeg_proc.poll() is not None:
-        log.error("Chase stream process failed to start")
-        pm.shutdown()
-        sys.exit(1)
+        if png_ffmpeg_proc.poll() is not None:
+            log.error("Chase stream process failed to start")
+            pm.shutdown()
+            sys.exit(1)
 
     if args.record:
         monitor_thread = threading.Thread(

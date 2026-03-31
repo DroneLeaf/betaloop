@@ -285,6 +285,8 @@ def main():
                         help="OSD grid size for companion OSD (default: 53x20)")
     parser.add_argument("--raw", action="store_true",
                         help="Bypass ffmpeg: pipe raw frames directly to ffplay (latency test)")
+    parser.add_argument("--display", action="store_true",
+                        help="SDL2 direct display in gz_image_bridge (zero-latency, no ffmpeg)")
     parser.add_argument("--stream", default="",
                         help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
@@ -496,10 +498,13 @@ def main():
     if args.stream:
         bridge_cmd += ["--stream", args.stream]
         log.info("Streaming raw frames to udp://%s", args.stream)
+    if args.display:
+        bridge_cmd += ["--display"]
+        log.info("SDL2 direct display mode (zero-latency)")
 
     bridge_proc = pm.spawn(
         bridge_cmd,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
@@ -519,8 +524,14 @@ def main():
         sys.exit(1)
     log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-    # ── 8. Start ffmpeg (or raw ffplay in --raw mode) ──
-    if args.raw:
+    # ── 8. Start ffmpeg (or raw ffplay or display mode) ──
+    if args.display:
+        log.info("DISPLAY MODE: bridge renders directly via SDL2 (no ffmpeg)")
+        ffmpeg_proc = None
+        ffmpeg_cmd = None
+        viewer_url = "(SDL2 window — zero-latency)"
+        output_mode = "display"
+    elif args.raw:
         # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
         # This isolates whether latency is in ffmpeg/muxer or elsewhere.
         log.info("RAW MODE: bypassing ffmpeg, piping directly to ffplay")
@@ -741,9 +752,15 @@ def main():
     print(f"  Resolution   : {width}x{height} @ {args.fps} fps")
     if args.raw:
         print(f"  Mode         : RAW (no ffmpeg, direct ffplay)")
+    elif args.display:
+        print(f"  Mode         : DISPLAY (SDL2 zero-latency, no ffmpeg)")
     print()
     low_lat = "-probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext"
-    if output_mode == "raw":
+    if output_mode == "display":
+        print("  FPV: rendered in SDL2 window by gz_image_bridge (zero-latency)")
+        if args.stream:
+            print(f"  Companion stream: udp://{args.stream} (H.264 mpegts)")
+    elif output_mode == "raw":
         print("  FPV + Chase: displayed in ffplay windows directly (no encoding)")
     elif output_mode == "udp":
         print(f"  FPV view:   ffplay {low_lat} udp://@:{args.port}")
@@ -772,7 +789,7 @@ def main():
                 break
 
             # Auto-restart FPV ffmpeg (e.g. TCP viewer disconnect)
-            if ffmpeg_proc.poll() is not None:
+            if ffmpeg_proc and ffmpeg_proc.poll() is not None:
                 rc = ffmpeg_proc.returncode
                 log.info("FPV ffmpeg exited (code %d) — restarting …", rc)
                 if ffmpeg_proc in pm.procs:
