@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FPV simulation launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
+"""Rocket drone FPV launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
 
 Starts the full stack and streams the on-board camera feed so any RTSP/TCP
 video client (VLC, ffplay, Unreal Engine, Unity) can display it.
@@ -9,9 +9,9 @@ Architecture:
                                                               ──► RTSP/TCP stream
 
 Usage (inside the Docker container):
-    python3 start_fpv.py                      # TCP stream on :8554
-    python3 start_fpv.py --rtsp               # RTSP via mediamtx on :8554
-    python3 start_fpv.py --output file:out.mp4  # record to file
+    python3 start_rocket_drone_fpv_park.py                      # TCP stream on :8554
+    python3 start_rocket_drone_fpv_park.py --rtsp               # RTSP via mediamtx on :8554
+    python3 start_rocket_drone_fpv_park.py --output file:out.mp4  # record to file
 
 Viewer examples:
     ffplay tcp://<host>:8554                  # TCP mode (default)
@@ -33,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("start_fpv")
+log = logging.getLogger("start_rocket_drone_fpv_park")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 # Auto-detect paths: if running from the repo (betaloop/ dir), resolve relative
@@ -53,9 +53,10 @@ def _default_path(env_var, repo_relative, docker_absolute):
 AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
 BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
                         "/opt/betaflight/obj/main/betaflight_SITL.elf")
-MSP_RADIO_HOME = _default_path("MspVirtualRadioHome", os.path.join("..", "..", "msp_virtualradio"),
+MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
                                "/opt/msp_virtualradio")
-FPV_WORLD = "fpv_demo_harmonic.sdf"
+FPV_WORLD = "rocket_drone_park_chase.world"
+TOPIC_MODEL_HINT_DEFAULT = "betaflight_vehicle"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
 
@@ -120,7 +121,32 @@ def setup_gazebo_env():
     _prepend("GZ_SIM_SYSTEM_PLUGIN_PATH", plugins, "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
     _prepend("LD_LIBRARY_PATH", "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
 
-    # os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+
+
+def cleanup_before_start():
+    """Clean up any existing processes from previous runs."""
+    log.info("Cleaning up from previous runs...")
+
+    cleanup_cmds = [
+        ("existing Gazebo processes", "pkill -9 -f 'gz sim' 2>/dev/null || true"),
+        ("existing ffmpeg processes", "pkill -9 ffmpeg 2>/dev/null || true"),
+        ("existing image bridge processes", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"),
+        ("existing Betaflight SITL processes", "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true"),
+        ("existing MSP Virtual Radio processes", "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true"),
+        ("existing mediamtx processes", "pkill -9 -f mediamtx 2>/dev/null || true"),
+        ("existing Xvfb processes", "pkill -9 Xvfb 2>/dev/null || true"),
+    ]
+
+    for label, cmd in cleanup_cmds:
+        try:
+            subprocess.run(["bash", "-c", cmd], capture_output=True, timeout=5)
+            log.info("Stopped %s", label)
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    log.info("Cleanup complete")
 
 
 def has_nvidia_gpu():
@@ -151,27 +177,41 @@ def _fix_dri_permissions():
         subprocess.run(["sudo", "chmod", "666", node], capture_output=True)
 
 
-def discover_camera_topic(name_hint="fpv_cam", timeout=30):
-    """List Gazebo topics and find a camera image topic matching *name_hint*.
+def list_camera_topics(name_hint=None):
+    """Return sorted camera image topics, optionally filtered by substring."""
+    try:
+        result = subprocess.run(
+            ["gz", "topic", "-l"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
 
-    If *name_hint* is None, returns the first ``*/image`` topic found.
+    topics = []
+    for line in result.stdout.strip().splitlines():
+        line = line.strip()
+        if not line.endswith("/image"):
+            continue
+        if name_hint and name_hint not in line:
+            continue
+        topics.append(line)
+    return sorted(set(topics))
+
+
+def discover_camera_topic(name_hint="fpv_cam", timeout=30, model_hint=None):
+    """Find a camera image topic matching *name_hint*.
+
+    If model_hint is set, prefer topics containing that substring.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            result = subprocess.run(
-                ["gz", "topic", "-l"],
-                capture_output=True, text=True, timeout=10,
-            )
-            for line in result.stdout.strip().splitlines():
-                line = line.strip()
-                if not line.endswith("/image"):
-                    continue
-                if name_hint and name_hint not in line:
-                    continue
-                return line
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+        topics = list_camera_topics(name_hint=name_hint)
+        if topics:
+            if model_hint:
+                preferred = [topic for topic in topics if model_hint in topic]
+                if preferred:
+                    return preferred[0]
+            return topics[0]
         time.sleep(2)
     return None
 
@@ -208,7 +248,7 @@ def read_image_meta(proc, timeout=30):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="FPV simulation launcher")
+    parser = argparse.ArgumentParser(description="Rocket drone FPV simulation launcher")
     parser.add_argument("--world", default=FPV_WORLD,
                         help=f"World SDF file (default: {FPV_WORLD})")
     parser.add_argument("--elf", default=BF_ELF,
@@ -229,6 +269,12 @@ def main():
                         help="Also stream the chase camera (3rd-person view)")
     parser.add_argument("--chase-port", type=int, default=8555,
                         help="Chase-cam stream port (default: 8555)")
+    parser.add_argument("--fpv-topic", default=None,
+                        help="Use this exact Gazebo image topic for FPV (skip auto-discovery)")
+    parser.add_argument("--chase-topic", default=None,
+                        help="Use this exact Gazebo image topic for chase-cam (skip auto-discovery)")
+    parser.add_argument("--topic-model-hint", default=TOPIC_MODEL_HINT_DEFAULT,
+                        help="Prefer topics that contain this model path segment (e.g. betaflight_vehicle)")
     parser.add_argument("--osd", action="store_true",
                         help="Enable Betaflight OSD overlay on the FPV stream")
     parser.add_argument("--msp-port", type=int, default=5762,
@@ -238,10 +284,13 @@ def main():
     parser.add_argument("--osd-grid", default="53x20",
                         help="OSD grid size for companion OSD (default: 53x20)")
     parser.add_argument("--raw", action="store_true",
-                        help="Bypass ffmpeg: pipe raw frames directly to ffplay (lowest latency)")
+                        help="Bypass ffmpeg: pipe raw frames directly to ffplay (latency test)")
     parser.add_argument("--stream", default="",
                         help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
+
+    # Clean up any existing processes before starting new ones.
+    cleanup_before_start()
 
     # Determine output mode
     if args.output:
@@ -289,15 +338,9 @@ def main():
             _fix_dri_permissions()
         else:
             log.info("Host detected — native GLX, forced EGL")
-    # else:
-    #     log.info("No GPU detected — using software rendering (llvmpipe)")
-    #     os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-
     else:
-        log.info("No NVIDIA GPU detected — using default Mesa rendering")
-        os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
-        os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
-        os.environ.pop("__EGL_VENDOR_LIBRARY_FILENAMES", None)
+        log.info("No GPU detected — using software rendering (llvmpipe)")
+        os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
     # ── 1c. Display setup ──
     # Ogre2's camera sensor needs a display context to render frames.
@@ -390,25 +433,47 @@ def main():
     time.sleep(2)
 
     # ── 6. Discover camera topics ──
-    log.info("Discovering FPV camera image topic …")
-    topic = discover_camera_topic(name_hint="fpv_cam", timeout=30)
-    if not topic:
-        log.error(
-            "Could not find a camera image topic. "
-            "Verify the world SDF includes a model with a camera sensor."
+    if args.fpv_topic:
+        topic = args.fpv_topic
+        log.info("Using explicit FPV camera topic: %s", topic)
+    else:
+        log.info("Discovering FPV camera image topic …")
+        fpv_candidates = list_camera_topics(name_hint="fpv_cam")
+        if fpv_candidates:
+            log.info("FPV candidates: %s", ", ".join(fpv_candidates))
+        topic = discover_camera_topic(
+            name_hint="fpv_cam",
+            timeout=30,
+            model_hint=args.topic_model_hint,
         )
-        pm.shutdown()
-        sys.exit(1)
-    log.info("Found FPV camera topic: %s", topic)
+        if not topic:
+            log.error(
+                "Could not find an FPV camera image topic. "
+                "Verify the world SDF includes a camera sensor named fpv_cam."
+            )
+            pm.shutdown()
+            sys.exit(1)
+        log.info("Found FPV camera topic: %s", topic)
 
     chase_topic = None
     if args.chase_cam:
-        log.info("Discovering chase camera image topic …")
-        chase_topic = discover_camera_topic(name_hint="chase_cam", timeout=30)
-        if not chase_topic:
-            log.warning("Chase camera topic not found — only FPV stream will run")
+        if args.chase_topic:
+            chase_topic = args.chase_topic
+            log.info("Using explicit chase camera topic: %s", chase_topic)
         else:
-            log.info("Found chase camera topic: %s", chase_topic)
+            log.info("Discovering chase camera image topic …")
+            chase_candidates = list_camera_topics(name_hint="chase_cam")
+            if chase_candidates:
+                log.info("Chase candidates: %s", ", ".join(chase_candidates))
+            chase_topic = discover_camera_topic(
+                name_hint="chase_cam",
+                timeout=30,
+                model_hint=args.topic_model_hint,
+            )
+            if not chase_topic:
+                log.warning("Chase camera topic not found — only FPV stream will run")
+            else:
+                log.info("Found chase camera topic: %s", chase_topic)
 
     # ── 7. Start image bridge ──
     if not os.path.isfile(IMAGE_BRIDGE):
@@ -457,6 +522,7 @@ def main():
     # ── 8. Start ffmpeg (or raw ffplay in --raw mode) ──
     if args.raw:
         # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
+        # This isolates whether latency is in ffmpeg/muxer or elsewhere.
         log.info("RAW MODE: bypassing ffmpeg, piping directly to ffplay")
         ffplay_cmd = [
             "ffplay",
@@ -478,7 +544,7 @@ def main():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        ffmpeg_cmd = ffplay_cmd
+        ffmpeg_cmd = ffplay_cmd  # for auto-restart
         viewer_url = "(raw ffplay window)"
         output_mode = "raw"
     else:
@@ -506,19 +572,19 @@ def main():
             "-s", f"{width}x{height}",
             "-r", str(args.fps),
             "-i", "pipe:0",
-            "-pix_fmt", "yuv420p",     # convert to standard 4:2:0 (not 4:4:4)
+            "-pix_fmt", "yuv420p",
         ]
         if use_nvenc:
             ffmpeg_input += [
                 "-c:v", "h264_nvenc",
-                "-preset", "p1",        # fastest NVENC preset
-                "-tune", "ull",         # ultra-low-latency
+                "-preset", "p1",
+                "-tune", "ull",
                 "-rc", "cbr",
                 "-b:v", "4M",
-                "-g", "1",              # every frame is a keyframe
+                "-g", "1",
                 "-bf", "0",
-                "-delay", "0",          # zero encoder-internal frame delay
-                "-zerolatency", "1",    # disable reordering
+                "-delay", "0",
+                "-zerolatency", "1",
             ]
         else:
             ffmpeg_input += [
@@ -527,17 +593,14 @@ def main():
                 "-tune", "zerolatency",
                 "-g", "1",
             ]
-        ffmpeg_input += ["-flush_packets", "1"]  # flush every packet immediately
+        ffmpeg_input += ["-flush_packets", "1"]
 
         if output_mode == "udp":
-            # UDP + MPEG-TS with zero mux delay — fire-and-forget, lowest latency.
-            # ffmpeg never blocks: packets are silently dropped if no viewer is
-            # listening.  When ffplay starts it gets the very next frame.
             ffmpeg_output = [
                 "-muxdelay", "0", "-muxpreload", "0",
                 "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
             ]
-            viewer_url = f"udp://@:{args.port}"  # ffplay bind syntax
+            viewer_url = f"udp://@:{args.port}"
         elif output_mode == "tcp":
             ffmpeg_output = [
                 "-muxdelay", "0", "-muxpreload", "0",
@@ -648,7 +711,7 @@ def main():
                     chase_ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
                     chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
                 else:
-                    chase_ffmpeg_output = ffmpeg_output  # file — same as FPV
+                    chase_ffmpeg_output = ffmpeg_output
                     chase_viewer_url = "(same as FPV)"
 
                 chase_ffmpeg_cmd = chase_ffmpeg_input + chase_ffmpeg_output
@@ -656,9 +719,9 @@ def main():
                 chase_ffmpeg_proc = pm.spawn(
                     chase_ffmpeg_cmd,
                     stdin=chase_bridge_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
     # ── 10. Print connection info ──
     print()

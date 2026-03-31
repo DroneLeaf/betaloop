@@ -285,6 +285,8 @@ def main():
                         help="OSD grid size for companion OSD (default: 53x20)")
     parser.add_argument("--raw", action="store_true",
                         help="Bypass ffmpeg: pipe raw frames to ffplay (latency test)")
+    parser.add_argument("--stream", default="",
+                        help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
 
     # Output mode
@@ -486,6 +488,9 @@ def main():
                                "--osd-grid", args.osd_grid]
             log.info("Companion OSD server on port %d (grid %s)",
                      args.osd_server_port, args.osd_grid)
+        if args.stream:
+            img_bridge_cmd += ["--stream", args.stream]
+            log.info("Streaming raw frames to udp://%s", args.stream)
 
         bridge_proc = pm.spawn(
             img_bridge_cmd,
