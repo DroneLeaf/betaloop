@@ -539,6 +539,8 @@ def parse_args():
                         help="Skip ffmpeg entirely, pipe raw frames directly into ffplay")
     parser.add_argument("--display", action="store_true",
                         help="Render in SDL2 window inside gz_image_bridge (lowest latency)")
+    parser.add_argument("--shm", action="store_true",
+                        help="Expose frames via POSIX shared memory for local tracker (zero-latency)")
     parser.add_argument("--chase-topic", default=None,
                         help="Use this exact Gazebo image topic for chase-cam (skip auto-discovery)")
     parser.add_argument("--topic-model-hint", default=TOPIC_MODEL_HINT_DEFAULT,
@@ -1056,8 +1058,14 @@ def _run_stream_mode(args, pm, chase_topic, output_mode, gpu_available):
     else:
         log.info("Using libx264 software encoder")
 
+    extra_flags = []
+    if args.display:
+        extra_flags.append("--display")
+    if args.shm:
+        extra_flags.append("--shm")
+
     png_bridge_proc = pm.spawn(
-        [IMAGE_BRIDGE, chase_topic] + (["--display"] if args.display else []),
+        [IMAGE_BRIDGE, chase_topic] + extra_flags,
         stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
