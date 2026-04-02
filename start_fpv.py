@@ -241,6 +241,8 @@ def main():
                         help="Bypass ffmpeg: pipe raw frames directly to ffplay (lowest latency)")
     parser.add_argument("--display", action="store_true",
                         help="SDL2 direct display in gz_image_bridge (zero-latency, no ffmpeg)")
+    parser.add_argument("--shm", action="store_true",
+                        help="Expose frames via POSIX shared memory for local tracker (zero-latency)")
     parser.add_argument("--stream", default="",
                         help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
@@ -436,6 +438,9 @@ def main():
     if args.display:
         bridge_cmd += ["--display"]
         log.info("SDL2 direct display mode (zero-latency)")
+    if args.shm:
+        bridge_cmd += ["--shm"]
+        log.info("Shared memory frame server enabled")
 
     bridge_proc = pm.spawn(
         bridge_cmd,
