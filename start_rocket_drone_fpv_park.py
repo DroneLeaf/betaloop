@@ -22,6 +22,8 @@ Viewer examples:
 import argparse
 import logging
 import os
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -216,6 +218,22 @@ def discover_camera_topic(name_hint="fpv_cam", timeout=30, model_hint=None):
     return None
 
 
+def discover_camera_topic_multi(name_hints, timeout=30, model_hint=None):
+    """Find a camera topic using multiple possible hint substrings."""
+    hints = [hint for hint in name_hints if hint]
+    if not hints:
+        return None
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for hint in hints:
+            topic = discover_camera_topic(name_hint=hint, timeout=1, model_hint=model_hint)
+            if topic:
+                return topic
+        time.sleep(1)
+    return None
+
+
 def read_image_meta(proc, timeout=30):
     """Read IMGMETA line from the bridge's stderr (width, height, pix_fmt)."""
     import select
@@ -243,6 +261,128 @@ def read_image_meta(proc, timeout=30):
         if proc.poll() is not None:
             break
     return None, None, None
+
+
+def find_and_announce_window(
+    proc_name: str = "gz_image_bridge",
+    pid: int | None = None,
+    timeout: float = 10.0,
+    announce_key: str = "GZ_WINDOW_ID",
+) -> None:
+    """Poll for the SDL window and print a machine-readable window id."""
+    have_xdotool = shutil.which("xdotool") is not None
+    have_xprop = shutil.which("xprop") is not None
+
+    if not have_xdotool and not have_xprop:
+        log.warning("Neither xdotool nor xprop is installed; cannot announce %s window id", proc_name)
+        return
+
+    def _xprop_find_by_pid(target_pid: int) -> str | None:
+        def _window_score(token: str) -> int:
+            """Prefer visible windows with larger geometry."""
+            score = 0
+            try:
+                info = subprocess.run(
+                    ["xwininfo", "-id", token],
+                    capture_output=True,
+                    text=True,
+                )
+                if info.returncode != 0:
+                    return score
+
+                out = info.stdout
+                if "Map State: IsViewable" in out:
+                    score += 1_000_000
+
+                w_match = re.search(r"Width:\s+(\d+)", out)
+                h_match = re.search(r"Height:\s+(\d+)", out)
+                if w_match and h_match:
+                    score += int(w_match.group(1)) * int(h_match.group(1))
+            except Exception:
+                pass
+            return score
+
+        try:
+            listing = subprocess.run(
+                ["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
+                capture_output=True,
+                text=True,
+            )
+            if listing.returncode != 0:
+                listing = subprocess.run(
+                    ["xprop", "-root", "_NET_CLIENT_LIST"],
+                    capture_output=True,
+                    text=True,
+                )
+            if listing.returncode != 0:
+                return None
+
+            candidates: list[tuple[int, str]] = []
+            for token in re.findall(r"0x[0-9a-fA-F]+", listing.stdout):
+                pid_query = subprocess.run(
+                    ["xprop", "-id", token, "_NET_WM_PID"],
+                    capture_output=True,
+                    text=True,
+                )
+                if pid_query.returncode != 0:
+                    continue
+                pid_match = re.search(r"=\s*(\d+)", pid_query.stdout)
+                if pid_match and int(pid_match.group(1)) == target_pid:
+                    candidates.append((_window_score(token), token))
+
+            if candidates:
+                _score, token = max(candidates, key=lambda item: item[0])
+                return str(int(token, 16))
+        except Exception:
+            return None
+        return None
+
+    deadline = time.time() + max(1.0, timeout)
+    last_wid: str | None = None
+    stable_hits = 0
+    required_stable_hits = 3
+    while time.time() < deadline:
+        candidate_wid: str | None = None
+        try:
+            if have_xprop and pid:
+                # Prefer WM client-list lookup first; it usually returns the
+                # top-level window id that Qt can reparent reliably.
+                fallback_wid = _xprop_find_by_pid(pid)
+                if fallback_wid:
+                    candidate_wid = fallback_wid
+
+            if candidate_wid is None and have_xdotool:
+                cmd = ["xdotool", "search", "--onlyvisible"]
+                if pid:
+                    cmd += ["--pid", str(pid)]
+                else:
+                    cmd += ["--name", proc_name]
+
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                wids = [wid.strip() for wid in result.stdout.splitlines() if wid.strip()]
+                if wids:
+                    candidate_wid = wids[0]
+        except Exception:
+            pass
+
+        if candidate_wid:
+            if candidate_wid == last_wid:
+                stable_hits += 1
+            else:
+                last_wid = candidate_wid
+                stable_hits = 1
+
+            if stable_hits >= required_stable_hits:
+                print(f"{announce_key}={candidate_wid}", flush=True)
+                return
+
+        time.sleep(0.2)
+
+    if last_wid:
+        print(f"{announce_key}={last_wid}", flush=True)
+        return
+
+    log.warning("Could not find %s window ID", proc_name)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -466,11 +606,15 @@ def main():
             log.info("Using explicit chase camera topic: %s", chase_topic)
         else:
             log.info("Discovering chase camera image topic …")
-            chase_candidates = list_camera_topics(name_hint="chase_cam")
+            chase_hints = ("chase_cam", "chase-cam")
+            chase_candidates: list[str] = []
+            for hint in chase_hints:
+                chase_candidates.extend(list_camera_topics(name_hint=hint))
+            chase_candidates = sorted(set(chase_candidates))
             if chase_candidates:
                 log.info("Chase candidates: %s", ", ".join(chase_candidates))
-            chase_topic = discover_camera_topic(
-                name_hint="chase_cam",
+            chase_topic = discover_camera_topic_multi(
+                chase_hints,
                 timeout=30,
                 model_hint=args.topic_model_hint,
             )
@@ -509,7 +653,7 @@ def main():
 
     bridge_proc = pm.spawn(
         bridge_cmd,
-        stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
@@ -533,9 +677,15 @@ def main():
     if args.display:
         ffmpeg_proc = None
         ffmpeg_cmd = None
-        viewer_url = "(SDL2 window in gz_image_bridge)"
+        viewer_url = "(embedded Qt window)"
         output_mode = "display"
         log.info("DISPLAY MODE: video rendered directly by gz_image_bridge")
+        import threading
+        threading.Thread(
+            target=find_and_announce_window,
+            kwargs={"pid": bridge_proc.pid, "timeout": 15.0},
+            daemon=True,
+        ).start()
     elif args.raw:
         # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
         # This isolates whether latency is in ffmpeg/muxer or elsewhere.
@@ -652,8 +802,15 @@ def main():
     chase_ffmpeg_cmd = None
     if chase_topic:
         log.info("Starting chase camera bridge")
+        chase_bridge_cmd = [IMAGE_BRIDGE, chase_topic]
+        if args.display:
+            chase_bridge_cmd += ["--display"]
+            log.info("Chase bridge SDL2 direct display mode enabled")
+        if args.shm:
+            chase_bridge_cmd += ["--shm"]
+            log.info("Chase bridge shared memory frame server enabled")
         chase_bridge_proc = pm.spawn(
-            [IMAGE_BRIDGE, chase_topic],
+            chase_bridge_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -668,7 +825,22 @@ def main():
         else:
             log.info("Chase camera: %dx%d %s", cw, ch, cpf)
 
-            if args.raw:
+            if args.display:
+                chase_ffmpeg_proc = None
+                chase_ffmpeg_cmd = None
+                chase_viewer_url = "(embedded Qt window)"
+                log.info("DISPLAY MODE: chase video rendered directly by gz_image_bridge")
+                import threading
+                threading.Thread(
+                    target=find_and_announce_window,
+                    kwargs={
+                        "pid": chase_bridge_proc.pid,
+                        "timeout": 15.0,
+                        "announce_key": "GZ_WINDOW_ID_CHASE",
+                    },
+                    daemon=True,
+                ).start()
+            elif args.raw:
                 chase_ffplay_cmd = [
                     "ffplay",
                     "-f", "rawvideo",
