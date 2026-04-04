@@ -190,8 +190,8 @@ def main():
                         help="Also display the chase camera (3rd-person SDL2 window)")
     parser.add_argument("--osd", action="store_true",
                         help="Enable Betaflight OSD overlay on the FPV stream")
-    parser.add_argument("--msp-port", type=int, default=5762,
-                        help="Betaflight MSP TCP port for OSD telemetry (default: 5762 = UART2)")
+    parser.add_argument("--msp-port", type=int, default=5763,
+                        help="Betaflight MSP TCP port for OSD telemetry (default: 5763 = UART3)")
     parser.add_argument("--display", action="store_true", default=True,
                         help="SDL2 direct display in gz_image_bridge (default: enabled)")
     parser.add_argument("--shm", action="store_true",

@@ -238,8 +238,8 @@ def main():
                         help="Explicit Gazebo chase image topic (skip auto-discovery)")
     parser.add_argument("--osd", action="store_true",
                         help="Enable Betaflight OSD overlay on the FPV stream")
-    parser.add_argument("--msp-port", type=int, default=5762,
-                        help="BF MSP TCP port for OSD telemetry (default: 5762)")
+    parser.add_argument("--msp-port", type=int, default=5763,
+                        help="BF MSP TCP port for OSD telemetry (default: 5763 = UART3)")
     parser.add_argument("--display", action="store_true", default=True,
                         help="SDL2 direct display in gz_image_bridge (default: enabled)")
     parser.add_argument("--shm", action="store_true",
