@@ -8,7 +8,7 @@ Architecture:
     Gazebo (camera sensor) ──gz-transport──► gz_image_bridge ──pipe──► ffmpeg
                                                               ──► RTSP/TCP stream
 
-Usage (inside the Docker container):
+Usage:
     python3 start_rocket_drone_fpv.py                      # TCP stream on :8554
     python3 start_rocket_drone_fpv.py --rtsp               # RTSP via mediamtx on :8554
     python3 start_rocket_drone_fpv.py --output file:out.mp4  # record to file
@@ -37,33 +37,23 @@ log = logging.getLogger("start_rocket_drone_fpv")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 # Auto-detect paths: if running from the repo (betaloop/ dir), resolve relative
-# to the repo root. Otherwise fall back to Docker paths (/opt/...).
+# to the repo root.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 
-def _default_path(env_var, repo_relative, docker_absolute):
-    """Return env override, or repo-relative path if it exists, else Docker path."""
+def _default_path(env_var, repo_relative):
+    """Return env override, or repo-relative path."""
     if os.environ.get(env_var):
         return os.environ[env_var]
-    repo_path = os.path.join(_REPO_ROOT, repo_relative)
-    if os.path.exists(repo_path):
-        return repo_path
-    return docker_absolute
+    return os.path.join(_REPO_ROOT, repo_relative)
 
-AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
-BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
-                        "/opt/betaflight/obj/main/betaflight_SITL.elf")
-MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
-                               "/opt/msp_virtualradio")
+AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo")
+BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"))
+MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"))
 FPV_WORLD = "rocket_drone.world"
 TOPIC_MODEL_HINT_DEFAULT = "betaflight_vehicle"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
-
-
-def _is_container():
-    """Detect if running inside a Docker container."""
-    return os.path.exists("/.dockerenv") or os.environ.get("container") == "docker"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -159,22 +149,6 @@ def has_nvidia_gpu():
         return result.returncode == 0 and result.stdout.strip() != ""
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def _fix_dri_permissions():
-    """Grant the current user access to /dev/dri render nodes.
-
-    Inside Docker with --gpus all, the host GID on /dev/dri/renderD* often
-    doesn't match any container group.  We chmod the nodes to be world-
-    readable/writable (safe inside a single-user container).
-    """
-    import glob
-    render_nodes = glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*")
-    for node in render_nodes:
-        if os.access(node, os.R_OK | os.W_OK):
-            continue
-        log.info("Fixing permissions on %s", node)
-        subprocess.run(["sudo", "chmod", "666", node], capture_output=True)
 
 
 def list_camera_topics(name_hint=None):
@@ -319,29 +293,17 @@ def main():
 
     # ── 1b. GPU detection & rendering setup ──
     gpu_available = has_nvidia_gpu()
-    in_container = _is_container()
 
     if gpu_available:
         log.info("NVIDIA GPU detected — using GPU-accelerated rendering")
         os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
 
-        # Force NVIDIA EGL vendor ICD everywhere — Ogre2's camera sensor uses
-        # EGL for off-screen rendering.  Without this, Mesa's DRI2 path is
-        # tried and falls back to software ("failed to create dri2 screen").
-        # This is safe on the host: it only affects EGL, not GLX.
         nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
         if os.path.isfile(nvidia_icd):
             os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
             log.info("Forcing NVIDIA EGL vendor ICD")
 
-        if in_container:
-            # Inside Docker we must also force GLX to use NVIDIA — the
-            # container toolkit injects replacement libs that Mesa can't use.
-            os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
-            log.info("Container detected — also forcing NVIDIA GLX vendor")
-            _fix_dri_permissions()
-        else:
-            log.info("Host detected — native GLX, forced EGL")
+        log.info("Native GLX, forced EGL")
     else:
         log.info("No GPU detected — using software rendering (llvmpipe)")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -349,22 +311,18 @@ def main():
     # ── 1c. Display setup ──
     # Ogre2's camera sensor needs a display context to render frames.
     if args.gazebo:
-        # GUI mode — need the host's real X display
         if not os.environ.get("DISPLAY"):
             log.error(
                 "No DISPLAY set — the Gazebo GUI needs a display.\n"
-                "  In Docker, run with: -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix"
+                "  Set DISPLAY env var before running."
             )
             sys.exit(1)
-        # Don't force __GLX_VENDOR_LIBRARY_NAME when talking to the host X server
         os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
         log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
-    elif not in_container and os.environ.get("DISPLAY"):
-        # Host headless mode — use the native display (low latency, no Xvfb).
-        # Native NVIDIA GLX works fine here since we didn't set __GLX_VENDOR_LIBRARY_NAME.
+    elif os.environ.get("DISPLAY"):
         log.info("Using native display %s (low-latency host mode)", os.environ["DISPLAY"])
     else:
-        # Container headless or no display — start Xvfb
+        # No display — start Xvfb
         for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:
             try:
                 os.remove(lockfile)

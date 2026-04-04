@@ -30,15 +30,12 @@ log = logging.getLogger("start_shahed_chase")
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 
-def _default_path(env_var, repo_relative, docker_absolute):
+def _default_path(env_var, repo_relative):
     if os.environ.get(env_var):
         return os.environ[env_var]
-    repo_path = os.path.join(_REPO_ROOT, repo_relative)
-    if os.path.exists(repo_path):
-        return repo_path
-    return docker_absolute
+    return os.path.join(_REPO_ROOT, repo_relative)
 
-AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
+AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo")
 TARGET_WORLD = "shahed_chase_park.world"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
@@ -56,9 +53,6 @@ def _log_rate_limited(key, interval_s, level, message, *args):
         return
     _LAST_LOG_TIMES[key] = now
     getattr(log, level)(message, *args)
-
-def _is_container():
-    return os.path.exists("/.dockerenv") or os.environ.get("container") == "docker"
 
 
 class ProcessManager:
@@ -195,15 +189,6 @@ def has_nvidia_gpu():
         return result.returncode == 0 and result.stdout.strip() != ""
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def _fix_dri_permissions():
-    render_nodes = glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*")
-    for node in render_nodes:
-        if os.access(node, os.R_OK | os.W_OK):
-            continue
-        log.info("Fixing permissions on %s", node)
-        subprocess.run(["sudo", "chmod", "666", node], capture_output=True)
 
 
 def list_camera_topics(name_hint=None):
@@ -565,7 +550,6 @@ def _configure_runtime(args, pm):
     setup_gazebo_env()
 
     gpu_available = has_nvidia_gpu()
-    in_container = _is_container()
 
     if gpu_available:
         log.info("NVIDIA GPU detected, using GPU rendering")
@@ -573,9 +557,6 @@ def _configure_runtime(args, pm):
         nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
         if os.path.isfile(nvidia_icd):
             os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
-        if in_container:
-            os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
-            _fix_dri_permissions()
     else:
         log.info("No GPU detected, using software rendering")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -586,7 +567,7 @@ def _configure_runtime(args, pm):
             sys.exit(1)
         os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
         log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
-    elif not in_container and os.environ.get("DISPLAY"):
+    elif os.environ.get("DISPLAY"):
         log.info("Using native display %s", os.environ["DISPLAY"])
     else:
         for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:

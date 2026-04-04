@@ -5,7 +5,7 @@ Replaces Gazebo physics with the HEAR Simulink rigid-body dynamics solver.
 Gazebo becomes a pose-driven visualizer and camera renderer only.
 
 Process launch order:
-    1. [Xvfb]       — virtual display (container / headless only)
+    1. [Xvfb]       — virtual display (headless only)
     2. [mediamtx]   — RTSP server (if --rtsp)
     3. Gazebo        — vis-only world (rocket_drone_vis.sdf), no physics
     4. bf_sim_bridge — Simulink dynamics, UDP ↔ BF SITL + Gazebo
@@ -47,46 +47,35 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 
-def _default_path(env_var, repo_relative, docker_absolute):
-    """Return env override, or repo-relative path if it exists, else Docker path."""
+def _default_path(env_var, repo_relative):
+    """Return env override, or repo-relative path."""
     if os.environ.get(env_var):
         return os.environ[env_var]
-    repo_path = os.path.join(_REPO_ROOT, repo_relative)
-    if os.path.exists(repo_path):
-        return repo_path
-    return docker_absolute
+    return os.path.join(_REPO_ROOT, repo_relative)
 
 
-AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo", "/opt/aeroloop_gazebo")
+AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo")
 BF_ELF = _default_path(
     "BF_ELF",
     os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
-    "/opt/betaflight/obj/main/betaflight_SITL.elf",
 )
 MSP_RADIO_HOME = _default_path(
     "MSP_RADIO_HOME",
     os.path.join("..", "msp_virtualradio"),
-    "/opt/msp_virtualradio",
 )
 BF_SIM_BRIDGE = _default_path(
     "BF_SIM_BRIDGE",
     os.path.join("bf_sim_bridge", "build", "bf_sim_bridge"),
-    "/opt/bf_sim_bridge/build/bf_sim_bridge",
 )
 SIMULINK_LIB = _default_path(
     "SIMULINK_LIB",
     os.path.join("HEAR_Simulations", "Compiled_models", "rocket_drone_quad_SITL", "libinterface_simulink.so"),
-    "/opt/HEAR_Simulations/Compiled_models/rocket_drone_quad_SITL/libinterface_simulink.so",
 )
 
 VIS_WORLD = "rocket_drone_vis.sdf"
 TOPIC_MODEL_HINT = "betaflight_vehicle"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
-
-
-def _is_container():
-    return os.path.exists("/.dockerenv") or os.environ.get("container") == "docker"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -166,16 +155,6 @@ def has_nvidia_gpu():
         return result.returncode == 0 and result.stdout.strip() != ""
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def _fix_dri_permissions():
-    import glob
-    render_nodes = glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*")
-    for node in render_nodes:
-        if os.access(node, os.R_OK | os.W_OK):
-            continue
-        log.info("Fixing permissions on %s", node)
-        subprocess.run(["sudo", "chmod", "666", node], capture_output=True)
 
 
 def list_camera_topics(name_hint=None):
@@ -316,7 +295,6 @@ def main():
 
     # ── 1b. GPU detection ──
     gpu_available = has_nvidia_gpu()
-    in_container = _is_container()
 
     if gpu_available:
         log.info("NVIDIA GPU detected — using GPU-accelerated rendering")
@@ -325,10 +303,6 @@ def main():
         if os.path.isfile(nvidia_icd):
             os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
             log.info("Forcing NVIDIA EGL vendor ICD")
-        if in_container:
-            os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
-            log.info("Container detected — also forcing NVIDIA GLX vendor")
-            _fix_dri_permissions()
     else:
         log.info("No GPU detected — using software rendering (llvmpipe)")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -340,7 +314,7 @@ def main():
             sys.exit(1)
         os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
         log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
-    elif not in_container and os.environ.get("DISPLAY"):
+    elif os.environ.get("DISPLAY"):
         log.info("Using native display %s (host headless mode)", os.environ["DISPLAY"])
     else:
         for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:
