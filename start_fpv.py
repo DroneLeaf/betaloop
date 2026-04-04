@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""FPV simulation launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
+"""FPV simulation launcher — Betaflight SITL + Gazebo camera → SDL2 display.
 
-Starts the full stack and streams the on-board camera feed so any RTSP/TCP
-video client (VLC, ffplay, Unreal Engine, Unity) can display it.
+Starts the full stack and renders the on-board camera feed in an SDL2 window
+via gz_image_bridge.  Frames can also be exposed via POSIX shared memory
+(--shm) for local trackers.
 
 Architecture:
-    Gazebo (camera sensor) ──gz-transport──► gz_image_bridge ──pipe──► ffmpeg
-                                                              ──► RTSP/TCP stream
+    Gazebo (camera sensor) ──gz-transport──► gz_image_bridge ──► SDL2 window
+                                                               └─► /dev/shm (--shm)
 
 Usage:
-    python3 start_fpv.py                      # TCP stream on :8554
-    python3 start_fpv.py --rtsp               # RTSP via mediamtx on :8554
-    python3 start_fpv.py --output file:out.mp4  # record to file
-
-Viewer examples:
-    ffplay tcp://<host>:8554                  # TCP mode (default)
-    ffplay rtsp://<host>:8554/fpv             # RTSP mode (--rtsp)
-    vlc rtsp://<host>:8554/fpv               # RTSP with VLC
+    python3 start_fpv.py --display --shm               # SDL2 + shared memory
+    python3 start_fpv.py --display --shm --chase-cam   # + chase camera
+    python3 start_fpv.py --display --shm --osd         # + OSD overlay
 """
 
 import argparse
@@ -52,7 +48,6 @@ BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "beta
 MSP_RADIO_HOME = _default_path("MspVirtualRadioHome", os.path.join("..", "..", "msp_virtualradio"))
 FPV_WORLD = "fpv_demo_harmonic.sdf"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
-STREAM_PORT = 8554
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -187,22 +182,12 @@ def main():
                         help=f"World SDF file (default: {FPV_WORLD})")
     parser.add_argument("--elf", default=BF_ELF,
                         help="Path to betaflight_SITL.elf")
-    parser.add_argument("--port", type=int, default=STREAM_PORT,
-                        help="Stream output port (default: 8554)")
-    parser.add_argument("--rtsp", action="store_true",
-                        help="Use RTSP streaming via mediamtx")
-    parser.add_argument("--output", default=None,
-                        help="Override output: 'udp' (default), 'tcp', 'rtsp', or 'file:<path>'")
     parser.add_argument("--gazebo", action="store_true",
                         help="Show the Gazebo GUI (default: headless)")
     parser.add_argument("--no-transmitter", action="store_true",
                         help="Skip starting the MSP virtual radio")
-    parser.add_argument("--fps", type=int, default=30,
-                        help="Output stream FPS (default: 30)")
     parser.add_argument("--chase-cam", action="store_true",
-                        help="Also stream the chase camera (3rd-person view)")
-    parser.add_argument("--chase-port", type=int, default=8555,
-                        help="Chase-cam stream port (default: 8555)")
+                        help="Also display the chase camera (3rd-person SDL2 window)")
     parser.add_argument("--osd", action="store_true",
                         help="Enable Betaflight OSD overlay on the FPV stream")
     parser.add_argument("--msp-port", type=int, default=5762,
@@ -211,23 +196,11 @@ def main():
                         help="TCP port for companion OSD server (LeafFC/HEAR), 0=disabled")
     parser.add_argument("--osd-grid", default="53x20",
                         help="OSD grid size for companion OSD (default: 53x20)")
-    parser.add_argument("--raw", action="store_true",
-                        help="Bypass ffmpeg: pipe raw frames directly to ffplay (lowest latency)")
-    parser.add_argument("--display", action="store_true",
-                        help="SDL2 direct display in gz_image_bridge (zero-latency, no ffmpeg)")
+    parser.add_argument("--display", action="store_true", default=True,
+                        help="SDL2 direct display in gz_image_bridge (default: enabled)")
     parser.add_argument("--shm", action="store_true",
                         help="Expose frames via POSIX shared memory for local tracker (zero-latency)")
-    parser.add_argument("--stream", default="",
-                        help="Stream raw (no OSD) H.264 over UDP to host:port (e.g. 10.0.0.87:5000)")
     args = parser.parse_args()
-
-    # Determine output mode
-    if args.output:
-        output_mode = args.output
-    elif args.rtsp:
-        output_mode = "rtsp"
-    else:
-        output_mode = "udp"
 
     pm = ProcessManager()
 
@@ -301,17 +274,7 @@ def main():
             sys.exit(1)
         os.environ["DISPLAY"] = ":99"
 
-    # ── 2. RTSP server (optional) ──
-    if output_mode == "rtsp":
-        mediamtx = "/usr/local/bin/mediamtx"
-        if not os.path.isfile(mediamtx):
-            log.error("mediamtx not found at %s — install it or use --output tcp", mediamtx)
-            sys.exit(1)
-        log.info("Starting mediamtx RTSP server")
-        pm.spawn([mediamtx], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
-
-    # ── 3. Gazebo ──
+    # ── 2. Gazebo ──
     world_path = args.world
     if not os.path.isabs(world_path):
         world_path = os.path.join(AEROLOOP_HOME, "worlds", world_path)
@@ -383,7 +346,7 @@ def main():
         pm.shutdown()
         sys.exit(1)
 
-    bridge_cmd = [IMAGE_BRIDGE, topic]
+    bridge_cmd = [IMAGE_BRIDGE, topic, "--display"]
     if args.osd:
         bridge_cmd += ["--osd", "--msp-port", str(args.msp_port)]
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
@@ -392,19 +355,14 @@ def main():
                        "--osd-grid", args.osd_grid]
         log.info("Companion OSD server on port %d (grid %s)",
                  args.osd_server_port, args.osd_grid)
-    if args.stream:
-        bridge_cmd += ["--stream", args.stream]
-        log.info("Streaming raw frames to udp://%s", args.stream)
-    if args.display:
-        bridge_cmd += ["--display"]
-        log.info("SDL2 direct display mode (zero-latency)")
     if args.shm:
         bridge_cmd += ["--shm"]
         log.info("Shared memory frame server enabled")
+    log.info("SDL2 direct display mode (zero-latency)")
 
     bridge_proc = pm.spawn(
         bridge_cmd,
-        stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
 
@@ -424,307 +382,49 @@ def main():
         sys.exit(1)
     log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-    # ── 8. Start ffmpeg (or raw ffplay or display mode) ──
-    if args.display:
-        # SDL2 direct display — no ffmpeg needed.
-        # The bridge renders directly to an SDL2 window.
-        log.info("DISPLAY MODE: bridge renders directly via SDL2 (no ffmpeg)")
-        ffmpeg_proc = None
-        ffmpeg_cmd = None
-        viewer_url = "(SDL2 window — zero-latency)"
-        output_mode = "display"
-    elif args.raw:
-        # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
-        log.info("RAW MODE: bypassing ffmpeg, piping directly to ffplay")
-        ffplay_cmd = [
-            "ffplay",
-            "-f", "rawvideo",
-            "-pixel_format", pix_fmt,
-            "-video_size", f"{width}x{height}",
-            "-framerate", str(args.fps),
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-framedrop",
-            "-sync", "video",
-            "-window_title", f"FPV RAW {width}x{height}",
-            "-",
-        ]
-        log.info("Starting: %s", " ".join(ffplay_cmd[:6]) + " ...")
-        ffmpeg_proc = pm.spawn(
-            ffplay_cmd,
-            stdin=bridge_proc.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        ffmpeg_cmd = ffplay_cmd
-        viewer_url = "(raw ffplay window)"
-        output_mode = "raw"
-    else:
-        # Try NVENC hardware encoder first (RTX/GTX GPUs), fall back to libx264.
-        use_nvenc = False
-        if gpu_available:
-            try:
-                probe = subprocess.run(
-                    ["ffmpeg", "-hide_banner", "-encoders"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if "h264_nvenc" in probe.stdout:
-                    use_nvenc = True
-                    log.info("Using NVENC hardware encoder (h264_nvenc)")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-        if not use_nvenc:
-            log.info("Using software encoder (libx264 ultrafast)")
-
-        ffmpeg_input = [
-            "ffmpeg",
-            "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", pix_fmt,
-            "-s", f"{width}x{height}",
-            "-r", str(args.fps),
-            "-i", "pipe:0",
-            "-pix_fmt", "yuv420p",     # convert to standard 4:2:0 (not 4:4:4)
-        ]
-        if use_nvenc:
-            ffmpeg_input += [
-                "-c:v", "h264_nvenc",
-                "-preset", "p1",        # fastest NVENC preset
-                "-tune", "ull",         # ultra-low-latency
-                "-rc", "cbr",
-                "-b:v", "4M",
-                "-g", "1",              # every frame is a keyframe
-                "-bf", "0",
-                "-delay", "0",          # zero encoder-internal frame delay
-                "-zerolatency", "1",    # disable reordering
-            ]
-        else:
-            ffmpeg_input += [
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-g", "1",
-            ]
-        ffmpeg_input += ["-flush_packets", "1"]  # flush every packet immediately
-
-        if output_mode == "udp":
-            # UDP + MPEG-TS with zero mux delay — fire-and-forget, lowest latency.
-            # ffmpeg never blocks: packets are silently dropped if no viewer is
-            # listening.  When ffplay starts it gets the very next frame.
-            ffmpeg_output = [
-                "-muxdelay", "0", "-muxpreload", "0",
-                "-f", "mpegts", f"udp://127.0.0.1:{args.port}?pkt_size=1316",
-            ]
-            viewer_url = f"udp://@:{args.port}"  # ffplay bind syntax
-        elif output_mode == "tcp":
-            ffmpeg_output = [
-                "-muxdelay", "0", "-muxpreload", "0",
-                "-f", "mpegts", f"tcp://0.0.0.0:{args.port}?listen=1&tcp_nodelay=1",
-            ]
-            viewer_url = f"tcp://<host>:{args.port}"
-        elif output_mode == "rtsp":
-            ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/fpv"]
-            viewer_url = f"rtsp://<host>:{args.port}/fpv"
-        elif output_mode.startswith("file:"):
-            filepath = output_mode[5:]
-            ffmpeg_output = ["-f", "mp4", filepath]
-            viewer_url = filepath
-        else:
-            log.error("Unknown output mode: %s", output_mode)
-            pm.shutdown()
-            sys.exit(1)
-
-        ffmpeg_cmd = ffmpeg_input + ffmpeg_output
-        log.info("Starting ffmpeg → %s", output_mode)
-
-        ffmpeg_proc = pm.spawn(
-            ffmpeg_cmd,
-            stdin=bridge_proc.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    # ── 9a. Chase camera pipeline (optional) ──
+    # ── 8. Chase camera (optional) ──
     chase_bridge_proc = None
-    chase_ffmpeg_proc = None
-    chase_viewer_url = None
-    chase_ffmpeg_cmd = None
     if chase_topic:
-        log.info("Starting chase camera bridge")
+        log.info("Starting chase camera bridge (SDL2 display)")
+        chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display"]
         chase_bridge_proc = pm.spawn(
-            [IMAGE_BRIDGE, chase_topic],
-            stdout=subprocess.PIPE,
+            chase_cmd,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-        chase_flags = fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_GETFL)
-        fcntl.fcntl(chase_bridge_proc.stderr, fcntl.F_SETFL, chase_flags | os.O_NONBLOCK)
 
-        log.info("Waiting for first chase camera frame …")
-        cw, ch, cpf = read_image_meta(chase_bridge_proc, timeout=30)
-        if cw is None:
-            log.warning("No chase camera metadata — chase stream disabled")
-            chase_bridge_proc = None
-        else:
-            log.info("Chase camera: %dx%d %s", cw, ch, cpf)
-
-            if args.raw:
-                chase_ffplay_cmd = [
-                    "ffplay",
-                    "-f", "rawvideo",
-                    "-pixel_format", cpf,
-                    "-video_size", f"{cw}x{ch}",
-                    "-framerate", str(args.fps),
-                    "-fflags", "nobuffer",
-                    "-flags", "low_delay",
-                    "-framedrop",
-                    "-sync", "video",
-                    "-window_title", f"Chase RAW {cw}x{ch}",
-                    "-",
-                ]
-                log.info("Starting chase camera ffplay (raw)")
-                chase_ffmpeg_proc = pm.spawn(
-                    chase_ffplay_cmd,
-                    stdin=chase_bridge_proc.stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                chase_ffmpeg_cmd = chase_ffplay_cmd
-                chase_viewer_url = "(raw ffplay window)"
-            else:
-                chase_ffmpeg_input = [
-                    "ffmpeg", "-y",
-                    "-f", "rawvideo", "-pix_fmt", cpf,
-                    "-s", f"{cw}x{ch}", "-r", str(args.fps),
-                    "-i", "pipe:0", "-pix_fmt", "yuv420p",
-                ]
-                if use_nvenc:
-                    chase_ffmpeg_input += [
-                        "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
-                        "-rc", "cbr", "-b:v", "4M", "-g", "1", "-bf", "0",
-                        "-delay", "0", "-zerolatency", "1",
-                    ]
-                else:
-                    chase_ffmpeg_input += [
-                        "-c:v", "libx264", "-preset", "ultrafast",
-                        "-tune", "zerolatency", "-g", "1",
-                    ]
-                chase_ffmpeg_input += ["-flush_packets", "1"]
-
-                if output_mode == "udp":
-                    chase_ffmpeg_output = [
-                        "-muxdelay", "0", "-muxpreload", "0",
-                        "-f", "mpegts", f"udp://127.0.0.1:{args.chase_port}?pkt_size=1316",
-                    ]
-                    chase_viewer_url = f"udp://@:{args.chase_port}"
-                elif output_mode == "tcp":
-                    chase_ffmpeg_output = [
-                        "-muxdelay", "0", "-muxpreload", "0",
-                        "-f", "mpegts", f"tcp://0.0.0.0:{args.chase_port}?listen=1&tcp_nodelay=1",
-                    ]
-                    chase_viewer_url = f"tcp://<host>:{args.chase_port}"
-                elif output_mode == "rtsp":
-                    chase_ffmpeg_output = ["-f", "rtsp", f"rtsp://127.0.0.1:{args.port}/chase"]
-                    chase_viewer_url = f"rtsp://<host>:{args.port}/chase"
-                else:
-                    chase_ffmpeg_output = ffmpeg_output  # file — same as FPV
-                    chase_viewer_url = "(same as FPV)"
-
-                chase_ffmpeg_cmd = chase_ffmpeg_input + chase_ffmpeg_output
-                log.info("Starting chase camera ffmpeg → %s", output_mode)
-                chase_ffmpeg_proc = pm.spawn(
-                    chase_ffmpeg_cmd,
-                    stdin=chase_bridge_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-    # ── 10. Print connection info ──
+    # ── 9. Print connection info ──
     print()
     print("=" * 60)
     print("  FPV Simulation Running")
     print("=" * 60)
     print()
-    print(f"  FPV stream   : {viewer_url}")
-    if chase_viewer_url:
-        print(f"  Chase stream : {chase_viewer_url}")
+    print(f"  FPV display  : SDL2 window (zero-latency)")
+    if chase_topic:
+        print(f"  Chase display: SDL2 window (zero-latency)")
+    if args.shm:
+        print(f"  Shared memory: /dev/shm (zero-copy)")
     print(f"  RC input     : UDP 127.0.0.1:9004  (flight_test.py)")
     print(f"  BF CLI       : TCP 127.0.0.1:5761")
     print(f"  BF Configurator: TCP 127.0.0.1:5760")
     print(f"  FPV topic    : {topic}")
     if chase_topic:
         print(f"  Chase topic  : {chase_topic}")
-    print(f"  Resolution   : {width}x{height} @ {args.fps} fps")
-    if args.raw:
-        print(f"  Mode         : RAW (no ffmpeg, direct ffplay)")
-    elif args.display:
-        print(f"  Mode         : DISPLAY (SDL2 zero-latency, no ffmpeg)")
-    print()
-    low_lat = "-probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext"
-    if output_mode == "display":
-        print("  FPV: rendered in SDL2 window by gz_image_bridge (zero-latency)")
-        if args.stream:
-            print(f"  Companion stream: udp://{args.stream} (H.264 mpegts)")
-    elif output_mode == "raw":
-        print("  FPV + Chase: displayed in ffplay windows directly (no encoding)")
-    elif output_mode == "udp":
-        print(f"  FPV view:   ffplay {low_lat} udp://@:{args.port}")
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} udp://@:{args.chase_port}")
-    elif output_mode == "tcp":
-        print(f"  FPV view:   ffplay {low_lat} tcp://<host>:{args.port}")
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} tcp://<host>:{args.chase_port}")
-    elif output_mode == "rtsp":
-        print(f"  FPV view:   ffplay {low_lat} rtsp://<host>:{args.port}/fpv")
-        if chase_viewer_url:
-            print(f"  Chase view: ffplay {low_lat} rtsp://<host>:{args.port}/chase")
-        print(f"       or:    vlc rtsp://<host>:{args.port}/fpv")
+    print(f"  Resolution   : {width}x{height}")
     print()
     print("  Press Ctrl-C to stop")
     print("=" * 60)
     print()
 
-    # ── 11. Keep alive (auto-restart ffmpeg on viewer disconnect) ──
+    # ── 10. Keep alive ──
     try:
         while True:
-            # FPV bridge is critical — if it dies, we're done
             if bridge_proc.poll() is not None:
                 log.warning("FPV image bridge exited (code %d)", bridge_proc.returncode)
                 break
-
-            # Auto-restart FPV ffmpeg (e.g. TCP viewer disconnect)
-            if ffmpeg_proc and ffmpeg_proc.poll() is not None:
-                rc = ffmpeg_proc.returncode
-                log.info("FPV ffmpeg exited (code %d) — restarting …", rc)
-                if ffmpeg_proc in pm.procs:
-                    pm.procs.remove(ffmpeg_proc)
-                time.sleep(1)
-                ffmpeg_proc = pm.spawn(
-                    ffmpeg_cmd,
-                    stdin=bridge_proc.stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-
-            # Auto-restart chase camera ffmpeg
-            if chase_ffmpeg_proc and chase_ffmpeg_cmd:
-                if chase_bridge_proc and chase_bridge_proc.poll() is not None:
-                    log.warning("Chase camera bridge exited (code %d)", chase_bridge_proc.returncode)
-                    chase_ffmpeg_proc = None
-                    chase_bridge_proc = None
-                elif chase_ffmpeg_proc.poll() is not None:
-                    rc = chase_ffmpeg_proc.returncode
-                    log.info("Chase ffmpeg exited (code %d) — restarting …", rc)
-                    if chase_ffmpeg_proc in pm.procs:
-                        pm.procs.remove(chase_ffmpeg_proc)
-                    time.sleep(1)
-                    chase_ffmpeg_proc = pm.spawn(
-                        chase_ffmpeg_cmd,
-                        stdin=chase_bridge_proc.stdout,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-
+            if chase_bridge_proc and chase_bridge_proc.poll() is not None:
+                log.warning("Chase camera bridge exited (code %d)", chase_bridge_proc.returncode)
+                chase_bridge_proc = None
             time.sleep(2)
     except KeyboardInterrupt:
         pass
