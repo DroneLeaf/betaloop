@@ -3,38 +3,39 @@
 Simulation launcher and orchestrator for
 [Betaflight](https://github.com/betaflight/betaflight) SITL +
 [Gazebo Harmonic](https://gazebosim.org/). Manages the full stack: Gazebo,
-Betaflight SITL, image bridges, ffmpeg video pipelines, and the virtual radio.
+Betaflight SITL, image bridges, SDL2 video display, and the virtual radio.
 
 ## Features
 
 1. Uses real Betaflight firmware (SITL target)
-2. FPV camera with OSD overlay (battery, attitude, flight mode, timer)
-3. Chase camera (3rd-person view)
-4. Low-latency `--raw` mode (bypasses ffmpeg, pipes directly to ffplay)
-5. NVENC hardware encoding when an NVIDIA GPU is available
-6. UDP, TCP, and RTSP streaming modes
+2. FPV camera with OSD overlay (battery, attitude, flight mode, timer) — always enabled
+3. Chase camera (3rd-person SDL2 window)
+4. Zero-latency SDL2 display via `gz_image_bridge --display`
+5. POSIX shared memory output for external trackers (always active, clean + OSD)
 
-## Launchers
+## Launcher
 
-| Script | World | Description |
-|---|---|---|
-| `start_fpv.py` | Iris FPV demo | Lightweight quad with obstacles and gate |
-| `start_rocket_drone_fpv.py` | Rocket drone | Heavy quad chasing an orbiting target |
-| `start_rocket_drone_collision.py` | Collision test | Heavy quad with static target above |
-| `start_rocket_drone_fpv_park.py` | Rocket drone park | Heavy quad over park terrain with Shahed target |
-| `start_simulink_park.py` | Simulink rocket drone park | Simulink dynamics over park terrain with Shahed target |
+All worlds are launched via a single unified `start.py` with CLI arguments:
+
+| Argument | Purpose |
+|---|---|
+| `--world <file>` | World SDF/world file (from `aeroloop_gazebo/worlds/`) |
+| `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
+| `--gazebo` | Show the Gazebo GUI (default: headless) |
+| `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
+| `--no-video` | Skip video pipeline |
 
 ### Quick start
 
 ```bash
-# Iris FPV (lowest latency — raw mode)
-python3 start_fpv.py --gazebo --chase-cam --osd --raw
+# Iris FPV
+python3 start.py --world betaloop_iris_betaflight_demo_harmonic.sdf --gazebo --chase-cam
 
-# Rocket drone (encoded stream)
-python3 start_rocket_drone_fpv.py --gazebo --chase-cam --osd
+# Rocket drone
+python3 start.py --world rocket_drone.world --gazebo --chase-cam
 
-# Watch encoded streams in a separate terminal:
-ffplay -probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -framedrop -sync ext udp://@:8554
+# Simulink dynamics backend
+python3 start.py --world rocket_drone_vis.sdf --physics simulink --gazebo --chase-cam
 ```
 
 ### Key flags
@@ -42,11 +43,9 @@ ffplay -probesize 32 -analyzeduration 0 -fflags nobuffer -flags low_delay -frame
 | Flag | Effect |
 |---|---|
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
-| `--chase-cam` | Also stream the chase camera on port 8555 |
-| `--osd` | Enable Betaflight OSD telemetry overlay |
-| `--raw` | Bypass ffmpeg — pipe raw frames to ffplay (lowest latency) |
-| `--rtsp` | Use RTSP streaming via mediamtx |
-| `--fps N` | Output FPS (default: 30) |
+| `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
+| `--display` | SDL2 direct display in gz_image_bridge (default: enabled) |
+| `--physics simulink` | Use Simulink dynamics backend (bf_sim_bridge) |
 
 ## Motor Mapping
 

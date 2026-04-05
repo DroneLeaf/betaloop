@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
-"""Rocket drone FPV launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
+"""DEPRECATED — use start.py instead.
 
-Starts the full stack and streams the on-board camera feed so any RTSP/TCP
-video client (VLC, ffplay, Unreal Engine, Unity) can display it.
-
-Architecture:
-    Gazebo (camera sensor) ──gz-transport──► gz_image_bridge ──pipe──► ffmpeg
-                                                              ──► RTSP/TCP stream
-
-Usage (inside the Docker container):
-    python3 start_rocket_drone_fpv_park.py                      # TCP stream on :8554
-    python3 start_rocket_drone_fpv_park.py --rtsp               # RTSP via mediamtx on :8554
-    python3 start_rocket_drone_fpv_park.py --output file:out.mp4  # record to file
-
-Viewer examples:
-    ffplay tcp://<host>:8554                  # TCP mode (default)
-    ffplay rtsp://<host>:8554/fpv             # RTSP mode (--rtsp)
-    vlc rtsp://<host>:8554/fpv               # RTSP with VLC
+Equivalent command:
+    python3 start.py --world rocket_drone_park_chase.world --gazebo
 """
 
 import argparse
@@ -28,12 +14,13 @@ import signal
 import socket
 import subprocess
 import sys
-import time
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
+print(
+    "\n"
+    "  ⚠  This script is deprecated.  Use the unified launcher instead:\n"
+    "\n"
+    "      python3 start.py --world rocket_drone_park_chase.world --gazebo\n"
+    "\n",
+    file=sys.stderr,
 )
 log = logging.getLogger("start_rocket_drone_fpv_park")
 
