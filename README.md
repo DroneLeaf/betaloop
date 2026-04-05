@@ -8,32 +8,34 @@ Betaflight SITL, image bridges, SDL2 video display, and the virtual radio.
 ## Features
 
 1. Uses real Betaflight firmware (SITL target)
-2. FPV camera with OSD overlay (battery, attitude, flight mode, timer)
+2. FPV camera with OSD overlay (battery, attitude, flight mode, timer) — always enabled
 3. Chase camera (3rd-person SDL2 window)
 4. Zero-latency SDL2 display via `gz_image_bridge --display`
-5. Optional POSIX shared memory output (`--shm`) for external trackers
+5. POSIX shared memory output for external trackers (always active, clean + OSD)
 
-## Launchers
+## Launcher
 
-| Script | World | Description |
-|---|---|---|
-| `start_fpv.py` | Iris FPV demo | Lightweight quad with obstacles and gate |
-| `start_rocket_drone_fpv.py` | Rocket drone | Heavy quad chasing an orbiting target |
-| `start_rocket_drone_collision.py` | Collision test | Heavy quad with static target above |
-| `start_rocket_drone_fpv_park.py` | Rocket drone park | Heavy quad over park terrain with Shahed target |
-| `start_simulink_park.py` | Simulink rocket drone park | Simulink dynamics over park terrain with Shahed target |
+All worlds are launched via a single unified `start.py` with CLI arguments:
+
+| Argument | Purpose |
+|---|---|
+| `--world <file>` | World SDF/world file (from `aeroloop_gazebo/worlds/`) |
+| `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
+| `--gazebo` | Show the Gazebo GUI (default: headless) |
+| `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
+| `--no-video` | Skip video pipeline |
 
 ### Quick start
 
 ```bash
-# Iris FPV (SDL2 display + shared memory)
-python3 start_fpv.py --display --shm --gazebo --chase-cam --osd
+# Iris FPV
+python3 start.py --world betaloop_iris_betaflight_demo_harmonic.sdf --gazebo --chase-cam
 
 # Rocket drone
-python3 start_rocket_drone_fpv.py --display --shm --gazebo --chase-cam --osd
+python3 start.py --world rocket_drone.world --gazebo --chase-cam
 
 # Simulink dynamics backend
-python3 start_simulink.py --display --shm
+python3 start.py --world rocket_drone_vis.sdf --physics simulink --gazebo --chase-cam
 ```
 
 ### Key flags
@@ -42,9 +44,8 @@ python3 start_simulink.py --display --shm
 |---|---|
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
 | `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
-| `--osd` | Enable Betaflight OSD telemetry overlay |
 | `--display` | SDL2 direct display in gz_image_bridge (default: enabled) |
-| `--shm` | Expose frames via POSIX shared memory at /dev/shm |
+| `--physics simulink` | Use Simulink dynamics backend (bf_sim_bridge) |
 
 ## Motor Mapping
 
