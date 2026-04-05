@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
-"""DEPRECATED — use start.py instead.
+"""Rocket drone FPV launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
 
-Equivalent command:
-    python3 start.py --world rocket_drone_park.world --gazebo --chase-cam
+Starts the full stack and streams the on-board camera feed so any RTSP/TCP
+video client (VLC, ffplay, Unreal Engine, Unity) can display it.
+
+Architecture:
+    Gazebo (camera sensor) ──gz-transport──► gz_image_bridge ──pipe──► ffmpeg
+                                                              ──► RTSP/TCP stream
+
+Usage (inside the Docker container):
+    python3 start_fpv_park_nodrifting.py                      # TCP stream on :8554
+    python3 start_fpv_park_nodrifting.py --rtsp               # RTSP via mediamtx on :8554
+    python3 start_fpv_park_nodrifting.py --output file:out.mp4  # record to file
+
+Viewer examples:
+    ffplay tcp://<host>:8554                  # TCP mode (default)
+    ffplay rtsp://<host>:8554/fpv             # RTSP mode (--rtsp)
+    vlc rtsp://<host>:8554/fpv               # RTSP with VLC
 """
 
 import argparse
 import logging
 import os
-import re
-import shutil
 import signal
 import socket
 import subprocess
 import sys
-print(
-    "\n"
-    "  ⚠  This script is deprecated.  Use the unified launcher instead:\n"
-    "\n"
-    "      python3 start.py --world rocket_drone_park.world --gazebo --chase-cam\n"
-    "\n",
-    file=sys.stderr,
+import time
+import threading
+import xml.etree.ElementTree as ET
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
-log = logging.getLogger("start_rocket_drone_fpv_park")
+log = logging.getLogger("start_fpv_park_nodrifting")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 # Auto-detect paths: if running from the repo (betaloop/ dir), resolve relative
@@ -44,7 +57,7 @@ BF_ELF = _default_path("BF_ELF", os.path.join("betaflight", "obj", "main", "beta
                         "/opt/betaflight/obj/main/betaflight_SITL.elf")
 MSP_RADIO_HOME = _default_path("MSP_RADIO_HOME", os.path.join("..", "msp_virtualradio"),
                                "/opt/msp_virtualradio")
-FPV_WORLD = "rocket_drone_park.world"
+FPV_WORLD = "fpv_park_nodrifting.world"
 TOPIC_MODEL_HINT_DEFAULT = "betaflight_vehicle"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 STREAM_PORT = 8554
@@ -112,6 +125,86 @@ def setup_gazebo_env():
 
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
+
+def get_patrol_limits(world_path):
+    """Parse upper/lower prismatic limits from world SDF."""
+    try:
+        tree = ET.parse(world_path)
+        root = tree.getroot()
+        for joint in root.iter("joint"):
+            name = joint.get("name", "")
+            if name == "patrol_rail":
+                lower = float(joint.find(".//limit/lower").text)
+                upper = float(joint.find(".//limit/upper").text)
+                return lower, upper
+    except Exception as e:
+        log.warning("Could not parse patrol limits from world SDF: %s — using defaults", e)
+    return 0.0, 300.0  # fallback defaults
+
+def get_carriage_position():
+    """Get current carriage X position from dynamic pose topic."""
+    try:
+        result = subprocess.run(
+            ["gz", "topic", "-e", "-n", "1", "-t", "/world/default/dynamic_pose/info"],
+            capture_output=True, text=True, timeout=5
+        )
+        lines = result.stdout.splitlines()
+        for i, line in enumerate(lines):
+            if 'name: "carriage"' in line:
+                # Look for x position in the next few lines
+                for j in range(i+1, min(i+6, len(lines))):
+                    if "x:" in lines[j]:
+                        return float(lines[j].split("x:")[1].strip())
+                # No x line means x=0
+                return 0.0
+    except Exception as e:
+        log.warning("Could not get carriage position: %s", e)
+    return None
+
+
+def patrol_controller(world_path, speed=10.0, poll_interval=3.0):
+    lower, upper = get_patrol_limits(world_path)
+    log.info("Patrol: lower=%.1f upper=%.1f speed=%.1f", lower, upper, speed)
+
+    direction = 1
+    total_rotation = 0.0
+
+    time.sleep(5)  # wait for Gazebo ready
+
+    while True:
+        try:
+            # Send velocity command
+            subprocess.run([
+                "gz", "topic", "-t",
+                "/model/moving_target_drone/joint/patrol_rail/cmd_vel",
+                "-m", "gz.msgs.Double",
+                "-p", f"data: {direction * speed}"
+            ], capture_output=True, timeout=2)
+
+            # Poll position every poll_interval seconds
+            pos = get_carriage_position()
+            if pos is not None:
+                flip = False
+                if direction == 1 and pos >= upper - 20.0:
+                    direction = -1
+                    flip = True
+                elif direction == -1 and pos <= lower + 20.0:
+                    direction = 1
+                    flip = True
+
+                if flip:
+                    total_rotation += 3.14159
+                    subprocess.run([
+                        "gz", "topic", "-t",
+                        "/model/moving_target_drone/joint/pivot/0/cmd_pos",
+                        "-m", "gz.msgs.Double",
+                        "-p", f"data: {total_rotation}"
+                    ], capture_output=True, timeout=2)
+
+        except Exception as e:
+            log.warning("Patrol controller error: %s", e)
+
+        time.sleep(poll_interval)
 
 def cleanup_before_start():
     """Clean up any existing processes from previous runs."""
@@ -205,22 +298,6 @@ def discover_camera_topic(name_hint="fpv_cam", timeout=30, model_hint=None):
     return None
 
 
-def discover_camera_topic_multi(name_hints, timeout=30, model_hint=None):
-    """Find a camera topic using multiple possible hint substrings."""
-    hints = [hint for hint in name_hints if hint]
-    if not hints:
-        return None
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for hint in hints:
-            topic = discover_camera_topic(name_hint=hint, timeout=1, model_hint=model_hint)
-            if topic:
-                return topic
-        time.sleep(1)
-    return None
-
-
 def read_image_meta(proc, timeout=30):
     """Read IMGMETA line from the bridge's stderr (width, height, pix_fmt)."""
     import select
@@ -248,128 +325,6 @@ def read_image_meta(proc, timeout=30):
         if proc.poll() is not None:
             break
     return None, None, None
-
-
-def find_and_announce_window(
-    proc_name: str = "gz_image_bridge",
-    pid: int | None = None,
-    timeout: float = 10.0,
-    announce_key: str = "GZ_WINDOW_ID",
-) -> None:
-    """Poll for the SDL window and print a machine-readable window id."""
-    have_xdotool = shutil.which("xdotool") is not None
-    have_xprop = shutil.which("xprop") is not None
-
-    if not have_xdotool and not have_xprop:
-        log.warning("Neither xdotool nor xprop is installed; cannot announce %s window id", proc_name)
-        return
-
-    def _xprop_find_by_pid(target_pid: int) -> str | None:
-        def _window_score(token: str) -> int:
-            """Prefer visible windows with larger geometry."""
-            score = 0
-            try:
-                info = subprocess.run(
-                    ["xwininfo", "-id", token],
-                    capture_output=True,
-                    text=True,
-                )
-                if info.returncode != 0:
-                    return score
-
-                out = info.stdout
-                if "Map State: IsViewable" in out:
-                    score += 1_000_000
-
-                w_match = re.search(r"Width:\s+(\d+)", out)
-                h_match = re.search(r"Height:\s+(\d+)", out)
-                if w_match and h_match:
-                    score += int(w_match.group(1)) * int(h_match.group(1))
-            except Exception:
-                pass
-            return score
-
-        try:
-            listing = subprocess.run(
-                ["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
-                capture_output=True,
-                text=True,
-            )
-            if listing.returncode != 0:
-                listing = subprocess.run(
-                    ["xprop", "-root", "_NET_CLIENT_LIST"],
-                    capture_output=True,
-                    text=True,
-                )
-            if listing.returncode != 0:
-                return None
-
-            candidates: list[tuple[int, str]] = []
-            for token in re.findall(r"0x[0-9a-fA-F]+", listing.stdout):
-                pid_query = subprocess.run(
-                    ["xprop", "-id", token, "_NET_WM_PID"],
-                    capture_output=True,
-                    text=True,
-                )
-                if pid_query.returncode != 0:
-                    continue
-                pid_match = re.search(r"=\s*(\d+)", pid_query.stdout)
-                if pid_match and int(pid_match.group(1)) == target_pid:
-                    candidates.append((_window_score(token), token))
-
-            if candidates:
-                _score, token = max(candidates, key=lambda item: item[0])
-                return str(int(token, 16))
-        except Exception:
-            return None
-        return None
-
-    deadline = time.time() + max(1.0, timeout)
-    last_wid: str | None = None
-    stable_hits = 0
-    required_stable_hits = 3
-    while time.time() < deadline:
-        candidate_wid: str | None = None
-        try:
-            if have_xprop and pid:
-                # Prefer WM client-list lookup first; it usually returns the
-                # top-level window id that Qt can reparent reliably.
-                fallback_wid = _xprop_find_by_pid(pid)
-                if fallback_wid:
-                    candidate_wid = fallback_wid
-
-            if candidate_wid is None and have_xdotool:
-                cmd = ["xdotool", "search", "--onlyvisible"]
-                if pid:
-                    cmd += ["--pid", str(pid)]
-                else:
-                    cmd += ["--name", proc_name]
-
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                wids = [wid.strip() for wid in result.stdout.splitlines() if wid.strip()]
-                if wids:
-                    candidate_wid = wids[0]
-        except Exception:
-            pass
-
-        if candidate_wid:
-            if candidate_wid == last_wid:
-                stable_hits += 1
-            else:
-                last_wid = candidate_wid
-                stable_hits = 1
-
-            if stable_hits >= required_stable_hits:
-                print(f"{announce_key}={candidate_wid}", flush=True)
-                return
-
-        time.sleep(0.2)
-
-    if last_wid:
-        print(f"{announce_key}={last_wid}", flush=True)
-        return
-
-    log.warning("Could not find %s window ID", proc_name)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -538,6 +493,14 @@ def main():
     pm.spawn(gz_args)
     time.sleep(8)
 
+    log.info("Starting patrol controller")
+    patrol_thread = threading.Thread(
+        target=patrol_controller,
+        kwargs={"world_path": world_path, "speed": 15.0, "poll_interval": 3.0},
+        daemon=True
+    )
+    patrol_thread.start()
+
     # ── 4. Betaflight SITL ──
     if not os.path.isfile(args.elf):
         log.error("Betaflight ELF not found: %s", args.elf)
@@ -593,15 +556,11 @@ def main():
             log.info("Using explicit chase camera topic: %s", chase_topic)
         else:
             log.info("Discovering chase camera image topic …")
-            chase_hints = ("chase_cam", "chase-cam")
-            chase_candidates: list[str] = []
-            for hint in chase_hints:
-                chase_candidates.extend(list_camera_topics(name_hint=hint))
-            chase_candidates = sorted(set(chase_candidates))
+            chase_candidates = list_camera_topics(name_hint="chase_cam")
             if chase_candidates:
                 log.info("Chase candidates: %s", ", ".join(chase_candidates))
-            chase_topic = discover_camera_topic_multi(
-                chase_hints,
+            chase_topic = discover_camera_topic(
+                name_hint="chase_cam",
                 timeout=30,
                 model_hint=args.topic_model_hint,
             )
@@ -640,7 +599,7 @@ def main():
 
     bridge_proc = pm.spawn(
         bridge_cmd,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL if args.display else subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
@@ -664,15 +623,9 @@ def main():
     if args.display:
         ffmpeg_proc = None
         ffmpeg_cmd = None
-        viewer_url = "(embedded Qt window)"
+        viewer_url = "(SDL2 window in gz_image_bridge)"
         output_mode = "display"
         log.info("DISPLAY MODE: video rendered directly by gz_image_bridge")
-        import threading
-        threading.Thread(
-            target=find_and_announce_window,
-            kwargs={"pid": bridge_proc.pid, "timeout": 15.0},
-            daemon=True,
-        ).start()
     elif args.raw:
         # Bypass ffmpeg entirely — pipe raw frames straight to ffplay.
         # This isolates whether latency is in ffmpeg/muxer or elsewhere.
@@ -789,15 +742,8 @@ def main():
     chase_ffmpeg_cmd = None
     if chase_topic:
         log.info("Starting chase camera bridge")
-        chase_bridge_cmd = [IMAGE_BRIDGE, chase_topic]
-        if args.display:
-            chase_bridge_cmd += ["--display"]
-            log.info("Chase bridge SDL2 direct display mode enabled")
-        if args.shm:
-            chase_bridge_cmd += ["--shm"]
-            log.info("Chase bridge shared memory frame server enabled")
         chase_bridge_proc = pm.spawn(
-            chase_bridge_cmd,
+            [IMAGE_BRIDGE, chase_topic],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -812,22 +758,7 @@ def main():
         else:
             log.info("Chase camera: %dx%d %s", cw, ch, cpf)
 
-            if args.display:
-                chase_ffmpeg_proc = None
-                chase_ffmpeg_cmd = None
-                chase_viewer_url = "(embedded Qt window)"
-                log.info("DISPLAY MODE: chase video rendered directly by gz_image_bridge")
-                import threading
-                threading.Thread(
-                    target=find_and_announce_window,
-                    kwargs={
-                        "pid": chase_bridge_proc.pid,
-                        "timeout": 15.0,
-                        "announce_key": "GZ_WINDOW_ID_CHASE",
-                    },
-                    daemon=True,
-                ).start()
-            elif args.raw:
+            if args.raw:
                 chase_ffplay_cmd = [
                     "ffplay",
                     "-f", "rawvideo",
