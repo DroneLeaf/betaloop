@@ -25,7 +25,9 @@ Usage:
 import argparse
 import fcntl
 import logging
+import math
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -155,6 +157,39 @@ def setup_gazebo_env():
     _prepend("LD_LIBRARY_PATH", "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
 
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+
+
+def _patch_fpv_cam_pitch(pitch_deg):
+    """Rewrite the fpv_cam sensor <pose> pitch in all model SDFs under AEROLOOP_HOME/models."""
+    pitch_rad = math.radians(pitch_deg)
+    models_dir = os.path.join(AEROLOOP_HOME, "models")
+    # Matches: <sensor name='fpv_cam' ...> ... <pose>X Y Z R P Y</pose>
+    # We replace the pitch (5th) value in the pose.
+    pattern = re.compile(
+        r"(<sensor\s+name=['\"]fpv_cam['\"][^>]*>.*?<pose>)"
+        r"([^<]+)"
+        r"(</pose>)",
+        re.DOTALL,
+    )
+    for root, _dirs, files in os.walk(models_dir):
+        for fname in files:
+            if not fname.endswith(".sdf"):
+                continue
+            fpath = os.path.join(root, fname)
+            text = open(fpath).read()
+            m = pattern.search(text)
+            if not m:
+                continue
+            vals = m.group(2).split()
+            if len(vals) != 6:
+                continue
+            if vals[4] == f"{pitch_rad:.10g}":
+                continue  # already correct
+            vals[4] = f"{pitch_rad:.10g}"
+            new_text = text[: m.start(2)] + " ".join(vals) + text[m.end(2) :]
+            with open(fpath, "w") as f:
+                f.write(new_text)
+            log.info("Patched fpv_cam pitch to %.1f° in %s", pitch_deg, fpath)
 
 
 def cleanup_before_start():
@@ -400,6 +435,13 @@ def parse_args():
         help="Prefer topics containing this model path segment",
     )
 
+    parser.add_argument(
+        "--cam-pitch",
+        type=float,
+        default=-80.0,
+        help="FPV camera pitch in degrees (default: -80, i.e. 10deg from +Z)",
+    )
+
     # Simulink-specific
     parser.add_argument(
         "--sim-lib",
@@ -435,6 +477,9 @@ def main():
     log.info("Setting up Gazebo environment")
     setup_gazebo_env()
     configure_display(args, pm)
+
+    # ── 1b. Patch FPV camera pitch in model SDFs ──
+    _patch_fpv_cam_pitch(args.cam_pitch)
 
     # ── 2. Gazebo ──
     world_path = args.world
@@ -566,6 +611,7 @@ def main():
         bridge_cmd = [
             IMAGE_BRIDGE, topic, "--display",
             "--osd", "--msp-port", str(args.msp_port),
+            "--cam-pitch", str(args.cam_pitch),
         ]
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
 

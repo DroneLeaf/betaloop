@@ -23,6 +23,7 @@ All worlds are launched via a single unified `start.py` with CLI arguments:
 | `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
 | `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
+| `--cam-pitch <deg>` | FPV camera pitch in degrees (default: -80). Patches the model SDF and OSD crosshair. |
 | `--no-video` | Skip video pipeline |
 
 ### Quick start
@@ -33,6 +34,9 @@ python3 start.py --world betaloop_iris_betaflight_demo_harmonic.sdf --gazebo --c
 
 # Rocket drone
 python3 start.py --world rocket_drone.world --gazebo --chase-cam
+
+# Collision test (upward-facing camera)
+python3 start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
 
 # Simulink dynamics backend
 python3 start.py --world rocket_drone_vis.sdf --physics simulink --gazebo --chase-cam
