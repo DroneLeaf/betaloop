@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""DEPRECATED — use start.py instead."""
+
 """Rocket drone FPV launcher — Betaflight SITL + Gazebo camera → RTSP/TCP stream.
 
 Starts the full stack and streams the on-board camera feed so any RTSP/TCP
@@ -227,6 +229,18 @@ def cleanup_before_start():
         except Exception:
             pass
         time.sleep(0.2)
+
+    # Remove stale POSIX shared memory segments left by killed gz_image_bridge
+    # processes (SIGKILL skips the C++ cleanup handler).
+    import glob
+    stale_shm = glob.glob("/dev/shm/gz_cam_*")
+    if stale_shm:
+        for path in stale_shm:
+            try:
+                os.remove(path)
+                log.info("Removed stale SHM: %s", path)
+            except OSError:
+                pass
 
     log.info("Cleanup complete")
 

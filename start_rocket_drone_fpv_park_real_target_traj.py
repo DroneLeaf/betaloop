@@ -135,6 +135,18 @@ def cleanup_before_start():
             pass
         time.sleep(0.2)
 
+    # Remove stale POSIX shared memory segments left by killed gz_image_bridge
+    # processes (SIGKILL skips the C++ cleanup handler).
+    import glob
+    stale_shm = glob.glob("/dev/shm/gz_cam_*")
+    if stale_shm:
+        for path in stale_shm:
+            try:
+                os.remove(path)
+                log.info("Removed stale SHM: %s", path)
+            except OSError:
+                pass
+
     log.info("Cleanup complete")
 
 

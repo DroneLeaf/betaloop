@@ -158,7 +158,7 @@ def setup_gazebo_env():
 
 
 def cleanup_before_start():
-    """Kill stale processes from previous runs."""
+    """Kill stale processes from previous runs and remove orphaned resources."""
     log.info("Cleaning up from previous runs...")
     cleanup_cmds = [
         ("existing Gazebo processes", "pkill -9 -f 'gz sim' 2>/dev/null || true"),
@@ -174,6 +174,21 @@ def cleanup_before_start():
         except (subprocess.TimeoutExpired, OSError):
             pass
         time.sleep(0.2)
+
+    # Remove stale POSIX shared memory segments left by killed gz_image_bridge
+    # processes (SIGKILL skips the C++ cleanup handler).  Readers that still
+    # hold an old fd will see a different inode after the bridge recreates the
+    # segment and must reopen — clearing them here ensures no stale data.
+    import glob
+    stale_shm = glob.glob("/dev/shm/gz_cam_*")
+    if stale_shm:
+        for path in stale_shm:
+            try:
+                os.remove(path)
+                log.info("Removed stale SHM: %s", path)
+            except OSError:
+                pass
+
     log.info("Cleanup complete")
 
 
