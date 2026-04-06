@@ -15,41 +15,57 @@ Betaflight SITL, image bridges, SDL2 video display, and the virtual radio.
 
 ## Launcher
 
-All worlds are launched via a single unified `start.py` with CLI arguments:
+All worlds are launched via a single unified `start.py` with CLI arguments
+organised into three groups: **simulation**, **drone**, and **world** settings.
+
+### Simulation settings
 
 | Argument | Purpose |
 |---|---|
-| `--world <file>` | World SDF/world file (from `aeroloop_gazebo/worlds/`) |
+| `--world <file>` | World SDF/world file (default: `rocket_drone_park_chase.world`) |
 | `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
 | `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
-| `--cam-pitch <deg>` | FPV camera pitch in degrees (default: -80). Patches the model SDF and OSD crosshair. |
 | `--no-video` | Skip video pipeline |
+
+### Drone settings
+
+| Argument | Purpose |
+|---|---|
+| `--drone {rocket_drone,iris}` | Drone profile for parameter scaling (default: `rocket_drone`) |
+| `--cam-pitch <deg>` | FPV camera pitch (default: -80). Patches model SDF and OSD crosshair. |
+| `--ctw <ratio>` | Thrust-to-weight ratio — derives mass & inertia from reference calibration |
+| `--standoff-height <m>` | Landing leg length in metres |
+| `--linear-damping-x/y/z <val>` | ViscousDragPlugin per-axis linear damping |
+| `--quadratic-damping-x/y/z <val>` | ViscousDragPlugin per-axis quadratic damping |
+| `--angular-damping <val>` | ViscousDragPlugin angular damping |
+
+### World settings
+
+| Argument | Purpose |
+|---|---|
+| `--target-altitude <m>` | Collision-test target altitude (default: 20) |
+| `--target-distance <m>` | Collision-test target horizontal distance (default: 20) |
+| `--target-speed <rad/s>` | Park-chase orbit angular speed (default: 0.05) |
 
 ### Quick start
 
 ```bash
-# Iris FPV
-python3 start.py --world betaloop_iris_betaflight_demo_harmonic.sdf --gazebo --chase-cam
-
-# Rocket drone
-python3 start.py --world rocket_drone.world --gazebo --chase-cam
+# Park chase (default)
+python3 ~/betaflight-docker/betaloop/start.py --gazebo
 
 # Collision test (upward-facing camera)
-python3 start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
+python3 ~/betaflight-docker/betaloop/start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
+
+# Iris FPV
+python3 ~/betaflight-docker/betaloop/start.py --drone iris --gazebo --chase-cam
 
 # Simulink dynamics backend
-python3 start.py --world rocket_drone_vis.sdf --physics simulink --gazebo --chase-cam
+python3 ~/betaflight-docker/betaloop/start.py --world rocket_drone_park_chase_vis.sdf --physics simulink --gazebo --chase-cam
+
+# Tune drone: higher CTW + more angular damping
+python3 ~/betaflight-docker/betaloop/start.py --ctw 5 --angular-damping 0.05 --gazebo
 ```
-
-### Key flags
-
-| Flag | Effect |
-|---|---|
-| `--gazebo` | Show the Gazebo GUI (default: headless) |
-| `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
-| `--display` | SDL2 direct display in gz_image_bridge (default: enabled) |
-| `--physics simulink` | Use Simulink dynamics backend (bf_sim_bridge) |
 
 ## Motor Mapping
 

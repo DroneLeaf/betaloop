@@ -12,14 +12,16 @@ Supported physics backends:
 
 Usage:
     # Gazebo physics (default)
-    python3 start.py --world fpv_demo_harmonic.sdf --gazebo --chase-cam
-    python3 start.py --world rocket_drone.world --gazebo --chase-cam
-    python3 start.py --world rocket_drone_park.world --gazebo
-    python3 start.py --world rocket_drone_collision_test.world --gazebo
+    python3 start.py --world rocket_drone_park_chase.world --gazebo
+    python3 start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
+    python3 start.py --drone iris --gazebo --chase-cam
 
     # Simulink dynamics backend
-    python3 start.py --world rocket_drone_vis.sdf --physics simulink --gazebo
-    python3 start.py --world rocket_drone_vis_park.world --physics simulink --gazebo
+    python3 start.py --world rocket_drone_park_chase_vis.sdf --physics simulink --gazebo --chase-cam
+    python3 start.py --world rocket_drone_collision_test_vis.sdf --physics simulink --gazebo
+
+    # Tune drone params
+    python3 start.py --world rocket_drone_park_chase.world --ctw 5 --angular-damping 0.05
 """
 
 import argparse
@@ -78,9 +80,48 @@ SIMULINK_LIB = _default_path(
     ),
 )
 
-DEFAULT_WORLD = "fpv_demo_harmonic.sdf"
-TOPIC_MODEL_HINT_DEFAULT = "betaflight_vehicle"
+DEFAULT_WORLD = "rocket_drone_park_chase.world"
+DEFAULT_DRONE = "rocket_drone"
+TOPIC_MODEL_HINT_DEFAULT = "rocket_drone"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
+
+# Per-drone reference calibration.  max_thrust is the total static thrust from
+# all 4 rotors at vel_cmd_max.  *_per_kg are the moment-of-inertia values
+# normalised to 1 kg so we can scale linearly with mass.
+DRONE_REFS = {
+    "rocket_drone": {
+        "model_sdf": "rocket_drone/rocket_drone.sdf",
+        "model_uri": "model://rocket_drone",
+        "max_thrust": 22.0,       # N — calibrated: 0.5 kg → CTW ≈ 4.5
+        "ixx_per_kg": 0.019417,   # 0.029125 / 1.5
+        "iyy_per_kg": 0.019417,
+        "izz_per_kg": 0.036817,   # 0.055225 / 1.5
+        "default_ctw": 4.5,
+        "default_standoff": 0.20,
+        "leg_attach_offset": 0.025,
+        "default_damping": {
+            "linear_x": 0.1, "linear_y": 0.4, "linear_z": 0.03,
+            "quadratic_x": 0.001, "quadratic_y": 0.03, "quadratic_z": 0.001,
+            "angular": 0.03,
+        },
+    },
+    "iris": {
+        "model_sdf": "betaloop_iris_with_standoffs/model.sdf",
+        "model_uri": "model://betaloop_iris_with_standoffs",
+        "max_thrust": 8.0,        # N — estimated: 0.4 kg → CTW ≈ 2
+        "ixx_per_kg": 0.005,      # 0.002 / 0.4
+        "iyy_per_kg": 0.010,      # 0.004 / 0.4
+        "izz_per_kg": 0.01125,    # 0.0045 / 0.4
+        "default_ctw": 2.0,
+        "default_standoff": 0.17,
+        "leg_attach_offset": 0.025,
+        "default_damping": {
+            "linear_x": 0.3, "linear_y": 0.3, "linear_z": 0.3,
+            "quadratic_x": 0, "quadratic_y": 0, "quadratic_z": 0,
+            "angular": 0.005,
+        },
+    },
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -159,37 +200,266 @@ def setup_gazebo_env():
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
 
+def _walk_sdfs():
+    """Yield all .sdf and .world files under models/ and worlds/."""
+    for d in [os.path.join(AEROLOOP_HOME, "models"), os.path.join(AEROLOOP_HOME, "worlds")]:
+        for root, _dirs, files in os.walk(d):
+            for fname in files:
+                if fname.endswith((".sdf", ".world")):
+                    yield os.path.join(root, fname)
+
+
+def _patch_drone_model(drone):
+    """Patch <include> blocks in Gazebo world files to match *drone*."""
+    target_uri = DRONE_REFS[drone]["model_uri"]
+    # Match <include> block with <uri>model://…</uri> and <name>…</name>.
+    pat = re.compile(
+        r"(<include>\s*<uri>\s*)(model://[^<]+)(\s*</uri>\s*<name>)([^<]+)(</name>)",
+        re.DOTALL,
+    )
+    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
+    for fname in os.listdir(worlds_dir):
+        if not fname.endswith((".sdf", ".world")):
+            continue
+        fpath = os.path.join(worlds_dir, fname)
+        text = open(fpath).read()
+        m = pat.search(text)
+        if not m:
+            continue
+        cur_uri = m.group(2).strip()
+        cur_name = m.group(4).strip()
+        if cur_uri == target_uri and cur_name == drone:
+            continue
+        new_text = (
+            text[: m.start(2)]
+            + target_uri
+            + text[m.end(2) : m.start(4)]
+            + drone
+            + text[m.end(4) :]
+        )
+        with open(fpath, "w") as f:
+            f.write(new_text)
+        log.info("Patched drone model to %s (%s) in %s", target_uri, drone, fpath)
+
+
 def _patch_fpv_cam_pitch(pitch_deg):
-    """Rewrite the fpv_cam sensor <pose> pitch in all model SDFs under AEROLOOP_HOME/models."""
+    """Rewrite the fpv_cam sensor <pose> pitch in all SDF files."""
     pitch_rad = math.radians(pitch_deg)
-    models_dir = os.path.join(AEROLOOP_HOME, "models")
-    # Matches: <sensor name='fpv_cam' ...> ... <pose>X Y Z R P Y</pose>
-    # We replace the pitch (5th) value in the pose.
     pattern = re.compile(
         r"(<sensor\s+name=['\"]fpv_cam['\"][^>]*>.*?<pose>)"
         r"([^<]+)"
         r"(</pose>)",
         re.DOTALL,
     )
+    for fpath in _walk_sdfs():
+        text = open(fpath).read()
+        m = pattern.search(text)
+        if not m:
+            continue
+        vals = m.group(2).split()
+        if len(vals) != 6:
+            continue
+        if vals[4] == f"{pitch_rad:.10g}":
+            continue
+        vals[4] = f"{pitch_rad:.10g}"
+        new_text = text[: m.start(2)] + " ".join(vals) + text[m.end(2) :]
+        with open(fpath, "w") as f:
+            f.write(new_text)
+        log.info("Patched fpv_cam pitch to %.1f° in %s", pitch_deg, fpath)
+
+
+def _patch_ctw(drone, ctw):
+    """Compute mass and inertia from CTW and patch model + vis world SDFs."""
+    ref = DRONE_REFS[drone]
+    mass = ref["max_thrust"] / (ctw * 9.81)
+    ixx = ref["ixx_per_kg"] * mass
+    iyy = ref["iyy_per_kg"] * mass
+    izz = ref["izz_per_kg"] * mass
+
+    mass_pat = re.compile(r"(<mass>)([\d.eE+-]+)(</mass>)")
+    ixx_pat = re.compile(r"(<ixx>)([\d.eE+-]+)(</ixx>)")
+    iyy_pat = re.compile(r"(<iyy>)([\d.eE+-]+)(</iyy>)")
+    izz_pat = re.compile(r"(<izz>)([\d.eE+-]+)(</izz>)")
+
+    def _replace_first_base_link(text, pat, new_val):
+        """Replace the first occurrence of *pat* inside a base_link section."""
+        bl = text.find("<link name=\"base_link\">")
+        if bl < 0:
+            bl = text.find("<link name='base_link'>")
+        if bl < 0:
+            return text, False
+        m = pat.search(text, bl)
+        if not m:
+            return text, False
+        return text[:m.start(2)] + f"{new_val:.6g}" + text[m.end(2):], True
+
+    for fpath in _walk_sdfs():
+        text = open(fpath).read()
+        if "base_link" not in text:
+            continue
+        # Only patch files that reference this drone
+        if drone == "rocket_drone" and "rocket_drone" not in fpath:
+            continue
+        if drone == "iris" and "iris" not in fpath:
+            continue
+        changed = False
+        for pat, val in [(mass_pat, mass), (ixx_pat, ixx), (iyy_pat, iyy), (izz_pat, izz)]:
+            text, did = _replace_first_base_link(text, pat, val)
+            changed = changed or did
+        if changed:
+            with open(fpath, "w") as f:
+                f.write(text)
+            log.info("Patched CTW=%.1f (mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f) in %s",
+                     ctw, mass, ixx, iyy, izz, fpath)
+
+
+def _patch_standoff_height(drone, height_m):
+    """Patch landing leg cylinder length and pose Z in all SDFs for *drone*."""
+    ref = DRONE_REFS[drone]
+    leg_z = -(height_m / 2 + ref["leg_attach_offset"])
+    # Match leg visual pose lines (6 values) and cylinder length
+    leg_pose_pat = re.compile(
+        r"(<visual\s+name=['\"][^'\"]*leg_visual['\"]>\s*<pose>)"
+        r"([^<]+)"
+        r"(</pose>)",
+        re.DOTALL,
+    )
+    leg_len_pat = re.compile(
+        r"(<length>)([\d.eE+-]+)(</length>)"
+    )
+
+    for fpath in _walk_sdfs():
+        text = open(fpath).read()
+        if "leg_visual" not in text:
+            continue
+        if drone == "rocket_drone" and "rocket_drone" not in fpath:
+            continue
+        if drone == "iris" and "iris" not in fpath:
+            continue
+        changed = False
+        # Patch all leg poses (Z value = index 2)
+        def _repl_pose(m):
+            nonlocal changed
+            vals = m.group(2).split()
+            if len(vals) != 6:
+                return m.group(0)
+            vals[2] = f"{leg_z:.4g}"
+            changed = True
+            return m.group(1) + " ".join(vals) + m.group(3)
+        text = leg_pose_pat.sub(_repl_pose, text)
+        # Patch all leg cylinder lengths that follow a leg_visual
+        # We use a simple approach: replace ALL <length> inside leg visual blocks
+        new_parts = []
+        last_end = 0
+        for vm in re.finditer(r"<visual\s+name=['\"][^'\"]*leg_visual['\"]>.*?</visual>", text, re.DOTALL):
+            block = vm.group(0)
+            new_block = leg_len_pat.sub(
+                lambda lm: lm.group(1) + f"{height_m:.4g}" + lm.group(3),
+                block,
+            )
+            if new_block != block:
+                changed = True
+            new_parts.append(text[last_end:vm.start()])
+            new_parts.append(new_block)
+            last_end = vm.end()
+        new_parts.append(text[last_end:])
+        text = "".join(new_parts)
+        if changed:
+            with open(fpath, "w") as f:
+                f.write(text)
+            log.info("Patched standoff height=%.3fm (leg_z=%.4f) in %s",
+                     height_m, leg_z, fpath)
+
+
+def _patch_damping(drone, lin_x, lin_y, lin_z, quad_x, quad_y, quad_z, ang):
+    """Patch ViscousDragPlugin per-axis damping values in model SDFs for *drone*."""
+    tags = [
+        ("linear_damping_x", lin_x), ("linear_damping_y", lin_y), ("linear_damping_z", lin_z),
+        ("quadratic_damping_x", quad_x), ("quadratic_damping_y", quad_y), ("quadratic_damping_z", quad_z),
+        ("angular_damping", ang),
+    ]
+    models_dir = os.path.join(AEROLOOP_HOME, "models")
     for root, _dirs, files in os.walk(models_dir):
         for fname in files:
             if not fname.endswith(".sdf"):
                 continue
             fpath = os.path.join(root, fname)
+            if drone == "rocket_drone" and "rocket_drone" not in fpath:
+                continue
+            if drone == "iris" and "iris" not in fpath:
+                continue
             text = open(fpath).read()
-            m = pattern.search(text)
-            if not m:
+            if "ViscousDragPlugin" not in text:
                 continue
-            vals = m.group(2).split()
-            if len(vals) != 6:
-                continue
-            if vals[4] == f"{pitch_rad:.10g}":
-                continue  # already correct
-            vals[4] = f"{pitch_rad:.10g}"
-            new_text = text[: m.start(2)] + " ".join(vals) + text[m.end(2) :]
-            with open(fpath, "w") as f:
-                f.write(new_text)
-            log.info("Patched fpv_cam pitch to %.1f° in %s", pitch_deg, fpath)
+            changed = False
+            for tag, val in tags:
+                pat = re.compile(rf"(<{tag}>)([\d.eE+-]+)(</{tag}>)")
+                m = pat.search(text)
+                if m and m.group(2) != f"{val:.6g}":
+                    text = text[:m.start(2)] + f"{val:.6g}" + text[m.end(2):]
+                    changed = True
+            if changed:
+                with open(fpath, "w") as f:
+                    f.write(text)
+                log.info("Patched damping in %s", fpath)
+
+
+def _patch_collision_target(altitude, distance):
+    """Patch target pose in collision_test world files (Gazebo + vis)."""
+    # Target pose pattern: <pose>DISTANCE 0 ALTITUDE ...</pose> inside collision_test_target model
+    pat = re.compile(
+        r"(<model\s+name=['\"]collision_test_target['\"].*?<pose>)"
+        r"([^<]+)"
+        r"(</pose>)",
+        re.DOTALL,
+    )
+    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
+    for fname in os.listdir(worlds_dir):
+        if "collision_test" not in fname:
+            continue
+        fpath = os.path.join(worlds_dir, fname)
+        text = open(fpath).read()
+        m = pat.search(text)
+        if not m:
+            continue
+        vals = m.group(2).split()
+        if len(vals) < 3:
+            continue
+        new_vals = list(vals)
+        new_vals[0] = f"{distance:.4g}"
+        new_vals[2] = f"{altitude:.4g}"
+        if new_vals == vals:
+            continue
+        new_text = text[:m.start(2)] + " ".join(new_vals) + text[m.end(2):]
+        with open(fpath, "w") as f:
+            f.write(new_text)
+        log.info("Patched collision target to alt=%.1f dist=%.1f in %s",
+                 altitude, distance, fpath)
+
+
+def _patch_orbit_speed(speed):
+    """Patch orbit_joint initial_velocity in park_chase world files (Gazebo + vis)."""
+    pat = re.compile(
+        r"(<joint_name>orbit_joint</joint_name>\s*<initial_velocity>)"
+        r"([\d.eE+-]+)"
+        r"(</initial_velocity>)",
+        re.DOTALL,
+    )
+    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
+    for fname in os.listdir(worlds_dir):
+        if "park_chase" not in fname:
+            continue
+        fpath = os.path.join(worlds_dir, fname)
+        text = open(fpath).read()
+        m = pat.search(text)
+        if not m:
+            continue
+        if m.group(2) == f"{speed:.6g}":
+            continue
+        new_text = text[:m.start(2)] + f"{speed:.6g}" + text[m.end(2):]
+        with open(fpath, "w") as f:
+            f.write(new_text)
+        log.info("Patched orbit speed to %.4f rad/s in %s", speed, fpath)
 
 
 def cleanup_before_start():
@@ -375,83 +645,129 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+    # ── Simulation Settings ──────────────────────────────────────────────
+    sim = parser.add_argument_group("Simulation settings")
+    sim.add_argument(
         "--world",
         default=DEFAULT_WORLD,
         help=f"World SDF/world file (default: {DEFAULT_WORLD})",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--physics",
         choices=["gazebo", "simulink"],
         default="gazebo",
         help="Dynamics backend (default: gazebo)",
     )
-
-    # Common flags
-    parser.add_argument(
+    sim.add_argument(
         "--gazebo",
         action="store_true",
         help="Show the Gazebo GUI (default: headless)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--chase-cam",
         action="store_true",
         help="Also display the chase camera (3rd-person SDL2 window)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--no-transmitter",
         action="store_true",
         help="Skip starting the MSP virtual radio",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--no-video",
         action="store_true",
         help="Skip the video pipeline (dynamics only, no camera display)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--elf",
         default=BF_ELF,
         help="Path to betaflight_SITL.elf",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--msp-port",
         type=int,
         default=5763,
         help="BF MSP TCP port for OSD telemetry (default: 5763 = UART3)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--fpv-topic",
         default=None,
         help="Explicit Gazebo FPV image topic (skip auto-discovery)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--chase-topic",
         default=None,
         help="Explicit Gazebo chase image topic (skip auto-discovery)",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--topic-model-hint",
         default=TOPIC_MODEL_HINT_DEFAULT,
         help="Prefer topics containing this model path segment",
     )
-
-    parser.add_argument(
-        "--cam-pitch",
-        type=float,
-        default=-80.0,
-        help="FPV camera pitch in degrees (default: -80, i.e. 10deg from +Z)",
-    )
-
-    # Simulink-specific
-    parser.add_argument(
+    sim.add_argument(
         "--sim-lib",
         default=SIMULINK_LIB,
         help="Path to libinterface_simulink.so",
     )
-    parser.add_argument(
+    sim.add_argument(
         "--bridge",
         default=BF_SIM_BRIDGE,
         help="Path to bf_sim_bridge executable",
+    )
+
+    # ── Drone Settings ───────────────────────────────────────────────────
+    drn = parser.add_argument_group("Drone settings")
+    drn.add_argument(
+        "--drone",
+        choices=list(DRONE_REFS.keys()),
+        default=DEFAULT_DRONE,
+        help=f"Drone profile for parameter scaling (default: {DEFAULT_DRONE})",
+    )
+    drn.add_argument(
+        "--cam-pitch",
+        type=float,
+        default=-80.0,
+        help="FPV camera pitch in degrees (default: -80, i.e. 10° from +Z)",
+    )
+    drn.add_argument(
+        "--ctw",
+        type=float,
+        default=None,
+        help="Thrust-to-weight ratio — derives mass & inertia (default: per-drone ref)",
+    )
+    drn.add_argument(
+        "--standoff-height",
+        type=float,
+        default=None,
+        help="Landing leg length in metres (default: per-drone ref)",
+    )
+    drn.add_argument("--linear-damping-x", type=float, default=None, help="ViscousDragPlugin linear damping X")
+    drn.add_argument("--linear-damping-y", type=float, default=None, help="ViscousDragPlugin linear damping Y")
+    drn.add_argument("--linear-damping-z", type=float, default=None, help="ViscousDragPlugin linear damping Z")
+    drn.add_argument("--quadratic-damping-x", type=float, default=None, help="ViscousDragPlugin quadratic damping X")
+    drn.add_argument("--quadratic-damping-y", type=float, default=None, help="ViscousDragPlugin quadratic damping Y")
+    drn.add_argument("--quadratic-damping-z", type=float, default=None, help="ViscousDragPlugin quadratic damping Z")
+    drn.add_argument("--angular-damping", type=float, default=None, help="ViscousDragPlugin angular damping")
+
+    # ── World Settings ───────────────────────────────────────────────────
+    wld = parser.add_argument_group("World settings (collision_test / park_chase)")
+    wld.add_argument(
+        "--target-altitude",
+        type=float,
+        default=None,
+        help="Collision-test target altitude in metres (default: 20)",
+    )
+    wld.add_argument(
+        "--target-distance",
+        type=float,
+        default=None,
+        help="Collision-test target horizontal distance in metres (default: 20)",
+    )
+    wld.add_argument(
+        "--target-speed",
+        type=float,
+        default=None,
+        help="Park-chase orbit speed in rad/s (default: 0.05)",
     )
 
     return parser.parse_args()
@@ -478,8 +794,46 @@ def main():
     setup_gazebo_env()
     configure_display(args, pm)
 
-    # ── 1b. Patch FPV camera pitch in model SDFs ──
+    # ── 1b. Patch SDF files before Gazebo launch ──
+    drone = args.drone
+    _patch_drone_model(drone)
     _patch_fpv_cam_pitch(args.cam_pitch)
+
+    # Use drone name as topic hint unless user explicitly overrode it.
+    if args.topic_model_hint == TOPIC_MODEL_HINT_DEFAULT and drone != TOPIC_MODEL_HINT_DEFAULT:
+        args.topic_model_hint = drone
+
+    ref = DRONE_REFS[drone]
+
+    # CTW → mass & inertia
+    ctw = args.ctw if args.ctw is not None else ref["default_ctw"]
+    _patch_ctw(drone, ctw)
+
+    # Standoff (leg) height
+    standoff = args.standoff_height if args.standoff_height is not None else ref["default_standoff"]
+    _patch_standoff_height(drone, standoff)
+
+    # Damping
+    dd = ref["default_damping"]
+    _patch_damping(
+        drone,
+        args.linear_damping_x if args.linear_damping_x is not None else dd["linear_x"],
+        args.linear_damping_y if args.linear_damping_y is not None else dd["linear_y"],
+        args.linear_damping_z if args.linear_damping_z is not None else dd["linear_z"],
+        args.quadratic_damping_x if args.quadratic_damping_x is not None else dd["quadratic_x"],
+        args.quadratic_damping_y if args.quadratic_damping_y is not None else dd["quadratic_y"],
+        args.quadratic_damping_z if args.quadratic_damping_z is not None else dd["quadratic_z"],
+        args.angular_damping if args.angular_damping is not None else dd["angular"],
+    )
+
+    # World-specific patches
+    if args.target_altitude is not None or args.target_distance is not None:
+        _patch_collision_target(
+            args.target_altitude if args.target_altitude is not None else 20.0,
+            args.target_distance if args.target_distance is not None else 20.0,
+        )
+    if args.target_speed is not None:
+        _patch_orbit_speed(args.target_speed)
 
     # ── 2. Gazebo ──
     world_path = args.world
@@ -711,7 +1065,7 @@ def _print_status(args, is_simulink, topic, chase_topic,
     else:
         print(f"  Video        : disabled (--no-video)")
 
-    print(f"  RC input     : UDP 127.0.0.1:9004  (flight_test.py / virtual_rc.py)")
+    print(f"  RC input     : UDP 127.0.0.1:9004  (elrs_udp_bridge.py)")
     print(f"  BF CLI       : TCP 127.0.0.1:5761")
     print(f"  BF Config    : TCP 127.0.0.1:5760")
 
