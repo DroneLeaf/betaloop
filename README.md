@@ -22,7 +22,7 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 
 | Argument | Purpose |
 |---|---|
-| `--world <file>` | World SDF/world file (default: `rocket_drone_park_chase.world`) |
+| `--world <WORLD>` | World short name: `park_chase`, `collision_test` (default: `park_chase`) |
 | `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
 | `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
@@ -55,13 +55,13 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 python3 ~/betaflight-docker/betaloop/start.py --gazebo
 
 # Collision test (upward-facing camera)
-python3 ~/betaflight-docker/betaloop/start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
+python3 ~/betaflight-docker/betaloop/start.py --world collision_test --cam-pitch -90 --gazebo
 
 # Iris FPV
 python3 ~/betaflight-docker/betaloop/start.py --drone iris --gazebo --chase-cam
 
 # Simulink dynamics backend
-python3 ~/betaflight-docker/betaloop/start.py --world rocket_drone_park_chase_vis.sdf --physics simulink --gazebo --chase-cam
+python3 ~/betaflight-docker/betaloop/start.py --world park_chase --physics simulink --gazebo --chase-cam
 
 # Tune drone: higher CTW + more angular damping
 python3 ~/betaflight-docker/betaloop/start.py --ctw 5 --angular-damping 0.05 --gazebo

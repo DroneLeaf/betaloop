@@ -12,16 +12,16 @@ Supported physics backends:
 
 Usage:
     # Gazebo physics (default)
-    python3 start.py --world rocket_drone_park_chase.world --gazebo
-    python3 start.py --world rocket_drone_collision_test.world --cam-pitch -90 --gazebo
+    python3 start.py --world park_chase --gazebo
+    python3 start.py --world collision_test --cam-pitch -90 --gazebo
     python3 start.py --drone iris --gazebo --chase-cam
 
-    # Simulink dynamics backend
-    python3 start.py --world rocket_drone_park_chase_vis.sdf --physics simulink --gazebo --chase-cam
-    python3 start.py --world rocket_drone_collision_test_vis.sdf --physics simulink --gazebo
+    # Simulink dynamics backend (world file selected automatically)
+    python3 start.py --world park_chase --physics simulink --gazebo --chase-cam
+    python3 start.py --world collision_test --physics simulink --gazebo
 
     # Tune drone params
-    python3 start.py --world rocket_drone_park_chase.world --ctw 5 --angular-damping 0.05
+    python3 start.py --world park_chase --ctw 5 --angular-damping 0.05
 """
 
 import argparse
@@ -80,10 +80,24 @@ SIMULINK_LIB = _default_path(
     ),
 )
 
-DEFAULT_WORLD = "rocket_drone_park_chase.world"
+DEFAULT_WORLD = "park_chase"
 DEFAULT_DRONE = "rocket_drone"
 TOPIC_MODEL_HINT_DEFAULT = "rocket_drone"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
+
+# Short world name → (gazebo .world file, simulink vis-only .sdf file, gz <world name>)
+WORLD_MAP = {
+    "park_chase": (
+        "rocket_drone_park_chase.world",
+        "rocket_drone_park_chase_vis.sdf",
+        "fpv_chase_park",
+    ),
+    "collision_test": (
+        "rocket_drone_collision_test.world",
+        "rocket_drone_collision_test_vis.sdf",
+        "collision_test",
+    ),
+}
 
 # Per-drone reference calibration.  max_thrust is the total static thrust from
 # all 4 rotors at vel_cmd_max.  *_per_kg are the moment-of-inertia values
@@ -626,18 +640,9 @@ def configure_display(args, pm):
 
 
 def parse_args():
-    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
-    available_worlds = []
-    if os.path.isdir(worlds_dir):
-        available_worlds = sorted(
-            f
-            for f in os.listdir(worlds_dir)
-            if f.endswith((".sdf", ".world"))
-        )
-
     epilog_lines = ["available worlds:"]
-    for w in available_worlds:
-        epilog_lines.append(f"  {w}")
+    for name, (gz_f, sim_f, _) in sorted(WORLD_MAP.items()):
+        epilog_lines.append(f"  {name:20s}  gazebo: {gz_f}  simulink: {sim_f}")
 
     parser = argparse.ArgumentParser(
         description="Unified Betaflight SITL + Gazebo simulation launcher",
@@ -650,7 +655,8 @@ def parse_args():
     sim.add_argument(
         "--world",
         default=DEFAULT_WORLD,
-        help=f"World SDF/world file (default: {DEFAULT_WORLD})",
+        choices=list(WORLD_MAP.keys()),
+        help=f"World short name (default: {DEFAULT_WORLD})",
     )
     sim.add_argument(
         "--physics",
@@ -836,9 +842,10 @@ def main():
         _patch_orbit_speed(args.target_speed)
 
     # ── 2. Gazebo ──
-    world_path = args.world
-    if not os.path.isabs(world_path):
-        world_path = os.path.join(AEROLOOP_HOME, "worlds", world_path)
+    world_entry = WORLD_MAP[args.world]
+    world_file = world_entry[1] if is_simulink else world_entry[0]
+    gz_world_name = world_entry[2]
+    world_path = os.path.join(AEROLOOP_HOME, "worlds", world_file)
     if not os.path.isfile(world_path):
         log.error("World file not found: %s", world_path)
         sys.exit(1)
@@ -1032,7 +1039,7 @@ def main():
 def _print_status(args, is_simulink, topic, chase_topic,
                   width, height, bridge_proc, chase_bridge_proc):
     """Print active connection info."""
-    world_name = os.path.basename(args.world)
+    world_name = args.world
 
     print()
     print("=" * 64)
