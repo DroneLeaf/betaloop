@@ -418,9 +418,9 @@ def _patch_damping(drone, lin_x, lin_y, lin_z, quad_x, quad_y, quad_z, ang):
                 log.info("Patched damping in %s", fpath)
 
 
-def _patch_collision_target(altitude, distance):
+def _patch_collision_target(altitude, distance_x, distance_y):
     """Patch target pose in collision_test world files (Gazebo + vis)."""
-    # Target pose pattern: <pose>DISTANCE 0 ALTITUDE ...</pose> inside collision_test_target model
+    # Target pose pattern: <pose>X Y ALTITUDE ...</pose> inside collision_test_target model
     pat = re.compile(
         r"(<model\s+name=['\"]collision_test_target['\"].*?<pose>)"
         r"([^<]+)"
@@ -440,15 +440,16 @@ def _patch_collision_target(altitude, distance):
         if len(vals) < 3:
             continue
         new_vals = list(vals)
-        new_vals[0] = f"{distance:.4g}"
+        new_vals[0] = f"{distance_x:.4g}"
+        new_vals[1] = f"{distance_y:.4g}"
         new_vals[2] = f"{altitude:.4g}"
         if new_vals == vals:
             continue
         new_text = text[:m.start(2)] + " ".join(new_vals) + text[m.end(2):]
         with open(fpath, "w") as f:
             f.write(new_text)
-        log.info("Patched collision target to alt=%.1f dist=%.1f in %s",
-                 altitude, distance, fpath)
+        log.info("Patched collision target to alt=%.1f dx=%.1f dy=%.1f in %s",
+                 altitude, distance_x, distance_y, fpath)
 
 
 def _patch_orbit_speed(speed):
@@ -764,10 +765,16 @@ def parse_args():
         help="Collision-test target altitude in metres (default: 20)",
     )
     wld.add_argument(
-        "--target-distance",
+        "--target-distance-x",
         type=float,
         default=None,
-        help="Collision-test target horizontal distance in metres (default: 20)",
+        help="Collision-test target X distance in metres (default: 10)",
+    )
+    wld.add_argument(
+        "--target-distance-y",
+        type=float,
+        default=None,
+        help="Collision-test target Y distance in metres (default: 10)",
     )
     wld.add_argument(
         "--target-speed",
@@ -833,10 +840,11 @@ def main():
     )
 
     # World-specific patches
-    if args.target_altitude is not None or args.target_distance is not None:
+    if args.target_altitude is not None or args.target_distance_x is not None or args.target_distance_y is not None:
         _patch_collision_target(
             args.target_altitude if args.target_altitude is not None else 20.0,
-            args.target_distance if args.target_distance is not None else 20.0,
+            args.target_distance_x if args.target_distance_x is not None else 10.0,
+            args.target_distance_y if args.target_distance_y is not None else 10.0,
         )
     if args.target_speed is not None:
         _patch_orbit_speed(args.target_speed)

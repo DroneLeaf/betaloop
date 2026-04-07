@@ -45,7 +45,8 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 | Argument | Purpose |
 |---|---|
 | `--target-altitude <m>` | Collision-test target altitude (default: 20) |
-| `--target-distance <m>` | Collision-test target horizontal distance (default: 20) |
+| `--target-distance-x <m>` | Collision-test target X distance (default: 10) |
+| `--target-distance-y <m>` | Collision-test target Y distance (default: 10) |
 | `--target-speed <rad/s>` | Park-chase orbit angular speed (default: 0.05) |
 
 ### Quick start
