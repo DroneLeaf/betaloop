@@ -119,6 +119,22 @@ DRONE_REFS = {
             "angular": 0.03,
         },
     },
+    "thaqib_1_prototype": {
+        "model_sdf": "thaqib_1_prototype/thaqib_1_prototype.sdf",
+        "model_uri": "model://thaqib_1_prototype",
+        "max_thrust": 22.0,
+        "ixx_per_kg": 0.019417,
+        "iyy_per_kg": 0.019417,
+        "izz_per_kg": 0.036817,
+        "default_ctw": 4.5,
+        "default_standoff": 0.20,
+        "leg_attach_offset": 0.025,
+        "default_damping": {
+            "linear_x": 0.1, "linear_y": 0.4, "linear_z": 0.03,
+            "quadratic_x": 0.001, "quadratic_y": 0.03, "quadratic_z": 0.001,
+            "angular": 0.03,
+        },
+    },
     "iris": {
         "model_sdf": "betaloop_iris_with_standoffs/model.sdf",
         "model_uri": "model://betaloop_iris_with_standoffs",
