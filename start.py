@@ -1027,9 +1027,9 @@ def main():
 
         # Chase camera (optional, SDL2 window)
         if chase_topic:
-            log.info("Starting chase camera SDL2 window")
+            log.info("Starting chase camera SDL2 window (no OSD)")
             chase_bridge_proc = pm.spawn(
-                [IMAGE_BRIDGE, chase_topic, "--display"],
+                [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
