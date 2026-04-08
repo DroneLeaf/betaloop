@@ -702,6 +702,11 @@ def parse_args():
         help="Skip the video pipeline (dynamics only, no camera display)",
     )
     sim.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Hide SDL2 preview windows (SHM still active)",
+    )
+    sim.add_argument(
         "--elf",
         default=BF_ELF,
         help="Path to betaflight_SITL.elf",
@@ -998,6 +1003,8 @@ def main():
             "--osd", "--msp-port", str(args.msp_port),
             "--cam-pitch", str(args.cam_pitch),
         ]
+        if args.no_display:
+            bridge_cmd.append("--hidden")
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
 
         bridge_proc = pm.spawn(
@@ -1025,11 +1032,14 @@ def main():
             sys.exit(1)
         log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-        # Chase camera (optional, SDL2 window)
+        # Chase camera (optional, always --display for rendering)
         if chase_topic:
-            log.info("Starting chase camera SDL2 window (no OSD)")
+            log.info("Starting chase camera bridge (no OSD)")
+            chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
+            if args.no_display:
+                chase_cmd.append("--hidden")
             chase_bridge_proc = pm.spawn(
-                [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"],
+                chase_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
