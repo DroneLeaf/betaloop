@@ -106,6 +106,7 @@ DRONE_REFS = {
     "rocket_drone": {
         "model_sdf": "rocket_drone/rocket_drone.sdf",
         "model_uri": "model://rocket_drone",
+        "model_vis_uri": "model://rocket_drone_vis",
         "max_thrust": 22.0,       # N — calibrated: 0.5 kg → CTW ≈ 4.5
         "ixx_per_kg": 0.019417,   # 0.029125 / 1.5
         "iyy_per_kg": 0.019417,
@@ -122,6 +123,7 @@ DRONE_REFS = {
     "thaqib_1_prototype": {
         "model_sdf": "thaqib_1_prototype/thaqib_1_prototype.sdf",
         "model_uri": "model://thaqib_1_prototype",
+        "model_vis_uri": "model://thaqib_1_prototype_vis",
         "max_thrust": 22.0,
         "ixx_per_kg": 0.019417,
         "iyy_per_kg": 0.019417,
@@ -138,6 +140,7 @@ DRONE_REFS = {
     "iris": {
         "model_sdf": "betaloop_iris_with_standoffs/model.sdf",
         "model_uri": "model://betaloop_iris_with_standoffs",
+        "model_vis_uri": "model://iris_vis",
         "max_thrust": 8.0,        # N — estimated: 0.4 kg → CTW ≈ 2
         "ixx_per_kg": 0.005,      # 0.002 / 0.4
         "iyy_per_kg": 0.010,      # 0.004 / 0.4
@@ -242,34 +245,44 @@ def _walk_sdfs():
 def _patch_drone_model(drone):
     """Patch <include> blocks in Gazebo world files to match *drone*."""
     target_uri = DRONE_REFS[drone]["model_uri"]
+    target_vis_uri = DRONE_REFS[drone]["model_vis_uri"]
     # Match <include> block with <uri>model://…</uri> and <name>…</name>.
     pat = re.compile(
         r"(<include>\s*<uri>\s*)(model://[^<]+)(\s*</uri>\s*<name>)([^<]+)(</name>)",
         re.DOTALL,
     )
+    # URIs belonging to drone models — only these should be swapped.
+    drone_uris = {ref["model_uri"] for ref in DRONE_REFS.values()}
+    drone_vis_uris = {ref["model_vis_uri"] for ref in DRONE_REFS.values()}
+    drone_names = set(DRONE_REFS.keys())
     worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
     for fname in os.listdir(worlds_dir):
         if not fname.endswith((".sdf", ".world")):
             continue
         fpath = os.path.join(worlds_dir, fname)
         text = open(fpath).read()
-        m = pat.search(text)
-        if not m:
-            continue
-        cur_uri = m.group(2).strip()
-        cur_name = m.group(4).strip()
-        if cur_uri == target_uri and cur_name == drone:
-            continue
-        new_text = (
-            text[: m.start(2)]
-            + target_uri
-            + text[m.end(2) : m.start(4)]
-            + drone
-            + text[m.end(4) :]
-        )
-        with open(fpath, "w") as f:
-            f.write(new_text)
-        log.info("Patched drone model to %s (%s) in %s", target_uri, drone, fpath)
+        is_vis = fname.endswith("_vis.sdf")
+        use_uri = target_vis_uri if is_vis else target_uri
+        # Find the first <include> that references a known drone model.
+        for m in pat.finditer(text):
+            cur_uri = m.group(2).strip()
+            cur_name = m.group(4).strip()
+            if (cur_uri not in drone_uris and cur_uri not in drone_vis_uris
+                    and cur_name not in drone_names):
+                continue  # skip non-drone includes (e.g. baylands_terrain)
+            if cur_uri == use_uri and cur_name == drone:
+                break  # already correct
+            new_text = (
+                text[: m.start(2)]
+                + use_uri
+                + text[m.end(2) : m.start(4)]
+                + drone
+                + text[m.end(4) :]
+            )
+            with open(fpath, "w") as f:
+                f.write(new_text)
+            log.info("Patched drone model to %s (%s) in %s", use_uri, drone, fpath)
+            break
 
 
 def _patch_fpv_cam_pitch(pitch_deg):
