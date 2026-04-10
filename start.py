@@ -29,12 +29,13 @@ import fcntl
 import logging
 import math
 import os
-import re
 import signal
 import socket
 import subprocess
 import sys
 import time
+
+from jinja2 import Environment, FileSystemLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,6 +106,7 @@ WORLD_MAP = {
 DRONE_REFS = {
     "rocket_drone": {
         "model_sdf": "rocket_drone/rocket_drone.sdf",
+        "model_vis_sdf": "rocket_drone_vis/model.sdf",
         "model_uri": "model://rocket_drone",
         "model_vis_uri": "model://rocket_drone_vis",
         "max_thrust": 22.0,       # N — calibrated: 0.5 kg → CTW ≈ 4.5
@@ -122,6 +124,7 @@ DRONE_REFS = {
     },
     "thaqib_1_prototype": {
         "model_sdf": "thaqib_1_prototype/thaqib_1_prototype.sdf",
+        "model_vis_sdf": "thaqib_1_prototype_vis/model.sdf",
         "model_uri": "model://thaqib_1_prototype",
         "model_vis_uri": "model://thaqib_1_prototype_vis",
         "max_thrust": 22.0,
@@ -139,6 +142,7 @@ DRONE_REFS = {
     },
     "iris": {
         "model_sdf": "betaloop_iris_with_standoffs/model.sdf",
+        "model_vis_sdf": "iris_vis/model.sdf",
         "model_uri": "model://betaloop_iris_with_standoffs",
         "model_vis_uri": "model://iris_vis",
         "max_thrust": 8.0,        # N — estimated: 0.4 kg → CTW ≈ 2
@@ -233,277 +237,88 @@ def setup_gazebo_env():
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
 
-def _walk_sdfs():
-    """Yield all .sdf and .world files under models/ and worlds/."""
-    for d in [os.path.join(AEROLOOP_HOME, "models"), os.path.join(AEROLOOP_HOME, "worlds")]:
-        for root, _dirs, files in os.walk(d):
-            for fname in files:
-                if fname.endswith((".sdf", ".world")):
-                    yield os.path.join(root, fname)
+def _render_template(j2_path, variables):
+    """Render a Jinja2 template (.j2) to the corresponding output file."""
+    template_dir = os.path.dirname(j2_path)
+    template_name = os.path.basename(j2_path)
+    output_path = j2_path[:-3]  # strip ".j2"
+    env = Environment(loader=FileSystemLoader(template_dir), keep_trailing_newline=True)
+    template = env.get_template(template_name)
+    rendered = template.render(**variables)
+    with open(output_path, "w") as f:
+        f.write(rendered)
+    log.info("Rendered %s", os.path.relpath(output_path, AEROLOOP_HOME))
 
 
-def _patch_drone_model(drone):
-    """Patch <include> blocks in Gazebo world files to match *drone*."""
-    target_uri = DRONE_REFS[drone]["model_uri"]
-    target_vis_uri = DRONE_REFS[drone]["model_vis_uri"]
-    # Match <include> block with <uri>model://…</uri> and <name>…</name>.
-    pat = re.compile(
-        r"(<include>\s*<uri>\s*)(model://[^<]+)(\s*</uri>\s*<name>)([^<]+)(</name>)",
-        re.DOTALL,
-    )
-    # URIs belonging to drone models — only these should be swapped.
-    drone_uris = {ref["model_uri"] for ref in DRONE_REFS.values()}
-    drone_vis_uris = {ref["model_vis_uri"] for ref in DRONE_REFS.values()}
-    drone_names = set(DRONE_REFS.keys())
-    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
-    for fname in os.listdir(worlds_dir):
-        if not fname.endswith((".sdf", ".world")):
-            continue
-        fpath = os.path.join(worlds_dir, fname)
-        text = open(fpath).read()
-        is_vis = fname.endswith("_vis.sdf")
-        use_uri = target_vis_uri if is_vis else target_uri
-        # Find the first <include> that references a known drone model.
-        for m in pat.finditer(text):
-            cur_uri = m.group(2).strip()
-            cur_name = m.group(4).strip()
-            if (cur_uri not in drone_uris and cur_uri not in drone_vis_uris
-                    and cur_name not in drone_names):
-                continue  # skip non-drone includes (e.g. baylands_terrain)
-            if cur_uri == use_uri and cur_name == drone:
-                break  # already correct
-            new_text = (
-                text[: m.start(2)]
-                + use_uri
-                + text[m.end(2) : m.start(4)]
-                + drone
-                + text[m.end(4) :]
-            )
-            with open(fpath, "w") as f:
-                f.write(new_text)
-            log.info("Patched drone model to %s (%s) in %s", use_uri, drone, fpath)
-            break
-
-
-def _patch_fpv_cam_pitch(pitch_deg):
-    """Rewrite the fpv_cam sensor <pose> pitch in all SDF files."""
-    pitch_rad = math.radians(pitch_deg)
-    pattern = re.compile(
-        r"(<sensor\s+name=['\"]fpv_cam['\"][^>]*>.*?<pose>)"
-        r"([^<]+)"
-        r"(</pose>)",
-        re.DOTALL,
-    )
-    for fpath in _walk_sdfs():
-        text = open(fpath).read()
-        m = pattern.search(text)
-        if not m:
-            continue
-        vals = m.group(2).split()
-        if len(vals) != 6:
-            continue
-        if vals[4] == f"{pitch_rad:.10g}":
-            continue
-        vals[4] = f"{pitch_rad:.10g}"
-        new_text = text[: m.start(2)] + " ".join(vals) + text[m.end(2) :]
-        with open(fpath, "w") as f:
-            f.write(new_text)
-        log.info("Patched fpv_cam pitch to %.1f° in %s", pitch_deg, fpath)
-
-
-def _patch_ctw(drone, ctw):
-    """Compute mass and inertia from CTW and patch model + vis world SDFs."""
+def _render_all_templates(drone, world_name, args):
+    """Render all Jinja2 templates for the selected drone and world."""
     ref = DRONE_REFS[drone]
+    models_dir = os.path.join(AEROLOOP_HOME, "models")
+    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
+
+    # ── Compute model variables ──
+    ctw = args.ctw if args.ctw is not None else ref["default_ctw"]
     mass = ref["max_thrust"] / (ctw * 9.81)
     ixx = ref["ixx_per_kg"] * mass
     iyy = ref["iyy_per_kg"] * mass
     izz = ref["izz_per_kg"] * mass
 
-    mass_pat = re.compile(r"(<mass>)([\d.eE+-]+)(</mass>)")
-    ixx_pat = re.compile(r"(<ixx>)([\d.eE+-]+)(</ixx>)")
-    iyy_pat = re.compile(r"(<iyy>)([\d.eE+-]+)(</iyy>)")
-    izz_pat = re.compile(r"(<izz>)([\d.eE+-]+)(</izz>)")
+    standoff = args.standoff_height if args.standoff_height is not None else ref["default_standoff"]
+    leg_z = -(standoff / 2 + ref["leg_attach_offset"])
 
-    def _replace_first_base_link(text, pat, new_val):
-        """Replace the first occurrence of *pat* inside a base_link section."""
-        bl = text.find("<link name=\"base_link\">")
-        if bl < 0:
-            bl = text.find("<link name='base_link'>")
-        if bl < 0:
-            return text, False
-        m = pat.search(text, bl)
-        if not m:
-            return text, False
-        return text[:m.start(2)] + f"{new_val:.6g}" + text[m.end(2):], True
+    fpv_cam_pitch_rad = math.radians(args.cam_pitch)
 
-    for fpath in _walk_sdfs():
-        text = open(fpath).read()
-        if "base_link" not in text:
-            continue
-        # Only patch files that reference this drone
-        if drone == "rocket_drone" and "rocket_drone" not in fpath:
-            continue
-        if drone == "iris" and "iris" not in fpath:
-            continue
-        changed = False
-        for pat, val in [(mass_pat, mass), (ixx_pat, ixx), (iyy_pat, iyy), (izz_pat, izz)]:
-            text, did = _replace_first_base_link(text, pat, val)
-            changed = changed or did
-        if changed:
-            with open(fpath, "w") as f:
-                f.write(text)
-            log.info("Patched CTW=%.1f (mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f) in %s",
-                     ctw, mass, ixx, iyy, izz, fpath)
+    dd = ref["default_damping"]
+    lin_x = args.linear_damping_x if args.linear_damping_x is not None else dd["linear_x"]
+    lin_y = args.linear_damping_y if args.linear_damping_y is not None else dd["linear_y"]
+    lin_z = args.linear_damping_z if args.linear_damping_z is not None else dd["linear_z"]
+    quad_x = args.quadratic_damping_x if args.quadratic_damping_x is not None else dd["quadratic_x"]
+    quad_y = args.quadratic_damping_y if args.quadratic_damping_y is not None else dd["quadratic_y"]
+    quad_z = args.quadratic_damping_z if args.quadratic_damping_z is not None else dd["quadratic_z"]
+    ang = args.angular_damping if args.angular_damping is not None else dd["angular"]
 
+    model_vars = {
+        "mass": mass, "ixx": ixx, "iyy": iyy, "izz": izz,
+        "fpv_cam_pitch_rad": fpv_cam_pitch_rad,
+        "standoff_height": standoff, "leg_z": leg_z,
+        "linear_damping_x": lin_x, "linear_damping_y": lin_y, "linear_damping_z": lin_z,
+        "quadratic_damping_x": quad_x, "quadratic_damping_y": quad_y, "quadratic_damping_z": quad_z,
+        "angular_damping": ang,
+    }
 
-def _patch_standoff_height(drone, height_m):
-    """Patch landing leg cylinder length and pose Z in all SDFs for *drone*."""
-    ref = DRONE_REFS[drone]
-    leg_z = -(height_m / 2 + ref["leg_attach_offset"])
-    # Match leg visual pose lines (6 values) and cylinder length
-    leg_pose_pat = re.compile(
-        r"(<visual\s+name=['\"][^'\"]*leg_visual['\"]>\s*<pose>)"
-        r"([^<]+)"
-        r"(</pose>)",
-        re.DOTALL,
-    )
-    leg_len_pat = re.compile(
-        r"(<length>)([\d.eE+-]+)(</length>)"
-    )
+    log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
+             ctw, mass, ixx, iyy, izz, standoff, args.cam_pitch)
 
-    for fpath in _walk_sdfs():
-        text = open(fpath).read()
-        if "leg_visual" not in text:
-            continue
-        if drone == "rocket_drone" and "rocket_drone" not in fpath:
-            continue
-        if drone == "iris" and "iris" not in fpath:
-            continue
-        changed = False
-        # Patch all leg poses (Z value = index 2)
-        def _repl_pose(m):
-            nonlocal changed
-            vals = m.group(2).split()
-            if len(vals) != 6:
-                return m.group(0)
-            vals[2] = f"{leg_z:.4g}"
-            changed = True
-            return m.group(1) + " ".join(vals) + m.group(3)
-        text = leg_pose_pat.sub(_repl_pose, text)
-        # Patch all leg cylinder lengths that follow a leg_visual
-        # We use a simple approach: replace ALL <length> inside leg visual blocks
-        new_parts = []
-        last_end = 0
-        for vm in re.finditer(r"<visual\s+name=['\"][^'\"]*leg_visual['\"]>.*?</visual>", text, re.DOTALL):
-            block = vm.group(0)
-            new_block = leg_len_pat.sub(
-                lambda lm: lm.group(1) + f"{height_m:.4g}" + lm.group(3),
-                block,
-            )
-            if new_block != block:
-                changed = True
-            new_parts.append(text[last_end:vm.start()])
-            new_parts.append(new_block)
-            last_end = vm.end()
-        new_parts.append(text[last_end:])
-        text = "".join(new_parts)
-        if changed:
-            with open(fpath, "w") as f:
-                f.write(text)
-            log.info("Patched standoff height=%.3fm (leg_z=%.4f) in %s",
-                     height_m, leg_z, fpath)
+    # ── Render physics model SDF ──
+    phys_j2 = os.path.join(models_dir, ref["model_sdf"] + ".j2")
+    if os.path.isfile(phys_j2):
+        _render_template(phys_j2, model_vars)
 
+    # ── Render vis model SDF ──
+    vis_j2 = os.path.join(models_dir, ref["model_vis_sdf"] + ".j2")
+    if os.path.isfile(vis_j2):
+        _render_template(vis_j2, model_vars)
 
-def _patch_damping(drone, lin_x, lin_y, lin_z, quad_x, quad_y, quad_z, ang):
-    """Patch ViscousDragPlugin per-axis damping values in model SDFs for *drone*."""
-    tags = [
-        ("linear_damping_x", lin_x), ("linear_damping_y", lin_y), ("linear_damping_z", lin_z),
-        ("quadratic_damping_x", quad_x), ("quadratic_damping_y", quad_y), ("quadratic_damping_z", quad_z),
-        ("angular_damping", ang),
-    ]
-    models_dir = os.path.join(AEROLOOP_HOME, "models")
-    for root, _dirs, files in os.walk(models_dir):
-        for fname in files:
-            if not fname.endswith(".sdf"):
-                continue
-            fpath = os.path.join(root, fname)
-            if drone == "rocket_drone" and "rocket_drone" not in fpath:
-                continue
-            if drone == "iris" and "iris" not in fpath:
-                continue
-            text = open(fpath).read()
-            if "ViscousDragPlugin" not in text:
-                continue
-            changed = False
-            for tag, val in tags:
-                pat = re.compile(rf"(<{tag}>)([\d.eE+-]+)(</{tag}>)")
-                m = pat.search(text)
-                if m and m.group(2) != f"{val:.6g}":
-                    text = text[:m.start(2)] + f"{val:.6g}" + text[m.end(2):]
-                    changed = True
-            if changed:
-                with open(fpath, "w") as f:
-                    f.write(text)
-                log.info("Patched damping in %s", fpath)
+    # ── Compute world variables ──
+    orbit_speed = args.target_speed if args.target_speed is not None else 0.05
+    target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
+    target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
+    target_z = args.target_altitude if args.target_altitude is not None else 10.0
 
+    world_vars = {
+        "drone_uri": ref["model_uri"],
+        "drone_vis_uri": ref["model_vis_uri"],
+        "drone_name": drone,
+        "orbit_speed": orbit_speed,
+        "target_x": target_x, "target_y": target_y, "target_z": target_z,
+    }
 
-def _patch_collision_target(altitude, distance_x, distance_y):
-    """Patch target pose in collision_test world files (Gazebo + vis)."""
-    # Target pose pattern: <pose>X Y ALTITUDE ...</pose> inside collision_test_target model
-    pat = re.compile(
-        r"(<model\s+name=['\"]collision_test_target['\"].*?<pose>)"
-        r"([^<]+)"
-        r"(</pose>)",
-        re.DOTALL,
-    )
-    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
-    for fname in os.listdir(worlds_dir):
-        if "collision_test" not in fname:
-            continue
-        fpath = os.path.join(worlds_dir, fname)
-        text = open(fpath).read()
-        m = pat.search(text)
-        if not m:
-            continue
-        vals = m.group(2).split()
-        if len(vals) < 3:
-            continue
-        new_vals = list(vals)
-        new_vals[0] = f"{distance_x:.4g}"
-        new_vals[1] = f"{distance_y:.4g}"
-        new_vals[2] = f"{altitude:.4g}"
-        if new_vals == vals:
-            continue
-        new_text = text[:m.start(2)] + " ".join(new_vals) + text[m.end(2):]
-        with open(fpath, "w") as f:
-            f.write(new_text)
-        log.info("Patched collision target to alt=%.1f dx=%.1f dy=%.1f in %s",
-                 altitude, distance_x, distance_y, fpath)
-
-
-def _patch_orbit_speed(speed):
-    """Patch orbit_joint initial_velocity in park_chase world files (Gazebo + vis)."""
-    pat = re.compile(
-        r"(<joint_name>orbit_joint</joint_name>\s*<initial_velocity>)"
-        r"([\d.eE+-]+)"
-        r"(</initial_velocity>)",
-        re.DOTALL,
-    )
-    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
-    for fname in os.listdir(worlds_dir):
-        if "park_chase" not in fname:
-            continue
-        fpath = os.path.join(worlds_dir, fname)
-        text = open(fpath).read()
-        m = pat.search(text)
-        if not m:
-            continue
-        if m.group(2) == f"{speed:.6g}":
-            continue
-        new_text = text[:m.start(2)] + f"{speed:.6g}" + text[m.end(2):]
-        with open(fpath, "w") as f:
-            f.write(new_text)
-        log.info("Patched orbit speed to %.4f rad/s in %s", speed, fpath)
+    # ── Render world files ──
+    physics_world, vis_world, _ = WORLD_MAP[world_name]
+    for wf in [physics_world, vis_world]:
+        wj2 = os.path.join(worlds_dir, wf + ".j2")
+        if os.path.isfile(wj2):
+            _render_template(wj2, world_vars)
 
 
 def cleanup_before_start():
@@ -841,47 +656,15 @@ def main():
     setup_gazebo_env()
     configure_display(args, pm)
 
-    # ── 1b. Patch SDF files before Gazebo launch ──
+    # ── 1b. Render Jinja2 templates before Gazebo launch ──
     drone = args.drone
-    _patch_drone_model(drone)
-    _patch_fpv_cam_pitch(args.cam_pitch)
+    _render_all_templates(drone, args.world, args)
 
     # Use drone name as topic hint unless user explicitly overrode it.
     if args.topic_model_hint == TOPIC_MODEL_HINT_DEFAULT and drone != TOPIC_MODEL_HINT_DEFAULT:
         args.topic_model_hint = drone
 
     ref = DRONE_REFS[drone]
-
-    # CTW → mass & inertia
-    ctw = args.ctw if args.ctw is not None else ref["default_ctw"]
-    _patch_ctw(drone, ctw)
-
-    # Standoff (leg) height
-    standoff = args.standoff_height if args.standoff_height is not None else ref["default_standoff"]
-    _patch_standoff_height(drone, standoff)
-
-    # Damping
-    dd = ref["default_damping"]
-    _patch_damping(
-        drone,
-        args.linear_damping_x if args.linear_damping_x is not None else dd["linear_x"],
-        args.linear_damping_y if args.linear_damping_y is not None else dd["linear_y"],
-        args.linear_damping_z if args.linear_damping_z is not None else dd["linear_z"],
-        args.quadratic_damping_x if args.quadratic_damping_x is not None else dd["quadratic_x"],
-        args.quadratic_damping_y if args.quadratic_damping_y is not None else dd["quadratic_y"],
-        args.quadratic_damping_z if args.quadratic_damping_z is not None else dd["quadratic_z"],
-        args.angular_damping if args.angular_damping is not None else dd["angular"],
-    )
-
-    # World-specific patches
-    if args.target_altitude is not None or args.target_distance_x is not None or args.target_distance_y is not None:
-        _patch_collision_target(
-            args.target_altitude if args.target_altitude is not None else 20.0,
-            args.target_distance_x if args.target_distance_x is not None else 10.0,
-            args.target_distance_y if args.target_distance_y is not None else 10.0,
-        )
-    if args.target_speed is not None:
-        _patch_orbit_speed(args.target_speed)
 
     # ── 2. Gazebo ──
     world_entry = WORLD_MAP[args.world]
