@@ -33,6 +33,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 from jinja2 import Environment, FileSystemLoader
@@ -93,6 +94,7 @@ IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge"
 #   target_model — SDF model name of the target (for proximity OSD)
 #   target_link  — link inside target model whose world pose to track
 #   target_bbox  — half-extents "X,Y,Z" in metres (axis-aligned)
+#   patrol_joint — prismatic joint name for patrol reversal (patrol_park only)
 WORLD_MAP = {
     "park_chase": {
         "gz_world":     "rocket_drone_park_chase.world",
@@ -101,6 +103,15 @@ WORLD_MAP = {
         "target_model": "moving_target_drone",
         "target_link":  "geranium_link",
         "target_bbox":  "0.792,1.047,0.186",
+    },
+    "patrol_park": {
+        "gz_world":     "rocket_drone_patrol_park.world",
+        "sim_world":    "rocket_drone_patrol_park_vis.sdf",
+        "gz_name":      "fpv_patrol_park",
+        "target_model": "patrol_target_drone",
+        "target_link":  "geranium_link",
+        "target_bbox":  "0.792,1.047,0.186",
+        "patrol_joint": "patrol_joint",
     },
     "collision_test": {
         "gz_world":     "rocket_drone_collision_test.world",
@@ -317,12 +328,17 @@ def _render_all_templates(drone, world_name, args):
     speed_kmh = args.target_speed if args.target_speed is not None else 5.4  # ~1.5 m/s ≈ 0.05 rad/s @ 30 m
     orbit_speed = (speed_kmh / 3.6) / orbit_radius
 
+    # Patrol-park: straight-line back-and-forth patrol
+    patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
+    patrol_speed_kmh = args.target_speed if args.target_speed is not None else 100.0
+    patrol_speed_ms = patrol_speed_kmh / 3.6
+
     target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
     target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
-    # target_z: collision_test default 10, park_chase default 50
+    # target_z: collision_test default 10, park_chase/patrol_park default 50
     if args.target_altitude is not None:
         target_z = args.target_altitude
-    elif world_name == "park_chase":
+    elif world_name in ("park_chase", "patrol_park"):
         target_z = 50.0
     else:
         target_z = 10.0
@@ -335,6 +351,8 @@ def _render_all_templates(drone, world_name, args):
         "orbit_radius": orbit_radius,
         "target_altitude": target_z,
         "target_x": target_x, "target_y": target_y, "target_z": target_z,
+        "patrol_length": patrol_length,
+        "patrol_speed_ms": patrol_speed_ms,
     }
 
     # ── Render world files ──
@@ -630,12 +648,12 @@ def parse_args():
     drn.add_argument("--angular-damping", type=float, default=None, help="ViscousDragPlugin angular damping")
 
     # ── World Settings ───────────────────────────────────────────────────
-    wld = parser.add_argument_group("World settings (collision_test / park_chase)")
+    wld = parser.add_argument_group("World settings (collision_test / park_chase / patrol_park)")
     wld.add_argument(
         "--target-altitude",
         type=float,
         default=None,
-        help="Target altitude in metres (collision_test default: 20, park_chase default: 50)",
+        help="Target altitude in metres (collision_test default: 20, park_chase/patrol_park default: 50)",
     )
     wld.add_argument(
         "--target-distance-x",
@@ -653,13 +671,19 @@ def parse_args():
         "--target-speed",
         type=float,
         default=None,
-        help="Park-chase target tangential speed in km/h (default: 5.4)",
+        help="Target speed in km/h (park_chase orbit default: 5.4, patrol_park default: 100)",
     )
     wld.add_argument(
         "--target-orbit-radius",
         type=float,
         default=None,
         help="Park-chase orbit radius in metres (default: 30)",
+    )
+    wld.add_argument(
+        "--patrol-length",
+        type=float,
+        default=None,
+        help="Patrol-park total patrol distance in metres (default: 2000)",
     )
     wld.add_argument(
         "--hit-box-scale",
@@ -900,6 +924,39 @@ def main():
         width, height, bridge_proc, chase_bridge_proc,
     )
 
+    # ── 6b. Patrol reversal thread (patrol_park only) ──
+    patrol_thread = None
+    patrol_stop = threading.Event()
+    patrol_joint = world_entry.get("patrol_joint")
+    if patrol_joint and world_entry.get("target_model"):
+        patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
+        speed_kmh_p = args.target_speed if args.target_speed is not None else 100.0
+        speed_ms = speed_kmh_p / 3.6
+        half_traverse = (patrol_length / 2.0) / speed_ms  # seconds per half-leg
+        target_model = world_entry["target_model"]
+        vel_topic = f"/model/{target_model}/joint/{patrol_joint}/cmd_vel"
+
+        def _patrol_loop():
+            direction = 1.0  # start moving in +X
+            log.info("Patrol reversal: topic=%s half=%.1fs speed=%.1f m/s",
+                     vel_topic, half_traverse, speed_ms)
+            while not patrol_stop.wait(timeout=half_traverse):
+                direction *= -1.0
+                vel = direction * speed_ms
+                try:
+                    subprocess.run(
+                        ["gz", "topic", "-t", vel_topic,
+                         "-m", "gz.msgs.Double", "-p", f"data: {vel}",
+                         "-n", "1"],
+                        timeout=5, capture_output=True,
+                    )
+                    log.info("Patrol reversal → %.1f m/s", vel)
+                except Exception as e:
+                    log.warning("Patrol reversal failed: %s", e)
+
+        patrol_thread = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
+        patrol_thread.start()
+
     # ── 7. Keep alive ──
     try:
         while True:
@@ -915,6 +972,10 @@ def main():
             time.sleep(2)
     except KeyboardInterrupt:
         pass
+
+    if patrol_thread:
+        patrol_stop.set()
+        patrol_thread.join(timeout=2)
 
     pm.shutdown()
     log.info("Simulation stopped")
