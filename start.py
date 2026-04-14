@@ -86,18 +86,27 @@ DEFAULT_DRONE = "rocket_drone"
 TOPIC_MODEL_HINT_DEFAULT = "rocket_drone"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 
-# Short world name → (gazebo .world file, simulink vis-only .sdf file, gz <world name>)
+# Short world name → dict of world attributes.
+#   gz_world     — Gazebo physics world file
+#   sim_world    — Simulink vis-only SDF file
+#   gz_name      — Gazebo <world name> element
+#   target_model — SDF model name of the target (for proximity OSD)
+#   target_bbox  — half-extents "X,Y,Z" in metres (axis-aligned)
 WORLD_MAP = {
-    "park_chase": (
-        "rocket_drone_park_chase.world",
-        "rocket_drone_park_chase_vis.sdf",
-        "fpv_chase_park",
-    ),
-    "collision_test": (
-        "rocket_drone_collision_test.world",
-        "rocket_drone_collision_test_vis.sdf",
-        "collision_test",
-    ),
+    "park_chase": {
+        "gz_world":     "rocket_drone_park_chase.world",
+        "sim_world":    "rocket_drone_park_chase_vis.sdf",
+        "gz_name":      "fpv_chase_park",
+        "target_model": "moving_target_drone",
+        "target_bbox":  "0.792,1.047,0.186",
+    },
+    "collision_test": {
+        "gz_world":     "rocket_drone_collision_test.world",
+        "sim_world":    "rocket_drone_collision_test_vis.sdf",
+        "gz_name":      "collision_test",
+        "target_model": "collision_test_target",
+        "target_bbox":  "0.792,1.047,0.186",
+    },
 }
 
 # Per-drone reference calibration.  max_thrust is the total static thrust from
@@ -300,22 +309,35 @@ def _render_all_templates(drone, world_name, args):
         _render_template(vis_j2, model_vars)
 
     # ── Compute world variables ──
-    orbit_speed = args.target_speed if args.target_speed is not None else 0.05
+    # Park-chase orbit: user specifies tangential speed in km/h and radius.
+    # omega (rad/s) = v_tangential / radius,  v_tangential = speed_kmh / 3.6
+    orbit_radius = args.target_orbit_radius if args.target_orbit_radius is not None else 30.0
+    speed_kmh = args.target_speed if args.target_speed is not None else 5.4  # ~1.5 m/s ≈ 0.05 rad/s @ 30 m
+    orbit_speed = (speed_kmh / 3.6) / orbit_radius
+
     target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
     target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
-    target_z = args.target_altitude if args.target_altitude is not None else 10.0
+    # target_z: collision_test default 10, park_chase default 50
+    if args.target_altitude is not None:
+        target_z = args.target_altitude
+    elif world_name == "park_chase":
+        target_z = 50.0
+    else:
+        target_z = 10.0
 
     world_vars = {
         "drone_uri": ref["model_uri"],
         "drone_vis_uri": ref["model_vis_uri"],
         "drone_name": drone,
         "orbit_speed": orbit_speed,
+        "orbit_radius": orbit_radius,
+        "target_altitude": target_z,
         "target_x": target_x, "target_y": target_y, "target_z": target_z,
     }
 
     # ── Render world files ──
-    physics_world, vis_world, _ = WORLD_MAP[world_name]
-    for wf in [physics_world, vis_world]:
+    wm = WORLD_MAP[world_name]
+    for wf in [wm["gz_world"], wm["sim_world"]]:
         wj2 = os.path.join(worlds_dir, wf + ".j2")
         if os.path.isfile(wj2):
             _render_template(wj2, world_vars)
@@ -486,8 +508,8 @@ def configure_display(args, pm):
 
 def parse_args():
     epilog_lines = ["available worlds:"]
-    for name, (gz_f, sim_f, _) in sorted(WORLD_MAP.items()):
-        epilog_lines.append(f"  {name:20s}  gazebo: {gz_f}  simulink: {sim_f}")
+    for name, entry in sorted(WORLD_MAP.items()):
+        epilog_lines.append(f"  {name:20s}  gazebo: {entry['gz_world']}  simulink: {entry['sim_world']}")
 
     parser = argparse.ArgumentParser(
         description="Unified Betaflight SITL + Gazebo simulation launcher",
@@ -611,25 +633,37 @@ def parse_args():
         "--target-altitude",
         type=float,
         default=None,
-        help="Collision-test target altitude in metres (default: 20)",
+        help="Target altitude in metres (collision_test default: 20, park_chase default: 50)",
     )
     wld.add_argument(
         "--target-distance-x",
         type=float,
         default=None,
-        help="Collision-test target X distance in metres (default: 10)",
+        help="Collision-test target X distance in metres (default: 30)",
     )
     wld.add_argument(
         "--target-distance-y",
         type=float,
         default=None,
-        help="Collision-test target Y distance in metres (default: 10)",
+        help="Collision-test target Y distance in metres (default: 0)",
     )
     wld.add_argument(
         "--target-speed",
         type=float,
         default=None,
-        help="Park-chase orbit speed in rad/s (default: 0.05)",
+        help="Park-chase target tangential speed in km/h (default: 5.4)",
+    )
+    wld.add_argument(
+        "--target-orbit-radius",
+        type=float,
+        default=None,
+        help="Park-chase orbit radius in metres (default: 30)",
+    )
+    wld.add_argument(
+        "--hit-box-scale",
+        type=float,
+        default=None,
+        help="Uniform scale multiplier for the target hit box (default: 1.0)",
     )
 
     return parser.parse_args()
@@ -668,8 +702,8 @@ def main():
 
     # ── 2. Gazebo ──
     world_entry = WORLD_MAP[args.world]
-    world_file = world_entry[1] if is_simulink else world_entry[0]
-    gz_world_name = world_entry[2]
+    world_file = world_entry["sim_world"] if is_simulink else world_entry["gz_world"]
+    gz_world_name = world_entry["gz_name"]
     world_path = os.path.join(AEROLOOP_HOME, "worlds", world_file)
     if not os.path.isfile(world_path):
         log.error("World file not found: %s", world_path)
@@ -801,6 +835,20 @@ def main():
         ]
         if args.no_display:
             bridge_cmd.append("--hidden")
+
+        # Per-world target proximity detection
+        target_model = world_entry.get("target_model")
+        target_bbox  = world_entry.get("target_bbox")
+        if target_model:
+            bridge_cmd.extend(["--target-model", target_model])
+            if target_bbox:
+                bridge_cmd.extend(["--target-bbox", target_bbox])
+            if args.hit_box_scale is not None:
+                bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
+            log.info("Target proximity: model='%s' bbox=%s scale=%s",
+                     target_model, target_bbox or "default",
+                     args.hit_box_scale if args.hit_box_scale is not None else "1.0")
+
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
 
         bridge_proc = pm.spawn(
