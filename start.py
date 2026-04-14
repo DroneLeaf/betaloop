@@ -91,6 +91,7 @@ IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge"
 #   sim_world    — Simulink vis-only SDF file
 #   gz_name      — Gazebo <world name> element
 #   target_model — SDF model name of the target (for proximity OSD)
+#   target_link  — link inside target model whose world pose to track
 #   target_bbox  — half-extents "X,Y,Z" in metres (axis-aligned)
 WORLD_MAP = {
     "park_chase": {
@@ -98,6 +99,7 @@ WORLD_MAP = {
         "sim_world":    "rocket_drone_park_chase_vis.sdf",
         "gz_name":      "fpv_chase_park",
         "target_model": "moving_target_drone",
+        "target_link":  "geranium_link",
         "target_bbox":  "0.792,1.047,0.186",
     },
     "collision_test": {
@@ -838,15 +840,19 @@ def main():
 
         # Per-world target proximity detection
         target_model = world_entry.get("target_model")
+        target_link  = world_entry.get("target_link")
         target_bbox  = world_entry.get("target_bbox")
         if target_model:
             bridge_cmd.extend(["--target-model", target_model])
+            if target_link:
+                bridge_cmd.extend(["--target-link", target_link])
             if target_bbox:
                 bridge_cmd.extend(["--target-bbox", target_bbox])
             if args.hit_box_scale is not None:
                 bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
-            log.info("Target proximity: model='%s' bbox=%s scale=%s",
-                     target_model, target_bbox or "default",
+            log.info("Target proximity: model='%s' link=%s bbox=%s scale=%s",
+                     target_model, target_link or "(model root)",
+                     target_bbox or "default",
                      args.hit_box_scale if args.hit_box_scale is not None else "1.0")
 
         log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
