@@ -50,8 +50,13 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 | `--target-speed <km/h>` | Park-chase orbit speed / patrol speed (default: 5.4 / 100) |
 | `--target-orbit-radius <m>` | Park-chase orbit radius (default: 30) |
 | `--patrol-length <m>` | Patrol-park track length (default: 2000) |
-| `--wind-intensity <m/s>` | Balloon-test wind drift intensity (default: 2.0) |
-| `--wind-randomness <σ>` | Balloon-test Ornstein-Uhlenbeck noise sigma (default: 1.0) |
+| `--sine-amplitude-xy <m>` | Patrol sine weave amplitude in Y (default: 0) |
+| `--sine-period-xy <m>` | Patrol sine weave period along X (default: 200) |
+| `--sine-amplitude-z <m>` | Patrol sine bob amplitude in Z (default: 0) |
+| `--sine-period-z <m>` | Patrol sine bob period along X (default: 200) |
+| `--wind-intensity <m>` | Balloon-test Lissajous drift amplitude (default: 2.0) |
+| `--wind-randomness <σ>` | Balloon-test vertical bob amplitude (default: 1.0) |
+| `--drift-speed <factor>` | Balloon-test Lissajous speed multiplier (default: 20.0) |
 | `--hit-box-scale <factor>` | OSD hit-box scale multiplier (default: 1.0) |
 
 ### Quick start
