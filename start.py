@@ -33,6 +33,7 @@ import signal
 import socket
 import subprocess
 import sys
+import random
 import threading
 import time
 
@@ -119,6 +120,14 @@ WORLD_MAP = {
         "gz_name":      "collision_test",
         "target_model": "collision_test_target",
         "target_bbox":  "0.792,1.047,0.186",
+    },
+    "balloon_test": {
+        "gz_world":     "rocket_drone_balloon_test.world",
+        "sim_world":    "rocket_drone_balloon_test_vis.sdf",
+        "gz_name":      "balloon_test",
+        "target_model": "balloon_target",
+        "target_bbox":  "0.5,0.5,0.5",
+        "balloon_wind": True,
     },
 }
 
@@ -362,6 +371,8 @@ def _render_all_templates(drone, world_name, args):
         if os.path.isfile(wj2):
             _render_template(wj2, world_vars)
 
+    return world_vars
+
 
 def cleanup_before_start():
     """Kill stale processes from previous runs and remove orphaned resources."""
@@ -371,7 +382,7 @@ def cleanup_before_start():
         ("existing image bridge processes", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"),
         ("existing Betaflight SITL processes", "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true"),
         ("existing MSP Virtual Radio processes", "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true"),
-        ("existing bf_sim_bridge processes", "pkill -9 -f 'bf_sim_bridge' 2>/dev/null || true"),
+        ("existing bf_sim_bridge processes", "pkill -9 -x bf_sim_bridge 2>/dev/null || true"),
         ("existing Xvfb processes", "pkill -9 Xvfb 2>/dev/null || true"),
     ]
     for label, cmd in cleanup_cmds:
@@ -647,6 +658,15 @@ def parse_args():
     drn.add_argument("--quadratic-damping-z", type=float, default=None, help="ViscousDragPlugin quadratic damping Z")
     drn.add_argument("--angular-damping", type=float, default=None, help="ViscousDragPlugin angular damping")
 
+    # ── Simulink Settings ────────────────────────────────────────────────
+    slk = parser.add_argument_group("Simulink settings")
+    slk.add_argument(
+        "--params",
+        type=str,
+        default=None,
+        help="Path to a key=value .params file for bf_sim_bridge model parameters",
+    )
+
     # ── World Settings ───────────────────────────────────────────────────
     wld = parser.add_argument_group("World settings (collision_test / park_chase / patrol_park)")
     wld.add_argument(
@@ -691,6 +711,18 @@ def parse_args():
         default=None,
         help="Uniform scale multiplier for the target hit box (default: 1.0)",
     )
+    wld.add_argument(
+        "--wind-intensity",
+        type=float,
+        default=None,
+        help="Balloon wind mean drift speed m/s (default: 2.0)",
+    )
+    wld.add_argument(
+        "--wind-randomness",
+        type=float,
+        default=None,
+        help="Balloon wind stochastic noise sigma m (default: 1.0)",
+    )
 
     return parser.parse_args()
 
@@ -718,7 +750,7 @@ def main():
 
     # ── 1b. Render Jinja2 templates before Gazebo launch ──
     drone = args.drone
-    _render_all_templates(drone, args.world, args)
+    world_vars = _render_all_templates(drone, args.world, args)
 
     # Use drone name as topic hint unless user explicitly overrode it.
     if args.topic_model_hint == TOPIC_MODEL_HINT_DEFAULT and drone != TOPIC_MODEL_HINT_DEFAULT:
@@ -762,6 +794,8 @@ def main():
             sys.exit(1)
 
         bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
+        if args.params:
+            bridge_args += ["--params", os.path.abspath(args.params)]
         log.info("Starting bf_sim_bridge (Simulink dynamics)")
         bf_bridge_proc = pm.spawn(bridge_args)
         time.sleep(2)
@@ -957,6 +991,55 @@ def main():
         patrol_thread = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
         patrol_thread.start()
 
+    # ── 6c. Balloon stochastic wind thread (balloon_test only) ──
+    wind_thread = None
+    wind_stop = threading.Event()
+    if world_entry.get("balloon_wind"):
+        wind_intensity = args.wind_intensity if args.wind_intensity is not None else 2.0
+        wind_sigma = args.wind_randomness if args.wind_randomness is not None else 1.0
+        gz_world = world_entry["gz_name"]
+        target_model = world_entry["target_model"]
+        mean_x, mean_y, mean_z = world_vars["target_x"], world_vars["target_y"], world_vars["target_z"]
+
+        def _wind_loop():
+            """Ornstein-Uhlenbeck stochastic wind on balloon position."""
+            dt = 0.1  # 10 Hz update
+            theta = 0.5  # mean-reversion rate
+            # Initialise at mean position
+            bx, by, bz = mean_x, mean_y, mean_z
+            # Random wind drift direction (slowly rotating)
+            wind_angle = random.uniform(0, 2 * math.pi)
+            log.info("Balloon wind: intensity=%.1f m/s sigma=%.1f m model=%s",
+                     wind_intensity, wind_sigma, target_model)
+            while not wind_stop.wait(timeout=dt):
+                # Ornstein-Uhlenbeck: dx = -theta*(x-mean)*dt + sigma*sqrt(dt)*dW + drift*dt
+                noise_scale = wind_sigma * math.sqrt(dt)
+                bx += -theta * (bx - mean_x) * dt + noise_scale * random.gauss(0, 1) + wind_intensity * math.cos(wind_angle) * dt
+                by += -theta * (by - mean_y) * dt + noise_scale * random.gauss(0, 1) + wind_intensity * math.sin(wind_angle) * dt
+                bz += -theta * (bz - mean_z) * dt + noise_scale * 0.3 * random.gauss(0, 1)  # less vertical drift
+                # Slowly rotate wind direction
+                wind_angle += 0.05 * dt * random.gauss(0, 1)
+                pose_req = (
+                    f'name: "{target_model}", '
+                    f'position: {{x: {bx:.4f}, y: {by:.4f}, z: {bz:.4f}}}, '
+                    f'orientation: {{x: 0, y: 0, z: 0, w: 1}}'
+                )
+                try:
+                    subprocess.run(
+                        ["gz", "service", "-s",
+                         f"/world/{gz_world}/set_pose",
+                         "--reqtype", "gz.msgs.Pose",
+                         "--reptype", "gz.msgs.Boolean",
+                         "--timeout", "200",
+                         "--req", pose_req],
+                        timeout=2, capture_output=True,
+                    )
+                except Exception:
+                    pass
+
+        wind_thread = threading.Thread(target=_wind_loop, daemon=True, name="balloon_wind")
+        wind_thread.start()
+
     # ── 7. Keep alive ──
     try:
         while True:
@@ -976,6 +1059,9 @@ def main():
     if patrol_thread:
         patrol_stop.set()
         patrol_thread.join(timeout=2)
+    if wind_thread:
+        wind_stop.set()
+        wind_thread.join(timeout=2)
 
     pm.shutdown()
     log.info("Simulation stopped")

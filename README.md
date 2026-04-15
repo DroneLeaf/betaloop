@@ -22,7 +22,7 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 
 | Argument | Purpose |
 |---|---|
-| `--world <WORLD>` | World short name: `park_chase`, `collision_test` (default: `park_chase`) |
+| `--world <WORLD>` | World short name: `park_chase`, `patrol_park`, `collision_test`, `balloon_test` (default: `park_chase`) |
 | `--physics {gazebo,simulink}` | Physics backend (default: gazebo) |
 | `--gazebo` | Show the Gazebo GUI (default: headless) |
 | `--chase-cam` | Also display the chase camera (3rd-person SDL2 window) |
@@ -44,10 +44,15 @@ organised into three groups: **simulation**, **drone**, and **world** settings.
 
 | Argument | Purpose |
 |---|---|
-| `--target-altitude <m>` | Collision-test target altitude (default: 20) |
-| `--target-distance-x <m>` | Collision-test target X distance (default: 10) |
-| `--target-distance-y <m>` | Collision-test target Y distance (default: 10) |
-| `--target-speed <rad/s>` | Park-chase orbit angular speed (default: 0.05) |
+| `--target-altitude <m>` | Target altitude in metres (default: 50 park/patrol, 10 collision/balloon) |
+| `--target-distance-x <m>` | Target X distance in metres (default: 30) |
+| `--target-distance-y <m>` | Target Y distance in metres (default: 0) |
+| `--target-speed <km/h>` | Park-chase orbit speed / patrol speed (default: 5.4 / 100) |
+| `--target-orbit-radius <m>` | Park-chase orbit radius (default: 30) |
+| `--patrol-length <m>` | Patrol-park track length (default: 2000) |
+| `--wind-intensity <m/s>` | Balloon-test wind drift intensity (default: 2.0) |
+| `--wind-randomness <σ>` | Balloon-test Ornstein-Uhlenbeck noise sigma (default: 1.0) |
+| `--hit-box-scale <factor>` | OSD hit-box scale multiplier (default: 1.0) |
 
 ### Quick start
 
@@ -57,6 +62,12 @@ python3 ~/betaflight-docker/betaloop/start.py --gazebo
 
 # Collision test (upward-facing camera)
 python3 ~/betaflight-docker/betaloop/start.py --world collision_test --cam-pitch -90 --gazebo
+
+# Patrol park
+python3 ~/betaflight-docker/betaloop/start.py --world patrol_park --gazebo
+
+# Balloon test with stochastic wind
+python3 ~/betaflight-docker/betaloop/start.py --world balloon_test --gazebo
 
 # Iris FPV
 python3 ~/betaflight-docker/betaloop/start.py --drone iris --gazebo --chase-cam
