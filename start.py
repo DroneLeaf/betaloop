@@ -105,6 +105,7 @@ WORLD_MAP = {
         "target_model": "moving_target_drone",
         "target_link":  "geranium_link",
         "target_bbox":  "0.792,1.047,0.186",
+        "orbit_drive":  True,
     },
     "patrol_park": {
         "gz_world":     "rocket_drone_patrol_park.world",
@@ -1003,6 +1004,7 @@ def main():
         sine_period_z = args.sine_period_z if args.sine_period_z is not None else 200.0
 
         PATROL_UDP_PORT = 9016  # must match ExternalPosePlugin <listen_port> in SDF
+        PATROL_RESET_PORT = 9017  # reset_world.py sends "RESET" here
 
         def _patrol_loop():
             """Drive patrol target via UDP to ExternalPosePlugin at ~60 Hz.
@@ -1012,6 +1014,7 @@ def main():
             Visual pose yaw π/2 is baked in mesh, so:
               model yaw 0 → mesh faces north (+X)
               model yaw π → mesh faces south (-X)
+            Listens on PATROL_RESET_PORT for reset signals to restart from origin.
             """
             interval = 1.0 / 60
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1024,16 +1027,35 @@ def main():
             direction = 1.0   # start moving +X (north)
             qw, qz = 1.0, 0.0  # yaw = 0 → north
 
+            # Reset listener socket (non-blocking)
+            rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            rst_sock.bind(("0.0.0.0", PATROL_RESET_PORT))
+            rst_sock.setblocking(False)
+
             # Pre-compute sine angular frequencies (2π / period)
             omega_xy = (2.0 * math.pi / sine_period_xy) if sine_period_xy > 0 else 0.0
             omega_z  = (2.0 * math.pi / sine_period_z)  if sine_period_z  > 0 else 0.0
 
-            log.info("Patrol UDP (port %d): half=%.0fm speed=%.1f m/s alt=%.0fm "
+            log.info("Patrol UDP (port %d, reset port %d): half=%.0fm speed=%.1f m/s alt=%.0fm "
                      "sine_xy(amp=%.1fm period=%.0fm) sine_z(amp=%.1fm period=%.0fm)",
-                     PATROL_UDP_PORT, half_len, speed_ms, target_z,
+                     PATROL_UDP_PORT, PATROL_RESET_PORT, half_len, speed_ms, target_z,
                      sine_amp_xy, sine_period_xy, sine_amp_z, sine_period_z)
 
             while not patrol_stop.is_set():
+                # Check for reset signal
+                try:
+                    while True:
+                        rst_sock.recv(64)
+                        # Any packet = reset
+                        x = 0.0
+                        direction = 1.0
+                        qw, qz = 1.0, 0.0
+                        t_prev = time.monotonic()
+                        log.info("Patrol thread: reset to origin")
+                except BlockingIOError:
+                    pass
+
                 t_now = time.monotonic()
                 dt = t_now - t_prev
                 t_prev = t_now
@@ -1063,9 +1085,88 @@ def main():
                 patrol_stop.wait(timeout=interval)
 
             sock.close()
+            rst_sock.close()
 
         patrol_thread = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
         patrol_thread.start()
+
+    # ── 6b2. Orbit UDP drive thread (park_chase only) ──
+    orbit_thread = None
+    orbit_stop = threading.Event()
+    if world_entry.get("orbit_drive") and world_entry.get("target_model"):
+        orbit_radius_val = world_vars["orbit_radius"]
+        orbit_omega = world_vars["orbit_speed"]  # rad/s = v_tangential / R
+        target_z = world_vars["target_z"]
+
+        ORBIT_UDP_PORT = 9016   # must match ExternalPosePlugin <listen_port> in SDF
+        ORBIT_RESET_PORT = 9017  # reset_world.py sends "RESET" here
+
+        def _orbit_loop():
+            """Drive chase target in a circular orbit via UDP to ExternalPosePlugin at ~60 Hz.
+
+            Position:  x = R*cos(theta),  y = R*sin(theta),  z = altitude
+            Yaw:       theta + pi/2  (tangent to circle, facing forward in CCW orbit)
+            Visual pose yaw pi/2 is baked in mesh, so model yaw maps directly to heading.
+            Listens on ORBIT_RESET_PORT for reset signals to restart from theta=0.
+            """
+            interval = 1.0 / 60
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            addr = ("127.0.0.1", ORBIT_UDP_PORT)
+            packer = struct.Struct("<Qd3d4d")
+            seq = 0
+            t0 = time.monotonic()
+            theta = 0.0
+            t_prev = t0
+
+            # Reset listener socket (non-blocking)
+            rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            rst_sock.bind(("0.0.0.0", ORBIT_RESET_PORT))
+            rst_sock.setblocking(False)
+
+            log.info("Orbit UDP (port %d, reset port %d): R=%.1fm omega=%.4f rad/s alt=%.0fm",
+                     ORBIT_UDP_PORT, ORBIT_RESET_PORT, orbit_radius_val, orbit_omega, target_z)
+
+            while not orbit_stop.is_set():
+                # Check for reset signal
+                try:
+                    while True:
+                        rst_sock.recv(64)
+                        theta = 0.0
+                        t_prev = time.monotonic()
+                        log.info("Orbit thread: reset to theta=0")
+                except BlockingIOError:
+                    pass
+
+                t_now = time.monotonic()
+                dt = t_now - t_prev
+                t_prev = t_now
+
+                theta += orbit_omega * dt
+
+                x = orbit_radius_val * math.cos(theta)
+                y = orbit_radius_val * math.sin(theta)
+                z = target_z
+
+                # Yaw = tangent direction: theta + pi/2 for CCW orbit
+                yaw = theta + math.pi / 2
+                qw = math.cos(yaw / 2)
+                qz = math.sin(yaw / 2)
+
+                pkt = packer.pack(seq, t_now - t0, x, y, z,
+                                  qw, 0.0, 0.0, qz)
+                try:
+                    sock.sendto(pkt, addr)
+                except OSError:
+                    pass
+                seq += 1
+                orbit_stop.wait(timeout=interval)
+
+            sock.close()
+            rst_sock.close()
+
+        orbit_thread = threading.Thread(target=_orbit_loop, daemon=True, name="orbit")
+        orbit_thread.start()
 
     # ── 6c. Balloon smooth drift thread (balloon_test only) ──
     wind_thread = None
@@ -1155,6 +1256,9 @@ def main():
     if patrol_thread:
         patrol_stop.set()
         patrol_thread.join(timeout=2)
+    if orbit_thread:
+        orbit_stop.set()
+        orbit_thread.join(timeout=2)
     if wind_thread:
         wind_stop.set()
         wind_thread.join(timeout=2)
