@@ -31,6 +31,7 @@ import math
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import random
@@ -125,8 +126,6 @@ WORLD_MAP = {
         "gz_world":     "rocket_drone_balloon_test.world",
         "sim_world":    "rocket_drone_balloon_test_vis.sdf",
         "gz_name":      "balloon_test",
-        "target_model": "balloon_target",
-        "target_bbox":  "0.5,0.5,0.5",
         "balloon_wind": True,
     },
 }
@@ -706,6 +705,30 @@ def parse_args():
         help="Patrol-park total patrol distance in metres (default: 2000)",
     )
     wld.add_argument(
+        "--sine-amplitude-xy",
+        type=float,
+        default=None,
+        help="Patrol lateral sine amplitude in metres (default: 0 = straight line)",
+    )
+    wld.add_argument(
+        "--sine-period-xy",
+        type=float,
+        default=None,
+        help="Patrol lateral sine peak-to-peak distance in metres (default: 200)",
+    )
+    wld.add_argument(
+        "--sine-amplitude-z",
+        type=float,
+        default=None,
+        help="Patrol vertical sine amplitude in metres (default: 0 = flat)",
+    )
+    wld.add_argument(
+        "--sine-period-z",
+        type=float,
+        default=None,
+        help="Patrol vertical sine peak-to-peak distance in metres (default: 200)",
+    )
+    wld.add_argument(
         "--hit-box-scale",
         type=float,
         default=None,
@@ -715,13 +738,19 @@ def parse_args():
         "--wind-intensity",
         type=float,
         default=None,
-        help="Balloon wind mean drift speed m/s (default: 2.0)",
+        help="Balloon horizontal drift radius in metres (default: 2.0)",
     )
     wld.add_argument(
         "--wind-randomness",
         type=float,
         default=None,
-        help="Balloon wind stochastic noise sigma m (default: 1.0)",
+        help="Balloon vertical bob amplitude in metres (default: 1.0)",
+    )
+    wld.add_argument(
+        "--drift-speed",
+        type=float,
+        default=None,
+        help="Balloon drift speed multiplier (default: 1.0)",
     )
 
     return parser.parse_args()
@@ -958,7 +987,7 @@ def main():
         width, height, bridge_proc, chase_bridge_proc,
     )
 
-    # ── 6b. Patrol reversal thread (patrol_park only) ──
+    # ── 6b. Patrol UDP drive thread (patrol_park only) ──
     patrol_thread = None
     patrol_stop = threading.Event()
     patrol_joint = world_entry.get("patrol_joint")
@@ -966,76 +995,143 @@ def main():
         patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
         speed_kmh_p = args.target_speed if args.target_speed is not None else 100.0
         speed_ms = speed_kmh_p / 3.6
-        half_traverse = (patrol_length / 2.0) / speed_ms  # seconds per half-leg
-        target_model = world_entry["target_model"]
-        vel_topic = f"/model/{target_model}/joint/{patrol_joint}/cmd_vel"
+        half_len = patrol_length / 2.0
+        target_z = world_vars["target_z"]
+        sine_amp_xy = args.sine_amplitude_xy if args.sine_amplitude_xy is not None else 0.0
+        sine_period_xy = args.sine_period_xy if args.sine_period_xy is not None else 200.0
+        sine_amp_z = args.sine_amplitude_z if args.sine_amplitude_z is not None else 0.0
+        sine_period_z = args.sine_period_z if args.sine_period_z is not None else 200.0
+
+        PATROL_UDP_PORT = 9016  # must match ExternalPosePlugin <listen_port> in SDF
 
         def _patrol_loop():
-            direction = 1.0  # start moving in +X
-            log.info("Patrol reversal: topic=%s half=%.1fs speed=%.1f m/s",
-                     vel_topic, half_traverse, speed_ms)
-            while not patrol_stop.wait(timeout=half_traverse):
-                direction *= -1.0
-                vel = direction * speed_ms
+            """Drive patrol target via UDP to ExternalPosePlugin at ~60 Hz.
+
+            Triangle-wave along X with optional sine weave in Y and Z.
+            Yaw snaps π on direction change.
+            Visual pose yaw π/2 is baked in mesh, so:
+              model yaw 0 → mesh faces north (+X)
+              model yaw π → mesh faces south (-X)
+            """
+            interval = 1.0 / 60
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            addr = ("127.0.0.1", PATROL_UDP_PORT)
+            packer = struct.Struct("<Qd3d4d")
+            seq = 0
+            t0 = time.monotonic()
+            t_prev = t0
+            x = 0.0
+            direction = 1.0   # start moving +X (north)
+            qw, qz = 1.0, 0.0  # yaw = 0 → north
+
+            # Pre-compute sine angular frequencies (2π / period)
+            omega_xy = (2.0 * math.pi / sine_period_xy) if sine_period_xy > 0 else 0.0
+            omega_z  = (2.0 * math.pi / sine_period_z)  if sine_period_z  > 0 else 0.0
+
+            log.info("Patrol UDP (port %d): half=%.0fm speed=%.1f m/s alt=%.0fm "
+                     "sine_xy(amp=%.1fm period=%.0fm) sine_z(amp=%.1fm period=%.0fm)",
+                     PATROL_UDP_PORT, half_len, speed_ms, target_z,
+                     sine_amp_xy, sine_period_xy, sine_amp_z, sine_period_z)
+
+            while not patrol_stop.is_set():
+                t_now = time.monotonic()
+                dt = t_now - t_prev
+                t_prev = t_now
+
+                x += direction * speed_ms * dt
+                if x >= half_len:
+                    x = half_len
+                    direction = -1.0
+                    qw, qz = 0.0, 1.0   # yaw = π → south
+                elif x <= -half_len:
+                    x = -half_len
+                    direction = 1.0
+                    qw, qz = 1.0, 0.0   # yaw = 0 → north
+
+                # Lateral sine weave (Y axis, perpendicular to patrol line)
+                y_offset = sine_amp_xy * math.sin(omega_xy * x) if sine_amp_xy else 0.0
+                # Vertical sine bob (Z axis)
+                z_offset = sine_amp_z * math.sin(omega_z * x) if sine_amp_z else 0.0
+
+                pkt = packer.pack(seq, t_now - t0, x, y_offset, target_z + z_offset,
+                                  qw, 0.0, 0.0, qz)
                 try:
-                    subprocess.run(
-                        ["gz", "topic", "-t", vel_topic,
-                         "-m", "gz.msgs.Double", "-p", f"data: {vel}",
-                         "-n", "1"],
-                        timeout=5, capture_output=True,
-                    )
-                    log.info("Patrol reversal → %.1f m/s", vel)
-                except Exception as e:
-                    log.warning("Patrol reversal failed: %s", e)
+                    sock.sendto(pkt, addr)
+                except OSError:
+                    pass
+                seq += 1
+                patrol_stop.wait(timeout=interval)
+
+            sock.close()
 
         patrol_thread = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
         patrol_thread.start()
 
-    # ── 6c. Balloon stochastic wind thread (balloon_test only) ──
+    # ── 6c. Balloon smooth drift thread (balloon_test only) ──
     wind_thread = None
     wind_stop = threading.Event()
     if world_entry.get("balloon_wind"):
         wind_intensity = args.wind_intensity if args.wind_intensity is not None else 2.0
         wind_sigma = args.wind_randomness if args.wind_randomness is not None else 1.0
-        gz_world = world_entry["gz_name"]
+        drift_speed = args.drift_speed if args.drift_speed is not None else 20.0
         target_model = world_entry["target_model"]
         mean_x, mean_y, mean_z = world_vars["target_x"], world_vars["target_y"], world_vars["target_z"]
 
+        BALLOON_UDP_PORT = 9014  # must match ExternalPosePlugin <listen_port> in SDF
+
         def _wind_loop():
-            """Ornstein-Uhlenbeck stochastic wind on balloon position."""
-            dt = 0.1  # 10 Hz update
-            theta = 0.5  # mean-reversion rate
-            # Initialise at mean position
-            bx, by, bz = mean_x, mean_y, mean_z
-            # Random wind drift direction (slowly rotating)
-            wind_angle = random.uniform(0, 2 * math.pi)
-            log.info("Balloon wind: intensity=%.1f m/s sigma=%.1f m model=%s",
-                     wind_intensity, wind_sigma, target_model)
-            while not wind_stop.wait(timeout=dt):
-                # Ornstein-Uhlenbeck: dx = -theta*(x-mean)*dt + sigma*sqrt(dt)*dW + drift*dt
-                noise_scale = wind_sigma * math.sqrt(dt)
-                bx += -theta * (bx - mean_x) * dt + noise_scale * random.gauss(0, 1) + wind_intensity * math.cos(wind_angle) * dt
-                by += -theta * (by - mean_y) * dt + noise_scale * random.gauss(0, 1) + wind_intensity * math.sin(wind_angle) * dt
-                bz += -theta * (bz - mean_z) * dt + noise_scale * 0.3 * random.gauss(0, 1)  # less vertical drift
-                # Slowly rotate wind direction
-                wind_angle += 0.05 * dt * random.gauss(0, 1)
-                pose_req = (
-                    f'name: "{target_model}", '
-                    f'position: {{x: {bx:.4f}, y: {by:.4f}, z: {bz:.4f}}}, '
-                    f'orientation: {{x: 0, y: 0, z: 0, w: 1}}'
-                )
+            """Smooth Lissajous balloon motion via direct UDP to ExternalPosePlugin.
+
+            Sends a 72-byte VisualPosePacket at ~60 Hz using wall-clock time.
+            No subprocess overhead — position is never stale.
+            """
+            interval = 1.0 / 60  # 60 Hz
+            amp = wind_intensity
+            amp_z = wind_sigma
+            spd = drift_speed
+
+            px = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+            py = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+            pz = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+
+            fx = [0.13 * spd, 0.31 * spd, 0.53 * spd]
+            fy = [0.17 * spd, 0.41 * spd, 0.67 * spd]
+            fz = [0.11 * spd, 0.29 * spd, 0.47 * spd]
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            addr = ("127.0.0.1", BALLOON_UDP_PORT)
+            # VisualPosePacket: uint64 seq, double t, double pos[3], double quat[4]
+            packer = struct.Struct("<Qd3d4d")
+            seq = 0
+            t0 = time.monotonic()
+
+            log.info("Balloon drift (UDP:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
+                     BALLOON_UDP_PORT, amp, amp_z, spd)
+
+            while not wind_stop.is_set():
+                t = time.monotonic() - t0
+
+                bx = mean_x + amp * (0.5 * math.sin(fx[0] * t + px[0])
+                                   + 0.3 * math.sin(fx[1] * t + px[1])
+                                   + 0.2 * math.sin(fx[2] * t + px[2]))
+                by = mean_y + amp * (0.5 * math.sin(fy[0] * t + py[0])
+                                   + 0.3 * math.sin(fy[1] * t + py[1])
+                                   + 0.2 * math.sin(fy[2] * t + py[2]))
+                bz = mean_z + amp_z * (0.4 * math.sin(fz[0] * t + pz[0])
+                                     + 0.35 * math.sin(fz[1] * t + pz[1])
+                                     + 0.25 * math.sin(fz[2] * t + pz[2]))
+
+                # identity quaternion (w=1, x=0, y=0, z=0)
+                pkt = packer.pack(seq, t, bx, by, bz, 1.0, 0.0, 0.0, 0.0)
                 try:
-                    subprocess.run(
-                        ["gz", "service", "-s",
-                         f"/world/{gz_world}/set_pose",
-                         "--reqtype", "gz.msgs.Pose",
-                         "--reptype", "gz.msgs.Boolean",
-                         "--timeout", "200",
-                         "--req", pose_req],
-                        timeout=2, capture_output=True,
-                    )
-                except Exception:
+                    sock.sendto(pkt, addr)
+                except OSError:
                     pass
+                seq += 1
+
+                wind_stop.wait(timeout=interval)
+
+            sock.close()
 
         wind_thread = threading.Thread(target=_wind_loop, daemon=True, name="balloon_wind")
         wind_thread.start()
