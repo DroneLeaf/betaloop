@@ -338,16 +338,18 @@ def _render_all_templates(drone, world_name, args):
     orbit_speed = (speed_kmh / 3.6) / orbit_radius
 
     # Patrol-park: straight-line back-and-forth patrol
-    patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
-    patrol_speed_kmh = args.target_speed if args.target_speed is not None else 100.0
+    patrol_length = args.patrol_length if args.patrol_length is not None else 500.0
+    patrol_speed_kmh = args.target_speed if args.target_speed is not None else 20.0
     patrol_speed_ms = patrol_speed_kmh / 3.6
 
     target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
     target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
-    # target_z: collision_test default 10, park_chase/patrol_park default 50
+    # target_z: collision_test default 10, park_chase default 50, patrol_park default 100
     if args.target_altitude is not None:
         target_z = args.target_altitude
-    elif world_name in ("park_chase", "patrol_park"):
+    elif world_name == "patrol_park":
+        target_z = 100.0
+    elif world_name == "park_chase":
         target_z = 50.0
     else:
         target_z = 10.0
@@ -666,6 +668,12 @@ def parse_args():
         default=None,
         help="Path to a key=value .params file for bf_sim_bridge model parameters",
     )
+    slk.add_argument(
+        "--telem-port",
+        type=int,
+        default=0,
+        help="UDP port for bf_sim_bridge to send raw Simulink state to sitl_redis_bridge (0=off)",
+    )
 
     # ── World Settings ───────────────────────────────────────────────────
     wld = parser.add_argument_group("World settings (collision_test / park_chase / patrol_park)")
@@ -673,7 +681,7 @@ def parse_args():
         "--target-altitude",
         type=float,
         default=None,
-        help="Target altitude in metres (collision_test default: 20, park_chase/patrol_park default: 50)",
+        help="Target altitude in metres (collision_test default: 20, park_chase default: 50, patrol_park default: 100)",
     )
     wld.add_argument(
         "--target-distance-x",
@@ -691,7 +699,7 @@ def parse_args():
         "--target-speed",
         type=float,
         default=None,
-        help="Target speed in km/h (park_chase orbit default: 5.4, patrol_park default: 100)",
+        help="Target speed in km/h (park_chase orbit default: 5.4, patrol_park default: 20)",
     )
     wld.add_argument(
         "--target-orbit-radius",
@@ -826,6 +834,8 @@ def main():
         bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
         if args.params:
             bridge_args += ["--params", os.path.abspath(args.params)]
+        if args.telem_port:
+            bridge_args += ["--telem-port", str(args.telem_port)]
         log.info("Starting bf_sim_bridge (Simulink dynamics)")
         bf_bridge_proc = pm.spawn(bridge_args)
         time.sleep(2)
