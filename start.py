@@ -29,16 +29,37 @@ import fcntl
 import logging
 import math
 import os
+import random
 import signal
 import socket
 import struct
 import subprocess
 import sys
-import random
 import threading
 import time
 
-from jinja2 import Environment, FileSystemLoader
+from common import (
+    AEROLOOP_HOME,
+    DRONE_REFS,
+    IMAGE_BRIDGE,
+    SIMULINK_LIB,
+    TOPIC_MODEL_HINT_DEFAULT,
+    ProcessManager,
+    cleanup_before_start,
+    compute_model_vars,
+    compute_world_vars,
+    configure_display,
+    default_path,
+    discover_camera_topic,
+    list_camera_topics,
+    read_image_meta,
+    render_template,
+    render_vis_templates,
+    setup_gazebo_env,
+    start_orbit_thread,
+    start_patrol_thread,
+    wait_for_port,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,44 +71,21 @@ log = logging.getLogger("betaloop")
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-
-
-def _default_path(env_var, repo_relative):
-    """Return env override, or repo-relative path."""
-    if os.environ.get(env_var):
-        return os.environ[env_var]
-    return os.path.join(_REPO_ROOT, repo_relative)
-
-
-AEROLOOP_HOME = _default_path("AEROLOOP_HOME", "aeroloop_gazebo")
-BF_ELF = _default_path(
+BF_ELF = default_path(
     "BF_ELF",
     os.path.join("betaflight", "obj", "main", "betaflight_SITL.elf"),
 )
-MSP_RADIO_HOME = _default_path(
+MSP_RADIO_HOME = default_path(
     "MSP_RADIO_HOME",
     os.path.join("..", "msp_virtualradio"),
 )
-BF_SIM_BRIDGE = _default_path(
+BF_SIM_BRIDGE = default_path(
     "BF_SIM_BRIDGE",
     os.path.join("bf_sim_bridge", "build", "bf_sim_bridge"),
-)
-SIMULINK_LIB = _default_path(
-    "SIMULINK_LIB",
-    os.path.join(
-        "HEAR_Simulations",
-        "Compiled_models",
-        "rocket_drone_quad_SITL",
-        "libinterface_simulink.so",
-    ),
 )
 
 DEFAULT_WORLD = "park_chase"
 DEFAULT_DRONE = "rocket_drone"
-TOPIC_MODEL_HINT_DEFAULT = "rocket_drone"
-IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 
 # Short world name → dict of world attributes.
 #   gz_world     — Gazebo physics world file
@@ -131,154 +129,7 @@ WORLD_MAP = {
     },
 }
 
-# Per-drone reference calibration.  max_thrust is the total static thrust from
-# all 4 rotors at vel_cmd_max.  *_per_kg are the moment-of-inertia values
-# normalised to 1 kg so we can scale linearly with mass.
-DRONE_REFS = {
-    "rocket_drone": {
-        "model_sdf": "rocket_drone/rocket_drone.sdf",
-        "model_vis_sdf": "rocket_drone_vis/model.sdf",
-        "model_uri": "model://rocket_drone",
-        "model_vis_uri": "model://rocket_drone_vis",
-        "max_thrust": 22.0,       # N — calibrated: 0.5 kg → CTW ≈ 4.5
-        "ixx_per_kg": 0.019417,   # 0.029125 / 1.5
-        "iyy_per_kg": 0.019417,
-        "izz_per_kg": 0.036817,   # 0.055225 / 1.5
-        "default_ctw": 4.5,
-        "default_standoff": 0.20,
-        "leg_attach_offset": 0.025,
-        "default_damping": {
-            "linear_x": 0.1, "linear_y": 0.4, "linear_z": 0.03,
-            "quadratic_x": 0.001, "quadratic_y": 0.03, "quadratic_z": 0.001,
-            "angular": 0.03,
-        },
-    },
-    "thaqib_1_prototype": {
-        "model_sdf": "thaqib_1_prototype/thaqib_1_prototype.sdf",
-        "model_vis_sdf": "thaqib_1_prototype_vis/model.sdf",
-        "model_uri": "model://thaqib_1_prototype",
-        "model_vis_uri": "model://thaqib_1_prototype_vis",
-        "max_thrust": 22.0,
-        "ixx_per_kg": 0.019417,
-        "iyy_per_kg": 0.019417,
-        "izz_per_kg": 0.036817,
-        "default_ctw": 4.5,
-        "default_standoff": 0.20,
-        "leg_attach_offset": 0.025,
-        "default_damping": {
-            "linear_x": 0.1, "linear_y": 0.4, "linear_z": 0.03,
-            "quadratic_x": 0.001, "quadratic_y": 0.03, "quadratic_z": 0.001,
-            "angular": 0.03,
-        },
-    },
-    "iris": {
-        "model_sdf": "betaloop_iris_with_standoffs/model.sdf",
-        "model_vis_sdf": "iris_vis/model.sdf",
-        "model_uri": "model://betaloop_iris_with_standoffs",
-        "model_vis_uri": "model://iris_vis",
-        "max_thrust": 8.0,        # N — estimated: 0.4 kg → CTW ≈ 2
-        "ixx_per_kg": 0.005,      # 0.002 / 0.4
-        "iyy_per_kg": 0.010,      # 0.004 / 0.4
-        "izz_per_kg": 0.01125,    # 0.0045 / 0.4
-        "default_ctw": 2.0,
-        "default_standoff": 0.17,
-        "leg_attach_offset": 0.025,
-        "default_damping": {
-            "linear_x": 0.3, "linear_y": 0.3, "linear_z": 0.3,
-            "quadratic_x": 0, "quadratic_y": 0, "quadratic_z": 0,
-            "angular": 0.005,
-        },
-    },
-}
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-class ProcessManager:
-    """Track child processes for clean shutdown."""
-
-    def __init__(self):
-        self.procs: list[subprocess.Popen] = []
-
-    def spawn(self, args, **kwargs):
-        log.info("Starting: %s", " ".join(str(a) for a in args[:5]))
-        p = subprocess.Popen(args, **kwargs)
-        self.procs.append(p)
-        return p
-
-    def shutdown(self):
-        log.info("Shutting down %d processes …", len(self.procs))
-        for p in reversed(self.procs):
-            if p.poll() is None:
-                p.terminate()
-        for p in reversed(self.procs):
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                try:
-                    p.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
-        # Safety net: kill orphaned simulation processes
-        for pattern in ["gz sim", "ruby.*gz", "gz_image_bridge", "betaflight_SITL.elf"]:
-            try:
-                subprocess.run(
-                    ["pkill", "-9", "-f", pattern],
-                    capture_output=True,
-                    timeout=3,
-                )
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-
-
-def wait_for_port(host, port, timeout=30):
-    """Block until a TCP port is accepting connections."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            s = socket.create_connection((host, port), timeout=1)
-            s.close()
-            return True
-        except OSError:
-            time.sleep(0.5)
-    return False
-
-
-def setup_gazebo_env():
-    """Set Gazebo Harmonic environment variables."""
-
-    def _prepend(var, *paths):
-        existing = os.environ.get(var, "")
-        os.environ[var] = os.pathsep.join(list(paths) + [existing])
-
-    models = os.path.join(AEROLOOP_HOME, "models")
-    plugins = os.path.join(AEROLOOP_HOME, "plugins", "build")
-    worlds = os.path.join(AEROLOOP_HOME, "worlds")
-
-    _prepend("SDF_PATH", models, "/usr/share/gz/gz-sim8/models")
-    _prepend("GZ_SIM_RESOURCE_PATH", worlds, "/usr/share/gz/gz-sim8")
-    _prepend(
-        "GZ_SIM_SYSTEM_PLUGIN_PATH",
-        plugins,
-        "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins",
-    )
-    _prepend("LD_LIBRARY_PATH", "/usr/lib/x86_64-linux-gnu/gz-sim-8/plugins")
-
-    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-
-
-def _render_template(j2_path, variables):
-    """Render a Jinja2 template (.j2) to the corresponding output file."""
-    template_dir = os.path.dirname(j2_path)
-    template_name = os.path.basename(j2_path)
-    output_path = j2_path[:-3]  # strip ".j2"
-    env = Environment(loader=FileSystemLoader(template_dir), keep_trailing_newline=True)
-    template = env.get_template(template_name)
-    rendered = template.render(**variables)
-    with open(output_path, "w") as f:
-        f.write(rendered)
-    log.info("Rendered %s", os.path.relpath(output_path, AEROLOOP_HOME))
+# ── BF-specific Helpers ───────────────────────────────────────────────────────
 
 
 def _render_all_templates(drone, world_name, args):
@@ -287,253 +138,57 @@ def _render_all_templates(drone, world_name, args):
     models_dir = os.path.join(AEROLOOP_HOME, "models")
     worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
 
-    # ── Compute model variables ──
-    ctw = args.ctw if args.ctw is not None else ref["default_ctw"]
-    mass = ref["max_thrust"] / (ctw * 9.81)
-    ixx = ref["ixx_per_kg"] * mass
-    iyy = ref["iyy_per_kg"] * mass
-    izz = ref["izz_per_kg"] * mass
+    # ── Damping overrides (BF-only CLI args) ──
+    damping_overrides = {}
+    for key, attr in [
+        ("linear_x", "linear_damping_x"), ("linear_y", "linear_damping_y"),
+        ("linear_z", "linear_damping_z"), ("quadratic_x", "quadratic_damping_x"),
+        ("quadratic_y", "quadratic_damping_y"), ("quadratic_z", "quadratic_damping_z"),
+        ("angular", "angular_damping"),
+    ]:
+        val = getattr(args, attr, None)
+        if val is not None:
+            damping_overrides[key] = val
 
-    standoff = args.standoff_height if args.standoff_height is not None else ref["default_standoff"]
-    leg_z = -(standoff / 2 + ref["leg_attach_offset"])
-
-    fpv_cam_pitch_rad = math.radians(args.cam_pitch)
-
-    dd = ref["default_damping"]
-    lin_x = args.linear_damping_x if args.linear_damping_x is not None else dd["linear_x"]
-    lin_y = args.linear_damping_y if args.linear_damping_y is not None else dd["linear_y"]
-    lin_z = args.linear_damping_z if args.linear_damping_z is not None else dd["linear_z"]
-    quad_x = args.quadratic_damping_x if args.quadratic_damping_x is not None else dd["quadratic_x"]
-    quad_y = args.quadratic_damping_y if args.quadratic_damping_y is not None else dd["quadratic_y"]
-    quad_z = args.quadratic_damping_z if args.quadratic_damping_z is not None else dd["quadratic_z"]
-    ang = args.angular_damping if args.angular_damping is not None else dd["angular"]
-
-    model_vars = {
-        "mass": mass, "ixx": ixx, "iyy": iyy, "izz": izz,
-        "fpv_cam_pitch_rad": fpv_cam_pitch_rad,
-        "standoff_height": standoff, "leg_z": leg_z,
-        "linear_damping_x": lin_x, "linear_damping_y": lin_y, "linear_damping_z": lin_z,
-        "quadratic_damping_x": quad_x, "quadratic_damping_y": quad_y, "quadratic_damping_z": quad_z,
-        "angular_damping": ang,
-    }
+    # ── Model variables (shared helper) ──
+    ctw = args.ctw if args.ctw is not None else None
+    standoff = args.standoff_height if args.standoff_height is not None else None
+    model_vars = compute_model_vars(
+        drone, ctw=ctw, cam_pitch=args.cam_pitch,
+        standoff=standoff, damping_overrides=damping_overrides,
+    )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
-             ctw, mass, ixx, iyy, izz, standoff, args.cam_pitch)
+             ctw or ref["default_ctw"],
+             model_vars["mass"], model_vars["ixx"], model_vars["iyy"], model_vars["izz"],
+             model_vars["standoff_height"], args.cam_pitch)
 
-    # ── Render physics model SDF ──
+    # ── Render physics model SDF (BF only — PX4 doesn't use it) ──
     phys_j2 = os.path.join(models_dir, ref["model_sdf"] + ".j2")
     if os.path.isfile(phys_j2):
-        _render_template(phys_j2, model_vars)
+        render_template(phys_j2, model_vars)
 
-    # ── Render vis model SDF ──
-    vis_j2 = os.path.join(models_dir, ref["model_vis_sdf"] + ".j2")
-    if os.path.isfile(vis_j2):
-        _render_template(vis_j2, model_vars)
+    # ── World variables (shared helper) ──
+    world_vars = compute_world_vars(
+        drone, world_name,
+        target_altitude=args.target_altitude,
+        target_speed=args.target_speed,
+        orbit_radius=args.target_orbit_radius,
+        patrol_length=args.patrol_length,
+        target_x=getattr(args, "target_distance_x", None),
+        target_y=getattr(args, "target_distance_y", None),
+    )
 
-    # ── Compute world variables ──
-    # Park-chase orbit: user specifies tangential speed in km/h and radius.
-    # omega (rad/s) = v_tangential / radius,  v_tangential = speed_kmh / 3.6
-    orbit_radius = args.target_orbit_radius if args.target_orbit_radius is not None else 30.0
-    speed_kmh = args.target_speed if args.target_speed is not None else 5.4  # ~1.5 m/s ≈ 0.05 rad/s @ 30 m
-    orbit_speed = (speed_kmh / 3.6) / orbit_radius
+    # ── Render vis model + vis world (shared helper) ──
+    render_vis_templates(drone, world_name, WORLD_MAP, model_vars, world_vars)
 
-    # Patrol-park: straight-line back-and-forth patrol
-    patrol_length = args.patrol_length if args.patrol_length is not None else 500.0
-    patrol_speed_kmh = args.target_speed if args.target_speed is not None else 20.0
-    patrol_speed_ms = patrol_speed_kmh / 3.6
-
-    target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
-    target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
-    # target_z: collision_test default 10, park_chase default 50, patrol_park default 100
-    if args.target_altitude is not None:
-        target_z = args.target_altitude
-    elif world_name == "patrol_park":
-        target_z = 100.0
-    elif world_name == "park_chase":
-        target_z = 50.0
-    else:
-        target_z = 10.0
-
-    world_vars = {
-        "drone_uri": ref["model_uri"],
-        "drone_vis_uri": ref["model_vis_uri"],
-        "drone_name": drone,
-        "orbit_speed": orbit_speed,
-        "orbit_radius": orbit_radius,
-        "target_altitude": target_z,
-        "target_x": target_x, "target_y": target_y, "target_z": target_z,
-        "patrol_length": patrol_length,
-        "patrol_speed_ms": patrol_speed_ms,
-    }
-
-    # ── Render world files ──
+    # ── Render physics world (BF only) ──
     wm = WORLD_MAP[world_name]
-    for wf in [wm["gz_world"], wm["sim_world"]]:
-        wj2 = os.path.join(worlds_dir, wf + ".j2")
-        if os.path.isfile(wj2):
-            _render_template(wj2, world_vars)
+    gz_j2 = os.path.join(worlds_dir, wm["gz_world"] + ".j2")
+    if os.path.isfile(gz_j2):
+        render_template(gz_j2, world_vars)
 
     return world_vars
-
-
-def cleanup_before_start():
-    """Kill stale processes from previous runs and remove orphaned resources."""
-    log.info("Cleaning up from previous runs...")
-    cleanup_cmds = [
-        ("existing Gazebo processes", "pkill -9 -f 'gz sim' 2>/dev/null || true"),
-        ("existing image bridge processes", "pkill -9 -f 'gz_image_bridge' 2>/dev/null || true"),
-        ("existing Betaflight SITL processes", "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true"),
-        ("existing MSP Virtual Radio processes", "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true"),
-        ("existing bf_sim_bridge processes", "pkill -9 -x bf_sim_bridge 2>/dev/null || true"),
-        ("existing Xvfb processes", "pkill -9 Xvfb 2>/dev/null || true"),
-    ]
-    for label, cmd in cleanup_cmds:
-        try:
-            subprocess.run(["bash", "-c", cmd], capture_output=True, timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        time.sleep(0.2)
-
-    # Remove stale POSIX shared memory segments left by killed gz_image_bridge
-    # processes (SIGKILL skips the C++ cleanup handler).  Readers that still
-    # hold an old fd will see a different inode after the bridge recreates the
-    # segment and must reopen — clearing them here ensures no stale data.
-    import glob
-    stale_shm = glob.glob("/dev/shm/gz_cam_*")
-    if stale_shm:
-        for path in stale_shm:
-            try:
-                os.remove(path)
-                log.info("Removed stale SHM: %s", path)
-            except OSError:
-                pass
-
-    log.info("Cleanup complete")
-
-
-def has_nvidia_gpu():
-    """Check if an NVIDIA GPU is accessible."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0 and result.stdout.strip() != ""
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def list_camera_topics(name_hint=None):
-    """Return sorted camera image topics, optionally filtered by substring."""
-    try:
-        result = subprocess.run(
-            ["gz", "topic", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
-    topics = []
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if not line.endswith("/image"):
-            continue
-        if name_hint and name_hint not in line:
-            continue
-        topics.append(line)
-    return sorted(set(topics))
-
-
-def discover_camera_topic(name_hint="fpv_cam", timeout=30, model_hint=None):
-    """Find a camera image topic matching *name_hint*."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        topics = list_camera_topics(name_hint=name_hint)
-        if topics:
-            if model_hint:
-                preferred = [t for t in topics if model_hint in t]
-                if preferred:
-                    return preferred[0]
-            return topics[0]
-        time.sleep(2)
-    return None
-
-
-def read_image_meta(proc, timeout=30):
-    """Read IMGMETA line from the bridge's stderr (width, height, pix_fmt)."""
-    import select
-
-    deadline = time.time() + timeout
-    buf = b""
-    while time.time() < deadline:
-        ready, _, _ = select.select([proc.stderr], [], [], 1.0)
-        if ready:
-            try:
-                chunk = proc.stderr.read(4096)
-            except BlockingIOError:
-                chunk = None
-            if chunk is None or len(chunk) == 0:
-                if proc.poll() is not None:
-                    break
-                continue
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.decode("utf-8", errors="replace").strip()
-                if line.startswith("IMGMETA "):
-                    parts = line.split()
-                    return int(parts[1]), int(parts[2]), parts[3]
-        if proc.poll() is not None:
-            break
-    return None, None, None
-
-
-def configure_display(args, pm):
-    """Set up GPU detection, rendering, and display (Xvfb if needed)."""
-    gpu_available = has_nvidia_gpu()
-
-    if gpu_available:
-        log.info("NVIDIA GPU detected — GPU-accelerated rendering")
-        os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
-        nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
-        if os.path.isfile(nvidia_icd):
-            os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
-            log.info("Forcing NVIDIA EGL vendor ICD")
-    else:
-        log.info("No GPU detected — software rendering (llvmpipe)")
-        os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-
-    if args.gazebo:
-        if not os.environ.get("DISPLAY"):
-            log.error("No DISPLAY set — the Gazebo GUI needs a display.")
-            sys.exit(1)
-        os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
-        log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
-    elif os.environ.get("DISPLAY"):
-        log.info("Using native display %s (low-latency host mode)", os.environ["DISPLAY"])
-    else:
-        for lockfile in ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]:
-            try:
-                os.remove(lockfile)
-            except OSError:
-                pass
-        subprocess.run(["pkill", "-9", "Xvfb"], capture_output=True)
-        time.sleep(0.3)
-
-        log.info("Starting Xvfb virtual display :99")
-        xvfb = pm.spawn(
-            ["Xvfb", ":99", "-screen", "0", "1280x720x24", "-ac"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)
-        if xvfb.poll() is not None:
-            log.error("Xvfb failed to start — camera rendering requires a display")
-            sys.exit(1)
-        os.environ["DISPLAY"] = ":99"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -768,12 +423,17 @@ def parse_args():
 def main():
     args = parse_args()
 
-    cleanup_before_start()
+    _bf_kill = [
+        "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true",
+        "pkill -9 -f 'msp_virtualradio/index.js' 2>/dev/null || true",
+        "pkill -9 -x bf_sim_bridge 2>/dev/null || true",
+    ]
+    cleanup_before_start(extra_pkill_cmds=_bf_kill)
 
     pm = ProcessManager()
 
     def on_signal(sig, frame):
-        pm.shutdown()
+        pm.shutdown(extra_pkill_patterns=["betaflight_SITL.elf"])
         sys.exit(0)
 
     signal.signal(signal.SIGINT, on_signal)
@@ -1008,97 +668,16 @@ def main():
         speed_ms = speed_kmh_p / 3.6
         half_len = patrol_length / 2.0
         target_z = world_vars["target_z"]
-        sine_amp_xy = args.sine_amplitude_xy if args.sine_amplitude_xy is not None else 0.0
-        sine_period_xy = args.sine_period_xy if args.sine_period_xy is not None else 200.0
-        sine_amp_z = args.sine_amplitude_z if args.sine_amplitude_z is not None else 0.0
-        sine_period_z = args.sine_period_z if args.sine_period_z is not None else 200.0
-
-        PATROL_UDP_PORT = 9016  # must match ExternalPosePlugin <listen_port> in SDF
-        PATROL_RESET_PORT = 9017  # reset_world.py sends "RESET" here
-
-        def _patrol_loop():
-            """Drive patrol target via UDP to ExternalPosePlugin at ~60 Hz.
-
-            Triangle-wave along X with optional sine weave in Y and Z.
-            Yaw snaps π on direction change.
-            Visual pose yaw π/2 is baked in mesh, so:
-              model yaw 0 → mesh faces north (+X)
-              model yaw π → mesh faces south (-X)
-            Listens on PATROL_RESET_PORT for reset signals to restart from origin.
-            """
-            interval = 1.0 / 60
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            addr = ("127.0.0.1", PATROL_UDP_PORT)
-            packer = struct.Struct("<Qd3d4d")
-            seq = 0
-            t0 = time.monotonic()
-            t_prev = t0
-            x = 0.0
-            direction = 1.0   # start moving +X (north)
-            qw, qz = 1.0, 0.0  # yaw = 0 → north
-
-            # Reset listener socket (non-blocking)
-            rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            rst_sock.bind(("0.0.0.0", PATROL_RESET_PORT))
-            rst_sock.setblocking(False)
-
-            # Pre-compute sine angular frequencies (2π / period)
-            omega_xy = (2.0 * math.pi / sine_period_xy) if sine_period_xy > 0 else 0.0
-            omega_z  = (2.0 * math.pi / sine_period_z)  if sine_period_z  > 0 else 0.0
-
-            log.info("Patrol UDP (port %d, reset port %d): half=%.0fm speed=%.1f m/s alt=%.0fm "
-                     "sine_xy(amp=%.1fm period=%.0fm) sine_z(amp=%.1fm period=%.0fm)",
-                     PATROL_UDP_PORT, PATROL_RESET_PORT, half_len, speed_ms, target_z,
-                     sine_amp_xy, sine_period_xy, sine_amp_z, sine_period_z)
-
-            while not patrol_stop.is_set():
-                # Check for reset signal
-                try:
-                    while True:
-                        rst_sock.recv(64)
-                        # Any packet = reset
-                        x = 0.0
-                        direction = 1.0
-                        qw, qz = 1.0, 0.0
-                        t_prev = time.monotonic()
-                        log.info("Patrol thread: reset to origin")
-                except BlockingIOError:
-                    pass
-
-                t_now = time.monotonic()
-                dt = t_now - t_prev
-                t_prev = t_now
-
-                x += direction * speed_ms * dt
-                if x >= half_len:
-                    x = half_len
-                    direction = -1.0
-                    qw, qz = 0.0, 1.0   # yaw = π → south
-                elif x <= -half_len:
-                    x = -half_len
-                    direction = 1.0
-                    qw, qz = 1.0, 0.0   # yaw = 0 → north
-
-                # Lateral sine weave (Y axis, perpendicular to patrol line)
-                y_offset = sine_amp_xy * math.sin(omega_xy * x) if sine_amp_xy else 0.0
-                # Vertical sine bob (Z axis)
-                z_offset = sine_amp_z * math.sin(omega_z * x) if sine_amp_z else 0.0
-
-                pkt = packer.pack(seq, t_now - t0, x, y_offset, target_z + z_offset,
-                                  qw, 0.0, 0.0, qz)
-                try:
-                    sock.sendto(pkt, addr)
-                except OSError:
-                    pass
-                seq += 1
-                patrol_stop.wait(timeout=interval)
-
-            sock.close()
-            rst_sock.close()
-
-        patrol_thread = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
-        patrol_thread.start()
+        patrol_thread = start_patrol_thread(
+            patrol_stop,
+            half_length=half_len,
+            speed_ms=speed_ms,
+            target_z=target_z,
+            sine_amp_xy=args.sine_amplitude_xy or 0.0,
+            sine_period_xy=args.sine_period_xy or 200.0,
+            sine_amp_z=args.sine_amplitude_z or 0.0,
+            sine_period_z=args.sine_period_z or 200.0,
+        )
 
     # ── 6b2. Orbit UDP drive thread (park_chase only) ──
     orbit_thread = None
@@ -1107,76 +686,7 @@ def main():
         orbit_radius_val = world_vars["orbit_radius"]
         orbit_omega = world_vars["orbit_speed"]  # rad/s = v_tangential / R
         target_z = world_vars["target_z"]
-
-        ORBIT_UDP_PORT = 9016   # must match ExternalPosePlugin <listen_port> in SDF
-        ORBIT_RESET_PORT = 9017  # reset_world.py sends "RESET" here
-
-        def _orbit_loop():
-            """Drive chase target in a circular orbit via UDP to ExternalPosePlugin at ~60 Hz.
-
-            Position:  x = R*cos(theta),  y = R*sin(theta),  z = altitude
-            Yaw:       theta + pi/2  (tangent to circle, facing forward in CCW orbit)
-            Visual pose yaw pi/2 is baked in mesh, so model yaw maps directly to heading.
-            Listens on ORBIT_RESET_PORT for reset signals to restart from theta=0.
-            """
-            interval = 1.0 / 60
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            addr = ("127.0.0.1", ORBIT_UDP_PORT)
-            packer = struct.Struct("<Qd3d4d")
-            seq = 0
-            t0 = time.monotonic()
-            theta = 0.0
-            t_prev = t0
-
-            # Reset listener socket (non-blocking)
-            rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            rst_sock.bind(("0.0.0.0", ORBIT_RESET_PORT))
-            rst_sock.setblocking(False)
-
-            log.info("Orbit UDP (port %d, reset port %d): R=%.1fm omega=%.4f rad/s alt=%.0fm",
-                     ORBIT_UDP_PORT, ORBIT_RESET_PORT, orbit_radius_val, orbit_omega, target_z)
-
-            while not orbit_stop.is_set():
-                # Check for reset signal
-                try:
-                    while True:
-                        rst_sock.recv(64)
-                        theta = 0.0
-                        t_prev = time.monotonic()
-                        log.info("Orbit thread: reset to theta=0")
-                except BlockingIOError:
-                    pass
-
-                t_now = time.monotonic()
-                dt = t_now - t_prev
-                t_prev = t_now
-
-                theta += orbit_omega * dt
-
-                x = orbit_radius_val * math.cos(theta)
-                y = orbit_radius_val * math.sin(theta)
-                z = target_z
-
-                # Yaw = tangent direction: theta + pi/2 for CCW orbit
-                yaw = theta + math.pi / 2
-                qw = math.cos(yaw / 2)
-                qz = math.sin(yaw / 2)
-
-                pkt = packer.pack(seq, t_now - t0, x, y, z,
-                                  qw, 0.0, 0.0, qz)
-                try:
-                    sock.sendto(pkt, addr)
-                except OSError:
-                    pass
-                seq += 1
-                orbit_stop.wait(timeout=interval)
-
-            sock.close()
-            rst_sock.close()
-
-        orbit_thread = threading.Thread(target=_orbit_loop, daemon=True, name="orbit")
-        orbit_thread.start()
+        orbit_thread = start_orbit_thread(orbit_stop, orbit_radius_val, orbit_omega, target_z)
 
     # ── 6c. Balloon smooth drift thread (balloon_test only) ──
     wind_thread = None
@@ -1273,8 +783,7 @@ def main():
         wind_stop.set()
         wind_thread.join(timeout=2)
 
-    pm.shutdown()
-    log.info("Simulation stopped")
+    pm.shutdown(extra_pkill_patterns=["betaflight_SITL.elf"])
 
 
 def _print_status(args, is_simulink, topic, chase_topic,
