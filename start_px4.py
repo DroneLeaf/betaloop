@@ -146,9 +146,13 @@ def parse_args():
     gps.add_argument("--alt", type=float, default=488.0,
                      help="GPS reference altitude AMSL in metres (default: 488.0)")
 
-    tgt = parser.add_argument_group("Target trajectory (park_chase / patrol_park)")
+    tgt = parser.add_argument_group("Target trajectory")
     tgt.add_argument("--target-altitude", type=float, default=None,
-                     help="Target altitude in metres (park_chase: 50, patrol_park: 100)")
+                     help="Target altitude in metres (park_chase: 50, patrol_park: 100, balloon: 10)")
+    tgt.add_argument("--target-distance-x", type=float, default=None,
+                     help="Target initial X position in metres (default: 30)")
+    tgt.add_argument("--target-distance-y", type=float, default=None,
+                     help="Target initial Y position in metres (default: 0)")
     tgt.add_argument("--target-speed", type=float, default=None,
                      help="Target speed km/h (park_chase orbit: 5.4, patrol_park: 20)")
     tgt.add_argument("--target-orbit-radius", type=float, default=None,
@@ -194,6 +198,8 @@ def main():
         target_speed=args.target_speed,
         orbit_radius=args.target_orbit_radius,
         patrol_length=args.patrol_length,
+        target_x=args.target_distance_x,
+        target_y=args.target_distance_y,
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 

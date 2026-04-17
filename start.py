@@ -125,6 +125,7 @@ WORLD_MAP = {
         "gz_world":     "rocket_drone_balloon_test.world",
         "sim_world":    "rocket_drone_balloon_test_vis.sdf",
         "gz_name":      "balloon_test",
+        "target_model": "balloon_target",
         "balloon_wind": True,
     },
 }
