@@ -10,6 +10,7 @@ import glob
 import logging
 import math
 import os
+import random
 import select
 import socket
 import struct
@@ -472,12 +473,14 @@ def wait_for_port(host: str, port: int, timeout: float = 30) -> bool:
 
 # ── Video pipeline helpers ────────────────────────────────────────────────────
 
-def start_fpv_bridge(args, pm: ProcessManager):
+def start_fpv_bridge(args, pm: ProcessManager, osd_args=None):
     """Discover and start the FPV image bridge.
 
     Returns ``(proc, width, height)`` or ``(None, 0, 0)`` if ``--no-video``.
     *args* must have: ``no_video``, ``fpv_topic``, ``topic_model_hint``,
     ``no_display``.
+    *osd_args*: optional list of OSD-related CLI flags for gz_image_bridge.
+    When provided, replaces the default ``--no-osd``.
     """
     if args.no_video:
         log.info("Video pipeline disabled (--no-video)")
@@ -502,7 +505,11 @@ def start_fpv_bridge(args, pm: ProcessManager):
             sys.exit(1)
     log.info("FPV topic: %s", topic)
 
-    bridge_cmd = [IMAGE_BRIDGE, topic, "--display", "--no-osd"]
+    bridge_cmd = [IMAGE_BRIDGE, topic, "--display"]
+    if osd_args:
+        bridge_cmd.extend(osd_args)
+    else:
+        bridge_cmd.append("--no-osd")
     if args.no_display:
         bridge_cmd.append("--hidden")
 
@@ -517,6 +524,21 @@ def start_fpv_bridge(args, pm: ProcessManager):
         pm.shutdown()
         sys.exit(1)
     log.info("Camera: %dx%d %s", width, height, pix_fmt)
+
+    # Drain stderr in a background thread so the pipe buffer never fills up
+    # and blocks the child process (which would deadlock its main loop).
+    def _drain(f):
+        try:
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)
+    t.start()
+
     return proc, width, height
 
 
@@ -709,5 +731,77 @@ def start_patrol_thread(
         rst_sock.close()
 
     t = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
+    t.start()
+    return t
+
+
+BALLOON_UDP_PORT = 9014
+
+
+def start_balloon_thread(
+    stop_event: threading.Event,
+    mean_x: float = 30.0,
+    mean_y: float = 0.0,
+    mean_z: float = 10.0,
+    wind_intensity: float = 2.0,
+    wind_randomness: float = 1.0,
+    drift_speed: float = 20.0,
+    udp_port: int = BALLOON_UDP_PORT,
+) -> threading.Thread:
+    """Spawn a daemon thread that drives smooth Lissajous balloon motion.
+
+    Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port``.
+    Returns the started thread.
+    """
+
+    def _wind_loop():
+        interval = 1.0 / 60  # 60 Hz
+        amp = wind_intensity
+        amp_z = wind_randomness
+        spd = drift_speed
+
+        px = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+        py = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+        pz = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+
+        fx = [0.13 * spd, 0.31 * spd, 0.53 * spd]
+        fy = [0.17 * spd, 0.41 * spd, 0.67 * spd]
+        fz = [0.11 * spd, 0.29 * spd, 0.47 * spd]
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        addr = ("127.0.0.1", udp_port)
+        packer = struct.Struct("<Qd3d4d")
+        seq = 0
+        t0 = time.monotonic()
+
+        log.info("Balloon drift (UDP:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
+                 udp_port, amp, amp_z, spd)
+
+        while not stop_event.is_set():
+            t = time.monotonic() - t0
+
+            bx = mean_x + amp * (0.5 * math.sin(fx[0] * t + px[0])
+                               + 0.3 * math.sin(fx[1] * t + px[1])
+                               + 0.2 * math.sin(fx[2] * t + px[2]))
+            by = mean_y + amp * (0.5 * math.sin(fy[0] * t + py[0])
+                               + 0.3 * math.sin(fy[1] * t + py[1])
+                               + 0.2 * math.sin(fy[2] * t + py[2]))
+            bz = mean_z + amp_z * (0.4 * math.sin(fz[0] * t + pz[0])
+                                 + 0.35 * math.sin(fz[1] * t + pz[1])
+                                 + 0.25 * math.sin(fz[2] * t + pz[2]))
+
+            # identity quaternion (w=1, x=0, y=0, z=0)
+            pkt = packer.pack(seq, t, bx, by, bz, 1.0, 0.0, 0.0, 0.0)
+            try:
+                sock.sendto(pkt, addr)
+            except OSError:
+                pass
+            seq += 1
+
+            stop_event.wait(timeout=interval)
+
+        sock.close()
+
+    t = threading.Thread(target=_wind_loop, daemon=True, name="balloon_wind")
     t.start()
     return t

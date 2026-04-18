@@ -47,6 +47,7 @@ from common import (
     default_path,
     render_vis_templates,
     setup_gazebo_env,
+    start_balloon_thread,
     start_chase_bridge,
     start_fpv_bridge,
     start_orbit_thread,
@@ -90,6 +91,8 @@ WORLD_MAP = {
     "balloon_test": {
         "sim_world": "rocket_drone_balloon_test_vis.sdf",
         "gz_name":   "balloon_test",
+        "target_model": "balloon_target",
+        "balloon_wind": True,
     },
 }
 
@@ -137,6 +140,8 @@ def parse_args():
                      help="TCP port for PX4 simulator connection (default: 4560)")
     brg.add_argument("--telem-port", type=int, default=0,
                      help="UDP port for raw telemetry output (0=off)")
+    brg.add_argument("--mavlink-port", type=int, default=14560,
+                     help="MAVLink UDP port for OSD telemetry (default: 14560)")
 
     gps = parser.add_argument_group("GPS reference")
     gps.add_argument("--lat", type=float, default=47.397742,
@@ -167,6 +172,12 @@ def parse_args():
                      help="Patrol vertical sine amplitude in metres (default: 0)")
     tgt.add_argument("--sine-period-z", type=float, default=None,
                      help="Patrol vertical sine period in metres (default: 200)")
+    tgt.add_argument("--wind-intensity", type=float, default=2.0,
+                     help="Balloon lateral drift amplitude in metres (default: 2.0)")
+    tgt.add_argument("--wind-randomness", type=float, default=1.0,
+                     help="Balloon vertical bobbing amplitude in metres (default: 1.0)")
+    tgt.add_argument("--drift-speed", type=float, default=20.0,
+                     help="Balloon Lissajous frequency multiplier (default: 20.0)")
 
     return parser.parse_args()
 
@@ -259,7 +270,26 @@ def main():
         sys.exit(1)
 
     # ── 4. Video pipeline (optional) ──
-    fpv_bridge_proc, width, height = start_fpv_bridge(args, pm)
+    osd_args = [
+        "--mavlink-osd",
+        "--mavlink-port", str(args.mavlink_port),
+        "--cam-pitch", str(args.cam_pitch),
+    ]
+    # Per-world target proximity detection
+    target_model = world_entry.get("target_model")
+    target_link  = world_entry.get("target_link")
+    target_bbox  = world_entry.get("target_bbox")
+    if target_model:
+        osd_args.extend(["--target-model", target_model])
+        if target_link:
+            osd_args.extend(["--target-link", target_link])
+        if target_bbox:
+            osd_args.extend(["--target-bbox", target_bbox])
+        log.info("Target proximity: model='%s' link=%s bbox=%s",
+                 target_model, target_link or "(model root)",
+                 target_bbox or "default")
+    log.info("MAVLink OSD enabled (UDP port %d)", args.mavlink_port)
+    fpv_bridge_proc, width, height = start_fpv_bridge(args, pm, osd_args=osd_args)
     chase_bridge_proc = start_chase_bridge(args, pm)
 
     # ── 5. Target trajectory threads ──
@@ -288,6 +318,20 @@ def main():
             sine_period_z=args.sine_period_z or 200.0,
         )
 
+    elif world_entry.get("balloon_wind") and world_entry.get("target_model"):
+        target_x = args.target_distance_x if args.target_distance_x is not None else 30.0
+        target_y = args.target_distance_y if args.target_distance_y is not None else 0.0
+        target_z = args.target_altitude if args.target_altitude is not None else 10.0
+        start_balloon_thread(
+            traj_stop,
+            mean_x=target_x,
+            mean_y=target_y,
+            mean_z=target_z,
+            wind_intensity=args.wind_intensity,
+            wind_randomness=args.wind_randomness,
+            drift_speed=args.drift_speed,
+        )
+
     # ── 6. Print status ──
     print()
     print("=" * 64)
@@ -301,7 +345,8 @@ def main():
     print(f"  GPS ref      : lat={args.lat:.6f} lon={args.lon:.6f} alt={args.alt:.1f}")
     print()
     print(f"  PX4 offboard : UDP 127.0.0.1:14540  (MAVLink)")
-    print(f"  PX4 GCS      : UDP 127.0.0.1:14550  (MAVLink / QGC)")
+    print(f"  PX4 GCS      : UDP 127.0.0.1:18570  (MAVLink / QGC)")
+    print(f"  OSD telemetry: UDP 127.0.0.1:{args.mavlink_port}  (MAVLink → gz_image_bridge)")
     print(f"  Simulator    : TCP 0.0.0.0:{args.tcp_port}   (HIL lockstep)")
     print(f"  Reset        : UDP 127.0.0.1:9011   (reset_world.py)")
     if not args.no_video and width:

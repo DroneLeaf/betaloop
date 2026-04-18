@@ -56,6 +56,7 @@ from common import (
     render_template,
     render_vis_templates,
     setup_gazebo_env,
+    start_balloon_thread,
     start_orbit_thread,
     start_patrol_thread,
     wait_for_port,
@@ -696,67 +697,17 @@ def main():
         wind_intensity = args.wind_intensity if args.wind_intensity is not None else 2.0
         wind_sigma = args.wind_randomness if args.wind_randomness is not None else 1.0
         drift_speed = args.drift_speed if args.drift_speed is not None else 20.0
-        target_model = world_entry["target_model"]
         mean_x, mean_y, mean_z = world_vars["target_x"], world_vars["target_y"], world_vars["target_z"]
 
-        BALLOON_UDP_PORT = 9014  # must match ExternalPosePlugin <listen_port> in SDF
-
-        def _wind_loop():
-            """Smooth Lissajous balloon motion via direct UDP to ExternalPosePlugin.
-
-            Sends a 72-byte VisualPosePacket at ~60 Hz using wall-clock time.
-            No subprocess overhead — position is never stale.
-            """
-            interval = 1.0 / 60  # 60 Hz
-            amp = wind_intensity
-            amp_z = wind_sigma
-            spd = drift_speed
-
-            px = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-            py = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-            pz = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-
-            fx = [0.13 * spd, 0.31 * spd, 0.53 * spd]
-            fy = [0.17 * spd, 0.41 * spd, 0.67 * spd]
-            fz = [0.11 * spd, 0.29 * spd, 0.47 * spd]
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            addr = ("127.0.0.1", BALLOON_UDP_PORT)
-            # VisualPosePacket: uint64 seq, double t, double pos[3], double quat[4]
-            packer = struct.Struct("<Qd3d4d")
-            seq = 0
-            t0 = time.monotonic()
-
-            log.info("Balloon drift (UDP:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
-                     BALLOON_UDP_PORT, amp, amp_z, spd)
-
-            while not wind_stop.is_set():
-                t = time.monotonic() - t0
-
-                bx = mean_x + amp * (0.5 * math.sin(fx[0] * t + px[0])
-                                   + 0.3 * math.sin(fx[1] * t + px[1])
-                                   + 0.2 * math.sin(fx[2] * t + px[2]))
-                by = mean_y + amp * (0.5 * math.sin(fy[0] * t + py[0])
-                                   + 0.3 * math.sin(fy[1] * t + py[1])
-                                   + 0.2 * math.sin(fy[2] * t + py[2]))
-                bz = mean_z + amp_z * (0.4 * math.sin(fz[0] * t + pz[0])
-                                     + 0.35 * math.sin(fz[1] * t + pz[1])
-                                     + 0.25 * math.sin(fz[2] * t + pz[2]))
-
-                # identity quaternion (w=1, x=0, y=0, z=0)
-                pkt = packer.pack(seq, t, bx, by, bz, 1.0, 0.0, 0.0, 0.0)
-                try:
-                    sock.sendto(pkt, addr)
-                except OSError:
-                    pass
-                seq += 1
-
-                wind_stop.wait(timeout=interval)
-
-            sock.close()
-
-        wind_thread = threading.Thread(target=_wind_loop, daemon=True, name="balloon_wind")
-        wind_thread.start()
+        wind_thread = start_balloon_thread(
+            wind_stop,
+            mean_x=mean_x,
+            mean_y=mean_y,
+            mean_z=mean_z,
+            wind_intensity=wind_intensity,
+            wind_randomness=wind_sigma,
+            drift_speed=drift_speed,
+        )
 
     # ── 7. Keep alive ──
     try:
