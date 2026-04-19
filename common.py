@@ -132,6 +132,8 @@ def compute_model_vars(
     cam_pitch: float = -80.0,
     standoff: float | None = None,
     damping_overrides: dict | None = None,
+    tracker_cam_pitch: float = -80.0,
+    tracker_cam_roll: float = 0.0,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -148,12 +150,16 @@ def compute_model_vars(
     leg_z = -(_standoff / 2 + ref["leg_attach_offset"])
 
     fpv_cam_pitch_rad = math.radians(cam_pitch)
+    tracker_cam_pitch_rad = math.radians(tracker_cam_pitch)
+    tracker_cam_roll_rad = math.radians(tracker_cam_roll)
 
     dd = ref["default_damping"]
     do = damping_overrides or {}
     model_vars = {
         "mass": mass, "ixx": ixx, "iyy": iyy, "izz": izz,
         "fpv_cam_pitch_rad": fpv_cam_pitch_rad,
+        "tracker_cam_pitch_rad": tracker_cam_pitch_rad,
+        "tracker_cam_roll_rad": tracker_cam_roll_rad,
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),

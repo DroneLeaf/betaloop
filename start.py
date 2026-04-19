@@ -158,6 +158,8 @@ def _render_all_templates(drone, world_name, args):
     model_vars = compute_model_vars(
         drone, ctw=ctw, cam_pitch=args.cam_pitch,
         standoff=standoff, damping_overrides=damping_overrides,
+        tracker_cam_pitch=args.tracker_cam_pitch,
+        tracker_cam_roll=args.tracker_cam_roll,
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -296,6 +298,18 @@ def parse_args():
         type=float,
         default=-80.0,
         help="FPV camera pitch in degrees (default: -80, i.e. 10° from +Z)",
+    )
+    drn.add_argument(
+        "--tracker-cam-pitch",
+        type=float,
+        default=-80.0,
+        help="Tracker camera pitch in degrees (default: -80)",
+    )
+    drn.add_argument(
+        "--tracker-cam-roll",
+        type=float,
+        default=0.0,
+        help="Tracker camera roll in degrees (default: 0; use 90 for landscape)",
     )
     drn.add_argument(
         "--ctw",
@@ -534,8 +548,10 @@ def main():
     # ── 5. Video pipeline ──
     topic = None
     chase_topic = None
+    tracker_topic = None
     bridge_proc = None
     chase_bridge_proc = None
+    tracker_bridge_proc = None
     width = height = 0
 
     if args.no_video:
@@ -650,6 +666,29 @@ def main():
                 chase_cmd.append("--hidden")
             chase_bridge_proc = pm.spawn(
                 chase_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        # Tracker camera (always launched if video is on, no OSD)
+        log.info("Discovering tracker camera topic …")
+        tracker_candidates = list_camera_topics(name_hint="fpv_tracker_cam")
+        if tracker_candidates:
+            log.info("Tracker candidates: %s", ", ".join(tracker_candidates))
+        tracker_topic = discover_camera_topic(
+            name_hint="fpv_tracker_cam",
+            timeout=30,
+            model_hint=args.topic_model_hint,
+        )
+        if not tracker_topic:
+            log.warning("Tracker camera topic not found — skipping")
+        else:
+            log.info("Found tracker camera topic: %s", tracker_topic)
+            tracker_cmd = [IMAGE_BRIDGE, tracker_topic, "--display", "--no-osd"]
+            if args.no_display:
+                tracker_cmd.append("--hidden")
+            tracker_bridge_proc = pm.spawn(
+                tracker_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

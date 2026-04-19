@@ -114,6 +114,10 @@ def parse_args():
                      help=f"Drone profile (default: {DEFAULT_DRONE})")
     sim.add_argument("--cam-pitch", type=float, default=-80.0,
                      help="FPV camera pitch in degrees (default: -80)")
+    sim.add_argument("--tracker-cam-pitch", type=float, default=-80.0,
+                     help="Tracker camera pitch in degrees (default: -80)")
+    sim.add_argument("--tracker-cam-roll", type=float, default=0.0,
+                     help="Tracker camera roll in degrees (default: 0)")
     sim.add_argument("--gazebo", action="store_true",
                      help="Show the Gazebo GUI (default: headless)")
     sim.add_argument("--chase-cam", action="store_true",
@@ -202,7 +206,11 @@ def main():
     configure_display(args, pm)
 
     # ── 1b. Render Jinja2 vis templates before Gazebo launch ──
-    model_vars = compute_model_vars(args.drone, cam_pitch=args.cam_pitch)
+    model_vars = compute_model_vars(
+        args.drone, cam_pitch=args.cam_pitch,
+        tracker_cam_pitch=args.tracker_cam_pitch,
+        tracker_cam_roll=args.tracker_cam_roll,
+    )
     world_vars = compute_world_vars(
         args.drone, args.world,
         target_altitude=args.target_altitude,
