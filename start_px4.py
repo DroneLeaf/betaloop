@@ -176,6 +176,8 @@ def parse_args():
                      help="Park-chase orbit radius in metres (default: 30)")
     tgt.add_argument("--patrol-length", type=float, default=None,
                      help="Patrol total distance in metres (default: 500)")
+    tgt.add_argument("--target-launch-offset", type=float, default=None,
+                     help="Patrol launch offset behind player in metres (default: 50)")
     tgt.add_argument("--sine-amplitude-xy", type=float, default=None,
                      help="Patrol lateral sine amplitude in metres (default: 0)")
     tgt.add_argument("--sine-period-xy", type=float, default=None,
@@ -323,13 +325,15 @@ def main():
         start_orbit_thread(traj_stop, orbit_radius, orbit_omega, target_z)
 
     elif world_entry.get("patrol_joint") and world_entry.get("target_model"):
-        half_len = (args.patrol_length if args.patrol_length is not None else 500.0) / 2
+        patrol_length = args.patrol_length if args.patrol_length is not None else 500.0
+        launch_offset = args.target_launch_offset if args.target_launch_offset is not None else 50.0
         speed_kmh = args.target_speed if args.target_speed is not None else 20.0
         speed_ms = speed_kmh / 3.6
         target_z = args.target_altitude if args.target_altitude is not None else 100.0
         start_patrol_thread(
             traj_stop,
-            half_length=half_len,
+            patrol_length=patrol_length,
+            launch_offset=launch_offset,
             speed_ms=speed_ms,
             target_z=target_z,
             sine_amp_xy=args.sine_amplitude_xy or 0.0,

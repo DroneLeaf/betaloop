@@ -413,6 +413,12 @@ def parse_args():
         help="Patrol-park total patrol distance in metres (default: 2000)",
     )
     wld.add_argument(
+        "--target-launch-offset",
+        type=float,
+        default=None,
+        help="Patrol-park launch offset behind player in metres (default: 50)",
+    )
+    wld.add_argument(
         "--sine-amplitude-xy",
         type=float,
         default=None,
@@ -733,13 +739,14 @@ def main():
     patrol_joint = world_entry.get("patrol_joint")
     if patrol_joint and world_entry.get("target_model"):
         patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
+        launch_offset = args.target_launch_offset if args.target_launch_offset is not None else 50.0
         speed_kmh_p = args.target_speed if args.target_speed is not None else 100.0
         speed_ms = speed_kmh_p / 3.6
-        half_len = patrol_length / 2.0
         target_z = world_vars["target_z"]
         patrol_thread = start_patrol_thread(
             patrol_stop,
-            half_length=half_len,
+            patrol_length=patrol_length,
+            launch_offset=launch_offset,
             speed_ms=speed_ms,
             target_z=target_z,
             sine_amp_xy=args.sine_amplitude_xy or 0.0,

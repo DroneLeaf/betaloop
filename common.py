@@ -672,7 +672,8 @@ def start_orbit_thread(
 
 def start_patrol_thread(
     stop_event: threading.Event,
-    half_length: float = 250.0,
+    patrol_length: float = 500.0,
+    launch_offset: float = 50.0,
     speed_ms: float = 5.56,
     target_z: float = 100.0,
     sine_amp_xy: float = 0.0,
@@ -683,6 +684,9 @@ def start_patrol_thread(
     reset_port: int = TARGET_RESET_PORT,
 ) -> threading.Thread:
     """Spawn a daemon thread that drives a triangle-wave patrol via UDP.
+
+    The target starts at x = -launch_offset (behind the player), flies forward
+    the full patrol_length to x = patrol_length - launch_offset, then returns.
 
     Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port``.
     Listens on ``reset_port`` for reset signals.
@@ -697,7 +701,9 @@ def start_patrol_thread(
         seq = 0
         t0 = time.monotonic()
         t_prev = t0
-        x = 0.0
+        x_min = -launch_offset
+        x_max = patrol_length - launch_offset
+        x = x_min
         direction = 1.0
         qw, qz = 1.0, 0.0
 
@@ -709,18 +715,18 @@ def start_patrol_thread(
         omega_xy = (2.0 * math.pi / sine_period_xy) if sine_period_xy > 0 else 0.0
         omega_z = (2.0 * math.pi / sine_period_z) if sine_period_z > 0 else 0.0
 
-        log.info("Patrol thread: half=%.0fm speed=%.1f m/s alt=%.0fm (port %d)",
-                 half_length, speed_ms, target_z, udp_port)
+        log.info("Patrol thread: length=%.0fm offset=%.0fm [%.0f..%.0f] speed=%.1f m/s alt=%.0fm (port %d)",
+                 patrol_length, launch_offset, x_min, x_max, speed_ms, target_z, udp_port)
 
         while not stop_event.is_set():
             try:
                 while True:
                     rst_sock.recv(64)
-                    x = 0.0
+                    x = x_min
                     direction = 1.0
                     qw, qz = 1.0, 0.0
                     t_prev = time.monotonic()
-                    log.info("Patrol thread: reset to origin")
+                    log.info("Patrol thread: reset to x=%.0f", x_min)
             except BlockingIOError:
                 pass
 
@@ -729,12 +735,12 @@ def start_patrol_thread(
             t_prev = t_now
 
             x += direction * speed_ms * dt
-            if x >= half_length:
-                x = half_length
+            if x >= x_max:
+                x = x_max
                 direction = -1.0
                 qw, qz = 0.0, 1.0
-            elif x <= -half_length:
-                x = -half_length
+            elif x <= x_min:
+                x = x_min
                 direction = 1.0
                 qw, qz = 1.0, 0.0
 
