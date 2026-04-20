@@ -86,6 +86,7 @@ SIMULINK_LIB = _default_path(
 
 DEFAULT_WORLD = "park_chase"
 DEFAULT_DRONE = "rocket_drone"
+DEFAULT_TARGET = "shahed_drone"
 TOPIC_MODEL_HINT_DEFAULT = "rocket_drone"
 IMAGE_BRIDGE = os.path.join(AEROLOOP_HOME, "plugins", "build", "gz_image_bridge")
 
@@ -188,6 +189,15 @@ DRONE_REFS = {
             "quadratic_x": 0, "quadratic_y": 0, "quadratic_z": 0,
             "angular": 0.005,
         },
+    },
+}
+
+TARGET_REFS = {
+    "shahed_drone": {
+        "target_mesh_uri": "model://shahed_drone/meshes/shahed.glb",
+    },
+    "stingjet": {
+        "target_mesh_uri": "model://stingjet/stingjet.glb",
     },
 }
 
@@ -354,6 +364,10 @@ def _render_all_templates(drone, world_name, args):
     else:
         target_z = 10.0
 
+    # Target drone model type and mesh URI
+    target_model_type = args.target_drone
+    target_ref = TARGET_REFS[target_model_type]
+
     world_vars = {
         "drone_uri": ref["model_uri"],
         "drone_vis_uri": ref["model_vis_uri"],
@@ -364,6 +378,7 @@ def _render_all_templates(drone, world_name, args):
         "target_x": target_x, "target_y": target_y, "target_z": target_z,
         "patrol_length": patrol_length,
         "patrol_speed_ms": patrol_speed_ms,
+        "target_mesh_uri": target_ref["target_mesh_uri"],
     }
 
     # ── Render world files ──
@@ -677,6 +692,12 @@ def parse_args():
 
     # ── World Settings ───────────────────────────────────────────────────
     wld = parser.add_argument_group("World settings (collision_test / park_chase / patrol_park)")
+    wld.add_argument(
+        "--target-drone",
+        choices=list(TARGET_REFS.keys()),
+        default="shahed_drone",
+        help="Target drone model (default: shahed_drone)",
+    )
     wld.add_argument(
         "--target-altitude",
         type=float,
