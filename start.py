@@ -160,6 +160,10 @@ def _render_all_templates(drone, world_name, args):
         standoff=standoff, damping_overrides=damping_overrides,
         tracker_cam_pitch=args.tracker_cam_pitch,
         tracker_cam_roll=args.tracker_cam_roll,
+        fpv_hfov_deg=args.fpv_hfov,
+        fpv_vfov_deg=args.fpv_vfov,
+        tracker_hfov_deg=args.tracker_hfov,
+        tracker_vfov_deg=args.tracker_vfov,
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -310,6 +314,30 @@ def parse_args():
         type=float,
         default=0.0,
         help="Tracker camera roll in degrees (default: 0; use 90 for landscape)",
+    )
+    drn.add_argument(
+        "--fpv-hfov",
+        type=float,
+        default=114.6,
+        help="FPV camera horizontal FOV in degrees (default: 114.6)",
+    )
+    drn.add_argument(
+        "--fpv-vfov",
+        type=float,
+        default=98.9,
+        help="FPV camera vertical FOV in degrees (default: 98.9)",
+    )
+    drn.add_argument(
+        "--tracker-hfov",
+        type=float,
+        default=114.6,
+        help="Tracker camera horizontal FOV in degrees (default: 114.6)",
+    )
+    drn.add_argument(
+        "--tracker-vfov",
+        type=float,
+        default=98.9,
+        help="Tracker camera vertical FOV in degrees (default: 98.9)",
     )
     drn.add_argument(
         "--ctw",

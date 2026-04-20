@@ -134,6 +134,10 @@ def compute_model_vars(
     damping_overrides: dict | None = None,
     tracker_cam_pitch: float = -80.0,
     tracker_cam_roll: float = 0.0,
+    fpv_hfov_deg: float = 114.6,
+    fpv_vfov_deg: float = 98.9,
+    tracker_hfov_deg: float = 114.6,
+    tracker_vfov_deg: float = 98.9,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -153,6 +157,15 @@ def compute_model_vars(
     tracker_cam_pitch_rad = math.radians(tracker_cam_pitch)
     tracker_cam_roll_rad = math.radians(tracker_cam_roll)
 
+    # FOV: compute hfov in radians and derive image height from desired vfov
+    fpv_hfov_rad = math.radians(fpv_hfov_deg)
+    tracker_hfov_rad = math.radians(tracker_hfov_deg)
+    img_width = 640
+    fpv_img_height = round(img_width * math.tan(math.radians(fpv_vfov_deg) / 2)
+                           / math.tan(fpv_hfov_rad / 2))
+    tracker_img_height = round(img_width * math.tan(math.radians(tracker_vfov_deg) / 2)
+                               / math.tan(tracker_hfov_rad / 2))
+
     dd = ref["default_damping"]
     do = damping_overrides or {}
     model_vars = {
@@ -160,6 +173,10 @@ def compute_model_vars(
         "fpv_cam_pitch_rad": fpv_cam_pitch_rad,
         "tracker_cam_pitch_rad": tracker_cam_pitch_rad,
         "tracker_cam_roll_rad": tracker_cam_roll_rad,
+        "fpv_hfov_rad": fpv_hfov_rad,
+        "tracker_hfov_rad": tracker_hfov_rad,
+        "fpv_img_height": fpv_img_height,
+        "tracker_img_height": tracker_img_height,
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),

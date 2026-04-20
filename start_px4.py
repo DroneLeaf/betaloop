@@ -118,6 +118,14 @@ def parse_args():
                      help="Tracker camera pitch in degrees (default: -80)")
     sim.add_argument("--tracker-cam-roll", type=float, default=0.0,
                      help="Tracker camera roll in degrees (default: 0)")
+    sim.add_argument("--fpv-hfov", type=float, default=114.6,
+                     help="FPV camera horizontal FOV in degrees (default: 114.6)")
+    sim.add_argument("--fpv-vfov", type=float, default=98.9,
+                     help="FPV camera vertical FOV in degrees (default: 98.9)")
+    sim.add_argument("--tracker-hfov", type=float, default=114.6,
+                     help="Tracker camera horizontal FOV in degrees (default: 114.6)")
+    sim.add_argument("--tracker-vfov", type=float, default=98.9,
+                     help="Tracker camera vertical FOV in degrees (default: 98.9)")
     sim.add_argument("--gazebo", action="store_true",
                      help="Show the Gazebo GUI (default: headless)")
     sim.add_argument("--chase-cam", action="store_true",
@@ -210,6 +218,10 @@ def main():
         args.drone, cam_pitch=args.cam_pitch,
         tracker_cam_pitch=args.tracker_cam_pitch,
         tracker_cam_roll=args.tracker_cam_roll,
+        fpv_hfov_deg=args.fpv_hfov,
+        fpv_vfov_deg=args.fpv_vfov,
+        tracker_hfov_deg=args.tracker_hfov,
+        tracker_vfov_deg=args.tracker_vfov,
     )
     world_vars = compute_world_vars(
         args.drone, args.world,
