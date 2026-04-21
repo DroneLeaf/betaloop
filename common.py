@@ -138,6 +138,8 @@ def compute_model_vars(
     fpv_vfov_deg: float = 98.9,
     tracker_hfov_deg: float = 114.6,
     tracker_vfov_deg: float = 98.9,
+    fpv_cam_width: int = 640,
+    tracker_cam_width: int = 640,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -157,13 +159,16 @@ def compute_model_vars(
     tracker_cam_pitch_rad = math.radians(tracker_cam_pitch)
     tracker_cam_roll_rad = math.radians(tracker_cam_roll)
 
-    # FOV: compute hfov in radians and derive image height from desired vfov
+    # Camera geometry: option 3 — honour requested HFOV + VFOV and derive
+    # source image heights accordingly (non-4:3 source may then be stretched
+    # to 640x480 later in the bridge pipeline).
     fpv_hfov_rad = math.radians(fpv_hfov_deg)
     tracker_hfov_rad = math.radians(tracker_hfov_deg)
-    img_width = 640
-    fpv_img_height = round(img_width * math.tan(math.radians(fpv_vfov_deg) / 2)
+    fpv_img_width = max(64, int(fpv_cam_width))
+    tracker_img_width = max(64, int(tracker_cam_width))
+    fpv_img_height = round(fpv_img_width * math.tan(math.radians(fpv_vfov_deg) / 2)
                            / math.tan(fpv_hfov_rad / 2))
-    tracker_img_height = round(img_width * math.tan(math.radians(tracker_vfov_deg) / 2)
+    tracker_img_height = round(tracker_img_width * math.tan(math.radians(tracker_vfov_deg) / 2)
                                / math.tan(tracker_hfov_rad / 2))
 
     dd = ref["default_damping"]
@@ -175,6 +180,8 @@ def compute_model_vars(
         "tracker_cam_roll_rad": tracker_cam_roll_rad,
         "fpv_hfov_rad": fpv_hfov_rad,
         "tracker_hfov_rad": tracker_hfov_rad,
+        "fpv_img_width": fpv_img_width,
+        "tracker_img_width": tracker_img_width,
         "fpv_img_height": fpv_img_height,
         "tracker_img_height": tracker_img_height,
         "standoff_height": _standoff, "leg_z": leg_z,
@@ -189,6 +196,8 @@ def compute_model_vars(
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
              _ctw, mass, ixx, iyy, izz, _standoff, cam_pitch)
+    log.info("Requested camera FOVs -> source size: FPV %dx%d, tracker %dx%d",
+             fpv_img_width, fpv_img_height, tracker_img_width, tracker_img_height)
     return model_vars
 
 
@@ -529,6 +538,9 @@ def start_fpv_bridge(args, pm: ProcessManager, osd_args=None):
     log.info("FPV topic: %s", topic)
 
     bridge_cmd = [IMAGE_BRIDGE, topic, "--display"]
+    cam_width = int(getattr(args, "fpv_cam_width", getattr(args, "cam_width", 640)))
+    cam_height = int(getattr(args, "fpv_cam_height", getattr(args, "cam_height", 480)))
+    bridge_cmd.extend(["--out-width", str(cam_width), "--out-height", str(cam_height)])
     if osd_args:
         bridge_cmd.extend(osd_args)
     else:
@@ -587,6 +599,9 @@ def start_chase_bridge(args, pm: ProcessManager):
 
     log.info("Chase topic: %s", chase_topic)
     chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
+    cam_width = int(getattr(args, "fpv_cam_width", getattr(args, "cam_width", 640)))
+    cam_height = int(getattr(args, "fpv_cam_height", getattr(args, "cam_height", 480)))
+    chase_cmd.extend(["--out-width", str(cam_width), "--out-height", str(cam_height)])
     if getattr(args, "no_display", False):
         chase_cmd.append("--hidden")
     return pm.spawn(chase_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

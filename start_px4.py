@@ -126,6 +126,19 @@ def parse_args():
                      help="Tracker camera horizontal FOV in degrees (default: 114.6)")
     sim.add_argument("--tracker-vfov", type=float, default=98.9,
                      help="Tracker camera vertical FOV in degrees (default: 98.9)")
+    sim.add_argument("--fpv-cam-width", type=float, default=640,
+                     help="Pilot camera output width in pixels (default: 640)")
+    sim.add_argument("--fpv-cam-height", type=float, default=480,
+                     help="Pilot camera output height in pixels (default: 480)")
+    sim.add_argument("--tracker-cam-width", type=float, default=640,
+                     help="Tracker camera source width in pixels (default: 640)")
+    sim.add_argument("--tracker-cam-height", type=float, default=480,
+                     help="Tracker camera output height in pixels (default: 480)")
+    # Backward compatibility: applies to both cameras if explicitly provided.
+    sim.add_argument("--cam-width", type=float, default=None,
+                     help="Deprecated: output width for both pilot/tracker cameras")
+    sim.add_argument("--cam-height", type=float, default=None,
+                     help="Deprecated: output height for both pilot/tracker cameras")
     sim.add_argument("--gazebo", action="store_true",
                      help="Show the Gazebo GUI (default: headless)")
     sim.add_argument("--chase-cam", action="store_true",
@@ -199,6 +212,13 @@ def parse_args():
 def main():
     args = parse_args()
 
+    if args.cam_width is not None:
+        args.fpv_cam_width = args.cam_width
+        args.tracker_cam_width = args.cam_width
+    if args.cam_height is not None:
+        args.fpv_cam_height = args.cam_height
+        args.tracker_cam_height = args.cam_height
+
     _px4_kill = ["pkill -9 -x px4_sim_bridge 2>/dev/null || true"]
     cleanup_before_start(extra_pkill_cmds=_px4_kill)
     pm = ProcessManager()
@@ -224,6 +244,8 @@ def main():
         fpv_vfov_deg=args.fpv_vfov,
         tracker_hfov_deg=args.tracker_hfov,
         tracker_vfov_deg=args.tracker_vfov,
+        fpv_cam_width=args.fpv_cam_width,
+        tracker_cam_width=args.tracker_cam_width,
     )
     world_vars = compute_world_vars(
         args.drone, args.world,
@@ -296,6 +318,8 @@ def main():
         "--mavlink-osd",
         "--mavlink-port", str(args.mavlink_port),
         "--cam-pitch", str(args.cam_pitch),
+        "--out-width", str(args.fpv_cam_width),
+        "--out-height", str(args.fpv_cam_height),
     ]
     # Per-world target proximity detection
     target_model = world_entry.get("target_model")

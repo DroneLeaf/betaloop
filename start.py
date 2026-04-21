@@ -164,6 +164,8 @@ def _render_all_templates(drone, world_name, args):
         fpv_vfov_deg=args.fpv_vfov,
         tracker_hfov_deg=args.tracker_hfov,
         tracker_vfov_deg=args.tracker_vfov,
+        fpv_cam_width=args.fpv_cam_width,
+        tracker_cam_width=args.tracker_cam_width,
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -339,6 +341,19 @@ def parse_args():
         default=98.9,
         help="Tracker camera vertical FOV in degrees (default: 98.9)",
     )
+    drn.add_argument("--fpv-cam-width", type=float, default=640,
+                     help="Pilot camera output width in pixels (default: 640)")
+    drn.add_argument("--fpv-cam-height", type=float, default=480,
+                     help="Pilot camera output height in pixels (default: 480)")
+    drn.add_argument("--tracker-cam-width", type=float, default=640,
+                     help="Tracker camera output width in pixels (default: 640)")
+    drn.add_argument("--tracker-cam-height", type=float, default=480,
+                     help="Tracker camera output height in pixels (default: 480)")
+    # Backward compatibility: applies to both cameras if explicitly provided.
+    drn.add_argument("--cam-width", type=float, default=None,
+                     help="Deprecated: output width for both pilot/tracker cameras")
+    drn.add_argument("--cam-height", type=float, default=None,
+                     help="Deprecated: output height for both pilot/tracker cameras")
     drn.add_argument(
         "--ctw",
         type=float,
@@ -472,6 +487,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.cam_width is not None:
+        args.fpv_cam_width = args.cam_width
+        args.tracker_cam_width = args.cam_width
+    if args.cam_height is not None:
+        args.fpv_cam_height = args.cam_height
+        args.tracker_cam_height = args.cam_height
 
     _bf_kill = [
         "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true",
@@ -644,6 +666,8 @@ def main():
             IMAGE_BRIDGE, topic, "--display",
             "--osd", "--msp-port", str(args.msp_port),
             "--cam-pitch", str(args.cam_pitch),
+            "--out-width", str(args.fpv_cam_width),
+            "--out-height", str(args.fpv_cam_height),
         ]
         if args.no_display:
             bridge_cmd.append("--hidden")
@@ -696,6 +720,7 @@ def main():
         if chase_topic:
             log.info("Starting chase camera bridge (no OSD)")
             chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
+            chase_cmd.extend(["--out-width", str(args.fpv_cam_width), "--out-height", str(args.fpv_cam_height)])
             if args.no_display:
                 chase_cmd.append("--hidden")
             chase_bridge_proc = pm.spawn(
@@ -719,6 +744,7 @@ def main():
         else:
             log.info("Found tracker camera topic: %s", tracker_topic)
             tracker_cmd = [IMAGE_BRIDGE, tracker_topic, "--display", "--no-osd"]
+            tracker_cmd.extend(["--out-width", str(args.tracker_cam_width), "--out-height", str(args.tracker_cam_height)])
             if args.no_display:
                 tracker_cmd.append("--hidden")
             tracker_bridge_proc = pm.spawn(
