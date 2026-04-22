@@ -729,10 +729,11 @@ def main():
         log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
         # Chase camera (optional, always --display for rendering)
+        # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
         if chase_topic:
             log.info("Starting chase camera bridge (no OSD)")
             chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
-            chase_cmd.extend(["--out-width", str(args.fpv_cam_width), "--out-height", str(args.fpv_cam_height)])
+            chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
             if args.no_display:
                 chase_cmd.append("--hidden")
             chase_bridge_proc = pm.spawn(

@@ -599,9 +599,8 @@ def start_chase_bridge(args, pm: ProcessManager):
 
     log.info("Chase topic: %s", chase_topic)
     chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
-    cam_width = int(getattr(args, "fpv_cam_width", getattr(args, "cam_width", 640)))
-    cam_height = int(getattr(args, "fpv_cam_height", getattr(args, "cam_height", 480)))
-    chase_cmd.extend(["--out-width", str(cam_width), "--out-height", str(cam_height)])
+    # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
+    chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
     if getattr(args, "no_display", False):
         chase_cmd.append("--hidden")
     return pm.spawn(chase_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
