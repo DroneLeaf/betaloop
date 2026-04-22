@@ -458,6 +458,18 @@ def parse_args():
         help="Patrol vertical sine peak-to-peak distance in metres (default: 200)",
     )
     wld.add_argument(
+        "--patrol-lateral-offset",
+        type=float,
+        default=None,
+        help="Patrol lateral offset in metres so the target does not fly directly overhead (default: 0)",
+    )
+    wld.add_argument(
+        "--patrol-rotation",
+        type=float,
+        default=None,
+        help="Patrol path rotation in degrees clockwise when viewed from above (default: 0)",
+    )
+    wld.add_argument(
         "--hit-box-scale",
         type=float,
         default=None,
@@ -779,6 +791,8 @@ def main():
             sine_period_xy=args.sine_period_xy or 200.0,
             sine_amp_z=args.sine_amplitude_z or 0.0,
             sine_period_z=args.sine_period_z or 200.0,
+            lateral_offset=args.patrol_lateral_offset or 0.0,
+            rotation_deg=args.patrol_rotation or 0.0,
         )
 
     # ── 6b2. Orbit UDP drive thread (park_chase only) ──

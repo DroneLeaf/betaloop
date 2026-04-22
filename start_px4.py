@@ -199,6 +199,10 @@ def parse_args():
                      help="Patrol vertical sine amplitude in metres (default: 0)")
     tgt.add_argument("--sine-period-z", type=float, default=None,
                      help="Patrol vertical sine period in metres (default: 200)")
+    tgt.add_argument("--patrol-lateral-offset", type=float, default=None,
+                     help="Patrol lateral offset in metres so the target does not fly directly overhead (default: 0)")
+    tgt.add_argument("--patrol-rotation", type=float, default=None,
+                     help="Patrol path rotation in degrees clockwise when viewed from above (default: 0)")
     tgt.add_argument("--wind-intensity", type=float, default=2.0,
                      help="Balloon lateral drift amplitude in metres (default: 2.0)")
     tgt.add_argument("--wind-randomness", type=float, default=1.0,
@@ -364,6 +368,8 @@ def main():
             sine_period_xy=args.sine_period_xy or 200.0,
             sine_amp_z=args.sine_amplitude_z or 0.0,
             sine_period_z=args.sine_period_z or 200.0,
+            lateral_offset=args.patrol_lateral_offset or 0.0,
+            rotation_deg=args.patrol_rotation or 0.0,
         )
 
     elif world_entry.get("balloon_wind") and world_entry.get("target_model"):

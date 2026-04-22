@@ -695,6 +695,8 @@ def start_patrol_thread(
     sine_period_xy: float = 200.0,
     sine_amp_z: float = 0.0,
     sine_period_z: float = 200.0,
+    lateral_offset: float = 0.0,
+    rotation_deg: float = 0.0,
     udp_port: int = TARGET_UDP_PORT,
     reset_port: int = TARGET_RESET_PORT,
 ) -> threading.Thread:
@@ -702,6 +704,12 @@ def start_patrol_thread(
 
     The target starts at x = -launch_offset (behind the player), flies forward
     the full patrol_length to x = patrol_length - launch_offset, then returns.
+
+    ``lateral_offset`` shifts the whole patrol track sideways in metres (applied
+    in the patrol-local Y before rotation) so the target does not fly directly
+    overhead. ``rotation_deg`` rotates the entire patrol path clockwise when
+    viewed from above (i.e. negative yaw in ENU). Defaults of 0 keep the
+    legacy straight-ahead behaviour.
 
     Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port``.
     Listens on ``reset_port`` for reset signals.
@@ -720,7 +728,16 @@ def start_patrol_thread(
         x_max = patrol_length - launch_offset
         x = x_min
         direction = 1.0
-        qw, qz = 1.0, 0.0
+
+        # Clockwise (from above) in ENU = negative yaw about +Z.
+        theta = -math.radians(rotation_deg)
+        c_t, s_t = math.cos(theta), math.sin(theta)
+        # Yaw quaternions about +Z for the two travel directions.
+        half = theta * 0.5
+        qw_fwd, qz_fwd = math.cos(half), math.sin(half)
+        half_rev = (theta + math.pi) * 0.5
+        qw_rev, qz_rev = math.cos(half_rev), math.sin(half_rev)
+        qw, qz = qw_fwd, qz_fwd
 
         rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -730,8 +747,9 @@ def start_patrol_thread(
         omega_xy = (2.0 * math.pi / sine_period_xy) if sine_period_xy > 0 else 0.0
         omega_z = (2.0 * math.pi / sine_period_z) if sine_period_z > 0 else 0.0
 
-        log.info("Patrol thread: length=%.0fm offset=%.0fm [%.0f..%.0f] speed=%.1f m/s alt=%.0fm (port %d)",
-                 patrol_length, launch_offset, x_min, x_max, speed_ms, target_z, udp_port)
+        log.info("Patrol thread: length=%.0fm offset=%.0fm [%.0f..%.0f] speed=%.1f m/s alt=%.0fm lat=%.1fm rot=%.1f° (port %d)",
+                 patrol_length, launch_offset, x_min, x_max, speed_ms, target_z,
+                 lateral_offset, rotation_deg, udp_port)
 
         while not stop_event.is_set():
             try:
@@ -739,7 +757,7 @@ def start_patrol_thread(
                     rst_sock.recv(64)
                     x = x_min
                     direction = 1.0
-                    qw, qz = 1.0, 0.0
+                    qw, qz = qw_fwd, qz_fwd
                     t_prev = time.monotonic()
                     log.info("Patrol thread: reset to x=%.0f", x_min)
             except BlockingIOError:
@@ -753,16 +771,22 @@ def start_patrol_thread(
             if x >= x_max:
                 x = x_max
                 direction = -1.0
-                qw, qz = 0.0, 1.0
+                qw, qz = qw_rev, qz_rev
             elif x <= x_min:
                 x = x_min
                 direction = 1.0
-                qw, qz = 1.0, 0.0
+                qw, qz = qw_fwd, qz_fwd
 
-            y_offset = sine_amp_xy * math.sin(omega_xy * x) if sine_amp_xy else 0.0
+            y_local = lateral_offset
+            if sine_amp_xy:
+                y_local += sine_amp_xy * math.sin(omega_xy * x)
             z_offset = sine_amp_z * math.sin(omega_z * x) if sine_amp_z else 0.0
 
-            pkt = packer.pack(seq, t_now - t0, x, y_offset, target_z + z_offset,
+            # Rotate (x, y_local) clockwise from above by rotation_deg.
+            x_world = x * c_t - y_local * s_t
+            y_world = x * s_t + y_local * c_t
+
+            pkt = packer.pack(seq, t_now - t0, x_world, y_world, target_z + z_offset,
                               qw, 0.0, 0.0, qz)
             try:
                 sock.sendto(pkt, addr)
