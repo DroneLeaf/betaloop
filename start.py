@@ -201,6 +201,29 @@ def _render_all_templates(drone, world_name, args):
     return world_vars
 
 
+def send_bf_cli_commands(commands, host="127.0.0.1", port=5761, timeout=2.0):
+    """Send a small list of CLI commands to BF SITL over TCP."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            # Drain banner/prompt if present.
+            try:
+                sock.recv(4096)
+            except OSError:
+                pass
+            for cmd in commands:
+                sock.sendall((cmd + "\n").encode("utf-8"))
+                time.sleep(0.05)
+                try:
+                    sock.recv(4096)
+                except OSError:
+                    pass
+        return True
+    except OSError as e:
+        log.warning("Failed to send BF CLI commands to %s:%d: %s", host, port, e)
+        return False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -601,6 +624,9 @@ def main():
     log.info("Waiting for Betaflight CLI port (5761) …")
     if not wait_for_port("127.0.0.1", 5761, timeout=20):
         log.warning("Betaflight CLI port not ready — continuing anyway")
+    else:
+        # Runtime guard: ensure BOOT_GRACE never blocks arming in SITL.
+        send_bf_cli_commands(["set pwr_on_arm_grace = 0"])
     time.sleep(3)
 
     # MSP Virtual Radio
