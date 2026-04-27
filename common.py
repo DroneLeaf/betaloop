@@ -611,6 +611,11 @@ def start_chase_bridge(args, pm: ProcessManager):
 # UDP ports — must match ExternalPosePlugin <listen_port> in world SDF files.
 TARGET_UDP_PORT = 9016
 TARGET_RESET_PORT = 9017
+# Mirror port: every VisualPosePacket sent to TARGET_UDP_PORT (which Gazebo's
+# ExternalPosePlugin owns exclusively) is also sent here so sitl_redis_bridge
+# and any other observers can read ground-truth target pose without colliding
+# with Gazebo on 9016.
+TARGET_MIRROR_PORT = 9018
 
 
 def start_orbit_thread(
@@ -632,6 +637,7 @@ def start_orbit_thread(
         interval = 1.0 / 60
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = ("127.0.0.1", udp_port)
+        mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
         packer = struct.Struct("<Qd3d4d")
         seq = 0
         t0 = time.monotonic()
@@ -671,6 +677,10 @@ def start_orbit_thread(
                               qw, 0.0, 0.0, qz)
             try:
                 sock.sendto(pkt, addr)
+            except OSError:
+                pass
+            try:
+                sock.sendto(pkt, mirror_addr)
             except OSError:
                 pass
             seq += 1
@@ -719,6 +729,7 @@ def start_patrol_thread(
         interval = 1.0 / 60
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = ("127.0.0.1", udp_port)
+        mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
         packer = struct.Struct("<Qd3d4d")
         seq = 0
         t0 = time.monotonic()
@@ -789,6 +800,10 @@ def start_patrol_thread(
                               qw, 0.0, 0.0, qz)
             try:
                 sock.sendto(pkt, addr)
+            except OSError:
+                pass
+            try:
+                sock.sendto(pkt, mirror_addr)
             except OSError:
                 pass
             seq += 1
