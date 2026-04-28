@@ -188,6 +188,7 @@ def _render_all_templates(drone, world_name, args):
         target_x=getattr(args, "target_distance_x", None),
         target_y=getattr(args, "target_distance_y", None),
         clouds=getattr(args, "clouds", True),
+        cloud_density=getattr(args, "cloud_density", 0.7),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -264,6 +265,13 @@ def parse_args():
         action="store_false",
         default=True,
         help="Disable clouds in the world skybox (default: clouds on)",
+    )
+    sim.add_argument(
+        "--cloud-density",
+        dest="cloud_density",
+        type=float,
+        default=0.7,
+        help="Cloud density / humidity 0.0-1.0 (default: 0.7)",
     )
     sim.add_argument(
         "--chase-cam",

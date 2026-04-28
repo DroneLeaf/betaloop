@@ -211,6 +211,7 @@ def compute_world_vars(
     target_x: float | None = None,
     target_y: float | None = None,
     clouds: bool = True,
+    cloud_density: float = 0.7,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
@@ -248,6 +249,7 @@ def compute_world_vars(
         "patrol_length": _patrol_length,
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
+        "cloud_density": float(cloud_density),
     }
 
 

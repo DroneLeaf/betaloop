@@ -143,6 +143,8 @@ def parse_args():
                      help="Show the Gazebo GUI (default: headless)")
     sim.add_argument("--no-clouds", dest="clouds", action="store_false", default=True,
                      help="Disable clouds in the world skybox (default: clouds on)")
+    sim.add_argument("--cloud-density", dest="cloud_density", type=float, default=0.7,
+                     help="Cloud density / humidity 0.0-1.0 (default: 0.7)")
     sim.add_argument("--chase-cam", action="store_true",
                      help="Display chase camera (3rd-person SDL2 window)")
     sim.add_argument("--no-video", action="store_true",
@@ -262,6 +264,7 @@ def main():
         target_x=args.target_distance_x,
         target_y=args.target_distance_y,
         clouds=getattr(args, "clouds", True),
+        cloud_density=getattr(args, "cloud_density", 0.7),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
