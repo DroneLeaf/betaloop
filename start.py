@@ -187,6 +187,7 @@ def _render_all_templates(drone, world_name, args):
         patrol_length=args.patrol_length,
         target_x=getattr(args, "target_distance_x", None),
         target_y=getattr(args, "target_distance_y", None),
+        clouds=getattr(args, "clouds", True),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -256,6 +257,13 @@ def parse_args():
         "--gazebo",
         action="store_true",
         help="Show the Gazebo GUI (default: headless)",
+    )
+    sim.add_argument(
+        "--no-clouds",
+        dest="clouds",
+        action="store_false",
+        default=True,
+        help="Disable clouds in the world skybox (default: clouds on)",
     )
     sim.add_argument(
         "--chase-cam",

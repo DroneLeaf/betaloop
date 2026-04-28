@@ -141,6 +141,8 @@ def parse_args():
                      help="Deprecated: output height for both pilot/tracker cameras")
     sim.add_argument("--gazebo", action="store_true",
                      help="Show the Gazebo GUI (default: headless)")
+    sim.add_argument("--no-clouds", dest="clouds", action="store_false", default=True,
+                     help="Disable clouds in the world skybox (default: clouds on)")
     sim.add_argument("--chase-cam", action="store_true",
                      help="Display chase camera (3rd-person SDL2 window)")
     sim.add_argument("--no-video", action="store_true",
@@ -259,6 +261,7 @@ def main():
         patrol_length=args.patrol_length,
         target_x=args.target_distance_x,
         target_y=args.target_distance_y,
+        clouds=getattr(args, "clouds", True),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
