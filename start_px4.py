@@ -195,6 +195,9 @@ def parse_args():
                      help="Park-chase orbit centre X in metres relative to player spawn (default: 0)")
     tgt.add_argument("--target-orbit-center-y", type=float, default=None,
                      help="Park-chase orbit centre Y in metres relative to player spawn (default: 0)")
+    tgt.add_argument("--target-orbit-theta-deg", type=float, default=None,
+                     help="Park-chase target initial tangential angle theta in degrees "
+                          "(0 = +X from centre, 90 = +Y, default: 0)")
     tgt.add_argument("--patrol-length", type=float, default=None,
                      help="Patrol total distance in metres (default: 500)")
     tgt.add_argument("--target-launch-offset", type=float, default=None,
@@ -266,6 +269,7 @@ def main():
         orbit_radius=args.target_orbit_radius,
         orbit_center_x=getattr(args, "target_orbit_center_x", None),
         orbit_center_y=getattr(args, "target_orbit_center_y", None),
+        orbit_theta_deg=getattr(args, "target_orbit_theta_deg", None),
         patrol_length=args.patrol_length,
         target_x=args.target_distance_x,
         target_y=args.target_distance_y,
@@ -364,9 +368,11 @@ def main():
         target_z = args.target_altitude if args.target_altitude is not None else 50.0
         orbit_cx = args.target_orbit_center_x if args.target_orbit_center_x is not None else 0.0
         orbit_cy = args.target_orbit_center_y if args.target_orbit_center_y is not None else 0.0
+        orbit_theta = args.target_orbit_theta_deg if args.target_orbit_theta_deg is not None else 0.0
         start_orbit_thread(
             traj_stop, orbit_radius, orbit_omega, target_z,
             orbit_center_x=orbit_cx, orbit_center_y=orbit_cy,
+            orbit_theta_deg=orbit_theta,
         )
 
     elif world_entry.get("patrol_joint") and world_entry.get("target_model"):

@@ -186,6 +186,7 @@ def _render_all_templates(drone, world_name, args):
         orbit_radius=args.target_orbit_radius,
         orbit_center_x=getattr(args, "target_orbit_center_x", None),
         orbit_center_y=getattr(args, "target_orbit_center_y", None),
+        orbit_theta_deg=getattr(args, "target_orbit_theta_deg", None),
         patrol_length=args.patrol_length,
         target_x=getattr(args, "target_distance_x", None),
         target_y=getattr(args, "target_distance_y", None),
@@ -473,6 +474,13 @@ def parse_args():
         type=float,
         default=None,
         help="Park-chase orbit centre Y in metres relative to player spawn (default: 0)",
+    )
+    wld.add_argument(
+        "--target-orbit-theta-deg",
+        type=float,
+        default=None,
+        help="Park-chase target initial tangential angle theta in degrees "
+             "(0 = +X from centre, 90 = +Y, default: 0)",
     )
     wld.add_argument(
         "--patrol-length",
@@ -863,6 +871,7 @@ def main():
             orbit_stop, orbit_radius_val, orbit_omega, target_z,
             orbit_center_x=world_vars["orbit_center_x"],
             orbit_center_y=world_vars["orbit_center_y"],
+            orbit_theta_deg=world_vars["orbit_theta_deg"],
         )
 
     # ── 6c. Balloon smooth drift thread (balloon_test only) ──

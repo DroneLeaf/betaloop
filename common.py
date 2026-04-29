@@ -209,6 +209,7 @@ def compute_world_vars(
     orbit_radius: float | None = None,
     orbit_center_x: float | None = None,
     orbit_center_y: float | None = None,
+    orbit_theta_deg: float | None = None,
     patrol_length: float | None = None,
     target_x: float | None = None,
     target_y: float | None = None,
@@ -224,6 +225,8 @@ def compute_world_vars(
     _orbit_radius = orbit_radius if orbit_radius is not None else 30.0
     _orbit_cx = orbit_center_x if orbit_center_x is not None else 0.0
     _orbit_cy = orbit_center_y if orbit_center_y is not None else 0.0
+    _orbit_theta_deg = orbit_theta_deg if orbit_theta_deg is not None else 0.0
+    _orbit_theta_rad = math.radians(_orbit_theta_deg)
     speed_kmh = target_speed if target_speed is not None else 5.4
     orbit_speed = (speed_kmh / 3.6) / _orbit_radius
 
@@ -250,6 +253,11 @@ def compute_world_vars(
         "orbit_radius": _orbit_radius,
         "orbit_center_x": _orbit_cx,
         "orbit_center_y": _orbit_cy,
+        "orbit_theta_deg": _orbit_theta_deg,
+        "orbit_theta_rad": _orbit_theta_rad,
+        "orbit_spawn_x": _orbit_cx + _orbit_radius * math.cos(_orbit_theta_rad),
+        "orbit_spawn_y": _orbit_cy + _orbit_radius * math.sin(_orbit_theta_rad),
+        "orbit_spawn_yaw": _orbit_theta_rad + math.pi / 2,
         "target_altitude": _target_z,
         "target_x": _target_x, "target_y": _target_y, "target_z": _target_z,
         "patrol_length": _patrol_length,
@@ -637,6 +645,7 @@ def start_orbit_thread(
     reset_port: int = TARGET_RESET_PORT,
     orbit_center_x: float = 0.0,
     orbit_center_y: float = 0.0,
+    orbit_theta_deg: float = 0.0,
 ) -> threading.Thread:
     """Spawn a daemon thread that drives a circular orbit via UDP.
 
@@ -653,7 +662,8 @@ def start_orbit_thread(
         packer = struct.Struct("<Qd3d4d")
         seq = 0
         t0 = time.monotonic()
-        theta = 0.0
+        theta = math.radians(orbit_theta_deg)
+        theta0 = theta
         t_prev = t0
 
         rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -661,17 +671,17 @@ def start_orbit_thread(
         rst_sock.bind(("0.0.0.0", reset_port))
         rst_sock.setblocking(False)
 
-        log.info("Orbit thread: R=%.1fm omega=%.4f rad/s alt=%.0fm center=(%.1f,%.1f) (port %d)",
+        log.info("Orbit thread: R=%.1fm omega=%.4f rad/s alt=%.0fm center=(%.1f,%.1f) theta0=%.1fdeg (port %d)",
                  orbit_radius, orbit_omega, target_z,
-                 orbit_center_x, orbit_center_y, udp_port)
+                 orbit_center_x, orbit_center_y, orbit_theta_deg, udp_port)
 
         while not stop_event.is_set():
             try:
                 while True:
                     rst_sock.recv(64)
-                    theta = 0.0
+                    theta = theta0
                     t_prev = time.monotonic()
-                    log.info("Orbit thread: reset to theta=0")
+                    log.info("Orbit thread: reset to theta=%.1fdeg", orbit_theta_deg)
             except BlockingIOError:
                 pass
 
