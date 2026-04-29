@@ -207,6 +207,8 @@ def compute_world_vars(
     target_altitude: float | None = None,
     target_speed: float | None = None,
     orbit_radius: float | None = None,
+    orbit_center_x: float | None = None,
+    orbit_center_y: float | None = None,
     patrol_length: float | None = None,
     target_x: float | None = None,
     target_y: float | None = None,
@@ -220,6 +222,8 @@ def compute_world_vars(
     ref = DRONE_REFS[drone]
 
     _orbit_radius = orbit_radius if orbit_radius is not None else 30.0
+    _orbit_cx = orbit_center_x if orbit_center_x is not None else 0.0
+    _orbit_cy = orbit_center_y if orbit_center_y is not None else 0.0
     speed_kmh = target_speed if target_speed is not None else 5.4
     orbit_speed = (speed_kmh / 3.6) / _orbit_radius
 
@@ -244,6 +248,8 @@ def compute_world_vars(
         "drone_name": drone,
         "orbit_speed": orbit_speed,
         "orbit_radius": _orbit_radius,
+        "orbit_center_x": _orbit_cx,
+        "orbit_center_y": _orbit_cy,
         "target_altitude": _target_z,
         "target_x": _target_x, "target_y": _target_y, "target_z": _target_z,
         "patrol_length": _patrol_length,
@@ -629,6 +635,8 @@ def start_orbit_thread(
     target_z: float = 50.0,
     udp_port: int = TARGET_UDP_PORT,
     reset_port: int = TARGET_RESET_PORT,
+    orbit_center_x: float = 0.0,
+    orbit_center_y: float = 0.0,
 ) -> threading.Thread:
     """Spawn a daemon thread that drives a circular orbit via UDP.
 
@@ -653,8 +661,9 @@ def start_orbit_thread(
         rst_sock.bind(("0.0.0.0", reset_port))
         rst_sock.setblocking(False)
 
-        log.info("Orbit thread: R=%.1fm omega=%.4f rad/s alt=%.0fm (port %d)",
-                 orbit_radius, orbit_omega, target_z, udp_port)
+        log.info("Orbit thread: R=%.1fm omega=%.4f rad/s alt=%.0fm center=(%.1f,%.1f) (port %d)",
+                 orbit_radius, orbit_omega, target_z,
+                 orbit_center_x, orbit_center_y, udp_port)
 
         while not stop_event.is_set():
             try:
@@ -671,8 +680,8 @@ def start_orbit_thread(
             t_prev = t_now
             theta += orbit_omega * dt
 
-            x = orbit_radius * math.cos(theta)
-            y = orbit_radius * math.sin(theta)
+            x = orbit_center_x + orbit_radius * math.cos(theta)
+            y = orbit_center_y + orbit_radius * math.sin(theta)
             yaw = theta + math.pi / 2
             qw = math.cos(yaw / 2)
             qz = math.sin(yaw / 2)

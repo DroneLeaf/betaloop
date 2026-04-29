@@ -184,6 +184,8 @@ def _render_all_templates(drone, world_name, args):
         target_altitude=args.target_altitude,
         target_speed=args.target_speed,
         orbit_radius=args.target_orbit_radius,
+        orbit_center_x=getattr(args, "target_orbit_center_x", None),
+        orbit_center_y=getattr(args, "target_orbit_center_y", None),
         patrol_length=args.patrol_length,
         target_x=getattr(args, "target_distance_x", None),
         target_y=getattr(args, "target_distance_y", None),
@@ -459,6 +461,18 @@ def parse_args():
         type=float,
         default=None,
         help="Park-chase orbit radius in metres (default: 30)",
+    )
+    wld.add_argument(
+        "--target-orbit-center-x",
+        type=float,
+        default=None,
+        help="Park-chase orbit centre X in metres relative to player spawn (default: 0)",
+    )
+    wld.add_argument(
+        "--target-orbit-center-y",
+        type=float,
+        default=None,
+        help="Park-chase orbit centre Y in metres relative to player spawn (default: 0)",
     )
     wld.add_argument(
         "--patrol-length",
@@ -845,7 +859,11 @@ def main():
         orbit_radius_val = world_vars["orbit_radius"]
         orbit_omega = world_vars["orbit_speed"]  # rad/s = v_tangential / R
         target_z = world_vars["target_z"]
-        orbit_thread = start_orbit_thread(orbit_stop, orbit_radius_val, orbit_omega, target_z)
+        orbit_thread = start_orbit_thread(
+            orbit_stop, orbit_radius_val, orbit_omega, target_z,
+            orbit_center_x=world_vars["orbit_center_x"],
+            orbit_center_y=world_vars["orbit_center_y"],
+        )
 
     # ── 6c. Balloon smooth drift thread (balloon_test only) ──
     wind_thread = None
