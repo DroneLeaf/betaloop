@@ -422,13 +422,20 @@ def parse_args():
         "--params",
         type=str,
         default=None,
-        help="Path to a key=value .params file for bf_sim_bridge model parameters",
+        help="Path to a model-ready JSON params file for bf_sim_bridge model parameters",
     )
     slk.add_argument(
         "--telem-port",
         type=int,
         default=0,
         help="UDP port for bf_sim_bridge to send raw Simulink state to sitl_redis_bridge (0=off)",
+    )
+    slk.add_argument(
+        "--launcher-port",
+        type=int,
+        default=0,
+        help="UDP port for bf_sim_bridge to receive launcher telemetry; pan->yaw, "
+             "tilt->pitch (roll=0) drive the pedestal attitude (0=off)",
     )
 
     # ── World Settings ───────────────────────────────────────────────────
@@ -641,6 +648,8 @@ def main():
             bridge_args += ["--params", os.path.abspath(args.params)]
         if args.telem_port:
             bridge_args += ["--telem-port", str(args.telem_port)]
+        if args.launcher_port:
+            bridge_args += ["--launcher-port", str(args.launcher_port)]
         log.info("Starting bf_sim_bridge (Simulink dynamics)")
         bf_bridge_proc = pm.spawn(bridge_args)
         time.sleep(2)

@@ -164,7 +164,7 @@ def parse_args():
     brg.add_argument("--sim-lib", default=SIMULINK_LIB,
                      help="Path to libinterface_simulink.so")
     brg.add_argument("--params", default=None,
-                     help="Path to key=value parameter overrides file")
+                     help="Path to a model-ready JSON params file for px4_sim_bridge")
     brg.add_argument("--tcp-port", type=int, default=4560,
                      help="TCP port for PX4 simulator connection (default: 4560)")
     brg.add_argument("--telem-port", type=int, default=0,
