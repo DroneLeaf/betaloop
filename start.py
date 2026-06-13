@@ -192,6 +192,8 @@ def _render_all_templates(drone, world_name, args):
         target_y=getattr(args, "target_distance_y", None),
         clouds=getattr(args, "clouds", True),
         cloud_density=getattr(args, "cloud_density", 0.7),
+        pedestal_radius=getattr(args, "pedestal_radius", None),
+        pedestal_height=getattr(args, "pedestal_height", None),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -436,6 +438,20 @@ def parse_args():
         default=0,
         help="UDP port for bf_sim_bridge to receive launcher telemetry; pan->yaw, "
              "tilt->pitch (roll=0) drive the pedestal attitude (0=off)",
+    )
+    slk.add_argument(
+        "--pedestal-radius",
+        type=float,
+        default=None,
+        help="Pedestal launch-stand radius (m) for the vis cylinder under the "
+             "drone; matches the Simulink pedestal_radius (default 0.5)",
+    )
+    slk.add_argument(
+        "--pedestal-height",
+        type=float,
+        default=None,
+        help="Pedestal launch-stand height (m) for the vis cylinder under the "
+             "drone; matches the Simulink pedestal_height (default 0.30)",
     )
 
     # ── World Settings ───────────────────────────────────────────────────

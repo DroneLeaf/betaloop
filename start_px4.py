@@ -171,6 +171,12 @@ def parse_args():
                      help="UDP port for raw telemetry output (0=off)")
     brg.add_argument("--mavlink-port", type=int, default=14560,
                      help="MAVLink UDP port for OSD telemetry (default: 14560)")
+    brg.add_argument("--pedestal-radius", type=float, default=None,
+                     help="Pedestal vis-cylinder radius (m); matches Simulink "
+                          "pedestal_radius (default 0.5)")
+    brg.add_argument("--pedestal-height", type=float, default=None,
+                     help="Pedestal vis-cylinder height (m); matches Simulink "
+                          "pedestal_height (default 0.30)")
 
     gps = parser.add_argument_group("GPS reference")
     gps.add_argument("--lat", type=float, default=47.397742,
@@ -275,6 +281,8 @@ def main():
         target_y=args.target_distance_y,
         clouds=getattr(args, "clouds", True),
         cloud_density=getattr(args, "cloud_density", 0.7),
+        pedestal_radius=getattr(args, "pedestal_radius", None),
+        pedestal_height=getattr(args, "pedestal_height", None),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 

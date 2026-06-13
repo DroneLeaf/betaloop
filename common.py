@@ -215,12 +215,21 @@ def compute_world_vars(
     target_y: float | None = None,
     clouds: bool = True,
     cloud_density: float = 0.7,
+    pedestal_radius: float | None = None,
+    pedestal_height: float | None = None,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
     Returns a dict suitable for rendering world SDF templates.
     """
     ref = DRONE_REFS[drone]
+
+    # Pedestal launch-stand dimensions (vis-only cylinder under the drone).
+    # Defaults mirror the Simulink model_parameters (pedestal_radius=0.5,
+    # pedestal_height=0.30); leaf-sim-ui overrides them from the per-drone
+    # simulink params so the rendered cylinder matches the physics pedestal.
+    _pedestal_radius = pedestal_radius if pedestal_radius is not None else 0.5
+    _pedestal_height = pedestal_height if pedestal_height is not None else 0.30
 
     _orbit_radius = orbit_radius if orbit_radius is not None else 30.0
     _orbit_cx = orbit_center_x if orbit_center_x is not None else 0.0
@@ -264,6 +273,8 @@ def compute_world_vars(
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
         "cloud_density": float(cloud_density),
+        "pedestal_radius": _pedestal_radius,
+        "pedestal_height": _pedestal_height,
     }
 
 
