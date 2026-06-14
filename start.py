@@ -166,6 +166,7 @@ def _render_all_templates(drone, world_name, args):
         tracker_vfov_deg=args.tracker_vfov,
         fpv_cam_width=args.fpv_cam_width,
         tracker_cam_width=args.tracker_cam_width,
+        tracker_cam_fps=getattr(args, "tracker_cam_fps", 30),
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -393,6 +394,17 @@ def parse_args():
                      help="Tracker camera output width in pixels (default: 640)")
     drn.add_argument("--tracker-cam-height", type=float, default=480,
                      help="Tracker camera output height in pixels (default: 480)")
+    drn.add_argument("--tracker-cam-fps", type=int, default=30,
+                     help="Tracker camera Gazebo update rate in Hz; also the RTSP "
+                          "stream framerate (default: 30)")
+    # Tracker camera RTSP stream (no OSD) — pushed to an external RTSP server.
+    drn.add_argument("--tracker-rtsp", type=str, default=None, metavar="URL",
+                     help="Push the (clean, no-OSD) tracker camera feed as H.264 to "
+                          "this RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker (off if unset)")
+    drn.add_argument("--tracker-rtsp-bitrate", type=str, default="4M",
+                     help="Tracker RTSP libx264 target bitrate (default: 4M)")
+    drn.add_argument("--tracker-rtsp-preset", type=str, default="ultrafast",
+                     help="Tracker RTSP libx264 preset (default: ultrafast)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     drn.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -849,6 +861,18 @@ def main():
             tracker_cmd.extend(["--out-width", str(args.tracker_cam_width), "--out-height", str(args.tracker_cam_height)])
             if args.no_display:
                 tracker_cmd.append("--hidden")
+            # Optional RTSP push of the clean (no-OSD) tracker feed.
+            if getattr(args, "tracker_rtsp", None):
+                tracker_cmd.extend([
+                    "--rtsp", args.tracker_rtsp,
+                    "--stream-fps", str(getattr(args, "tracker_cam_fps", 30)),
+                    "--stream-bitrate", str(getattr(args, "tracker_rtsp_bitrate", "4M")),
+                    "--stream-preset", str(getattr(args, "tracker_rtsp_preset", "ultrafast")),
+                ])
+                log.info("Tracker RTSP stream → %s (%dfps, %s, preset=%s)",
+                         args.tracker_rtsp, getattr(args, "tracker_cam_fps", 30),
+                         getattr(args, "tracker_rtsp_bitrate", "4M"),
+                         getattr(args, "tracker_rtsp_preset", "ultrafast"))
             tracker_bridge_proc = pm.spawn(
                 tracker_cmd,
                 stdout=subprocess.DEVNULL,

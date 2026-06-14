@@ -140,6 +140,7 @@ def compute_model_vars(
     tracker_vfov_deg: float = 98.9,
     fpv_cam_width: int = 640,
     tracker_cam_width: int = 640,
+    tracker_cam_fps: int = 30,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -184,6 +185,7 @@ def compute_model_vars(
         "tracker_img_width": tracker_img_width,
         "fpv_img_height": fpv_img_height,
         "tracker_img_height": tracker_img_height,
+        "tracker_cam_fps": max(1, int(tracker_cam_fps)),
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),

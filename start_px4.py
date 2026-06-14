@@ -134,6 +134,8 @@ def parse_args():
                      help="Tracker camera source width in pixels (default: 640)")
     sim.add_argument("--tracker-cam-height", type=float, default=480,
                      help="Tracker camera output height in pixels (default: 480)")
+    sim.add_argument("--tracker-cam-fps", type=int, default=30,
+                     help="Tracker camera Gazebo update rate in Hz (default: 30)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     sim.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -267,6 +269,7 @@ def main():
         tracker_vfov_deg=args.tracker_vfov,
         fpv_cam_width=args.fpv_cam_width,
         tracker_cam_width=args.tracker_cam_width,
+        tracker_cam_fps=getattr(args, "tracker_cam_fps", 30),
     )
     world_vars = compute_world_vars(
         args.drone, args.world,
