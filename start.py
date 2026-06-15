@@ -405,6 +405,12 @@ def parse_args():
                      help="Tracker RTSP libx264 target bitrate (default: 4M)")
     drn.add_argument("--tracker-rtsp-preset", type=str, default="ultrafast",
                      help="Tracker RTSP libx264 preset (default: ultrafast)")
+    drn.add_argument("--tracker-rtsp-tune", type=str, default="zerolatency",
+                     help="Tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--tracker-rtsp-width", type=int, default=0,
+                     help="Explicit RTSP stream output width in px (0=camera width)")
+    drn.add_argument("--tracker-rtsp-height", type=int, default=0,
+                     help="Explicit RTSP stream output height in px (0=camera height)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     drn.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -868,11 +874,19 @@ def main():
                     "--stream-fps", str(getattr(args, "tracker_cam_fps", 30)),
                     "--stream-bitrate", str(getattr(args, "tracker_rtsp_bitrate", "4M")),
                     "--stream-preset", str(getattr(args, "tracker_rtsp_preset", "ultrafast")),
+                    "--stream-tune", str(getattr(args, "tracker_rtsp_tune", "zerolatency")),
                 ])
-                log.info("Tracker RTSP stream → %s (%dfps, %s, preset=%s)",
+                rtsp_w = int(getattr(args, "tracker_rtsp_width", 0) or 0)
+                rtsp_h = int(getattr(args, "tracker_rtsp_height", 0) or 0)
+                if rtsp_w > 0 and rtsp_h > 0:
+                    tracker_cmd.extend(["--stream-width", str(rtsp_w),
+                                        "--stream-height", str(rtsp_h)])
+                log.info("Tracker RTSP stream → %s (%dfps, %s, preset=%s, tune=%s, res=%s)",
                          args.tracker_rtsp, getattr(args, "tracker_cam_fps", 30),
                          getattr(args, "tracker_rtsp_bitrate", "4M"),
-                         getattr(args, "tracker_rtsp_preset", "ultrafast"))
+                         getattr(args, "tracker_rtsp_preset", "ultrafast"),
+                         getattr(args, "tracker_rtsp_tune", "zerolatency"),
+                         f"{rtsp_w}x{rtsp_h}" if rtsp_w > 0 and rtsp_h > 0 else "camera")
             tracker_bridge_proc = pm.spawn(
                 tracker_cmd,
                 stdout=subprocess.DEVNULL,
