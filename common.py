@@ -141,6 +141,13 @@ def compute_model_vars(
     fpv_cam_width: int = 640,
     tracker_cam_width: int = 640,
     tracker_cam_fps: int = 30,
+    thermal_cam_enabled: bool = False,
+    thermal_cam_pitch: float = -80.0,
+    thermal_cam_roll: float = 0.0,
+    thermal_hfov_deg: float = 114.6,
+    thermal_vfov_deg: float = 98.9,
+    thermal_cam_width: int = 640,
+    thermal_cam_fps: int = 30,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -172,6 +179,15 @@ def compute_model_vars(
     tracker_img_height = round(tracker_img_width * math.tan(math.radians(tracker_vfov_deg) / 2)
                                / math.tan(tracker_hfov_rad / 2))
 
+    # Thermal camera (optional, dedicated sensor mirroring the tracker cam;
+    # white-hot styling is applied downstream in gz_image_bridge --thermal).
+    thermal_cam_pitch_rad = math.radians(thermal_cam_pitch)
+    thermal_cam_roll_rad = math.radians(thermal_cam_roll)
+    thermal_hfov_rad = math.radians(thermal_hfov_deg)
+    thermal_img_width = max(64, int(thermal_cam_width))
+    thermal_img_height = round(thermal_img_width * math.tan(math.radians(thermal_vfov_deg) / 2)
+                               / math.tan(thermal_hfov_rad / 2))
+
     dd = ref["default_damping"]
     do = damping_overrides or {}
     model_vars = {
@@ -186,6 +202,13 @@ def compute_model_vars(
         "fpv_img_height": fpv_img_height,
         "tracker_img_height": tracker_img_height,
         "tracker_cam_fps": max(1, int(tracker_cam_fps)),
+        "thermal_cam_enabled": bool(thermal_cam_enabled),
+        "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
+        "thermal_cam_roll_rad": thermal_cam_roll_rad,
+        "thermal_hfov_rad": thermal_hfov_rad,
+        "thermal_img_width": thermal_img_width,
+        "thermal_img_height": thermal_img_height,
+        "thermal_cam_fps": max(1, int(thermal_cam_fps)),
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),

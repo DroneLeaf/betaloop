@@ -167,6 +167,13 @@ def _render_all_templates(drone, world_name, args):
         fpv_cam_width=args.fpv_cam_width,
         tracker_cam_width=args.tracker_cam_width,
         tracker_cam_fps=getattr(args, "tracker_cam_fps", 30),
+        thermal_cam_enabled=getattr(args, "thermal_cam", False),
+        thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
+        thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
+        thermal_hfov_deg=getattr(args, "thermal_hfov", 114.6),
+        thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
+        thermal_cam_width=getattr(args, "thermal_cam_width", 640),
+        thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -411,6 +418,38 @@ def parse_args():
                      help="Explicit RTSP stream output width in px (0=camera width)")
     drn.add_argument("--tracker-rtsp-height", type=int, default=0,
                      help="Explicit RTSP stream output height in px (0=camera height)")
+
+    # ── Thermal camera (optional dedicated sensor; white-hot, mirrors tracker) ──
+    drn.add_argument("--thermal-cam", action="store_true",
+                     help="Enable the simulated thermal camera (a 2nd tracker feed, "
+                          "white-hot grayscale, dedicated Gazebo sensor)")
+    drn.add_argument("--thermal-cam-pitch", type=float, default=-80.0,
+                     help="Thermal camera tilt in degrees (default: -80)")
+    drn.add_argument("--thermal-cam-roll", type=float, default=0.0,
+                     help="Thermal camera twist in degrees (default: 0)")
+    drn.add_argument("--thermal-hfov", type=float, default=114.6,
+                     help="Thermal camera horizontal FOV in degrees (default: 114.6)")
+    drn.add_argument("--thermal-vfov", type=float, default=98.9,
+                     help="Thermal camera vertical FOV in degrees (default: 98.9)")
+    drn.add_argument("--thermal-cam-width", type=float, default=640,
+                     help="Thermal camera output width in px (default: 640)")
+    drn.add_argument("--thermal-cam-height", type=float, default=480,
+                     help="Thermal camera output height in px (default: 480)")
+    drn.add_argument("--thermal-cam-fps", type=int, default=30,
+                     help="Thermal camera Gazebo update rate / RTSP framerate (default: 30)")
+    drn.add_argument("--thermal-rtsp", type=str, default=None, metavar="URL",
+                     help="Push the thermal feed as H.264 to this RTSP URL "
+                          "(off if unset), e.g. rtsp://127.0.0.1:8554/thermal")
+    drn.add_argument("--thermal-rtsp-bitrate", type=str, default="4M",
+                     help="Thermal RTSP libx264 target bitrate (default: 4M)")
+    drn.add_argument("--thermal-rtsp-preset", type=str, default="ultrafast",
+                     help="Thermal RTSP libx264 preset (default: ultrafast)")
+    drn.add_argument("--thermal-rtsp-tune", type=str, default="zerolatency",
+                     help="Thermal RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--thermal-rtsp-width", type=int, default=0,
+                     help="Explicit thermal RTSP output width in px (0=camera width)")
+    drn.add_argument("--thermal-rtsp-height", type=int, default=0,
+                     help="Explicit thermal RTSP output height in px (0=camera height)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     drn.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -892,6 +931,45 @@ def main():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+        # Thermal camera (optional — a 2nd tracker feed, white-hot, no OSD).
+        if getattr(args, "thermal_cam", False):
+            log.info("Discovering thermal camera topic …")
+            thermal_topic = discover_camera_topic(
+                name_hint="fpv_thermal_cam",
+                timeout=30,
+                model_hint=args.topic_model_hint,
+            )
+            if not thermal_topic:
+                log.warning("Thermal camera topic not found — skipping "
+                            "(is the thermal sensor in the model?)")
+            else:
+                log.info("Found thermal camera topic: %s", thermal_topic)
+                thermal_cmd = [IMAGE_BRIDGE, thermal_topic, "--display", "--no-osd", "--thermal"]
+                thermal_cmd.extend(["--out-width", str(args.thermal_cam_width),
+                                    "--out-height", str(args.thermal_cam_height)])
+                if args.no_display:
+                    thermal_cmd.append("--hidden")
+                if getattr(args, "thermal_rtsp", None):
+                    thermal_cmd.extend([
+                        "--rtsp", args.thermal_rtsp,
+                        "--stream-fps", str(getattr(args, "thermal_cam_fps", 30)),
+                        "--stream-bitrate", str(getattr(args, "thermal_rtsp_bitrate", "4M")),
+                        "--stream-preset", str(getattr(args, "thermal_rtsp_preset", "ultrafast")),
+                        "--stream-tune", str(getattr(args, "thermal_rtsp_tune", "zerolatency")),
+                    ])
+                    t_w = int(getattr(args, "thermal_rtsp_width", 0) or 0)
+                    t_h = int(getattr(args, "thermal_rtsp_height", 0) or 0)
+                    if t_w > 0 and t_h > 0:
+                        thermal_cmd.extend(["--stream-width", str(t_w),
+                                            "--stream-height", str(t_h)])
+                    log.info("Thermal RTSP stream → %s (%dfps, %s, preset=%s, tune=%s, res=%s)",
+                             args.thermal_rtsp, getattr(args, "thermal_cam_fps", 30),
+                             getattr(args, "thermal_rtsp_bitrate", "4M"),
+                             getattr(args, "thermal_rtsp_preset", "ultrafast"),
+                             getattr(args, "thermal_rtsp_tune", "zerolatency"),
+                             f"{t_w}x{t_h}" if t_w > 0 and t_h > 0 else "camera")
+                pm.spawn(thermal_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # ── 6. Print connection info ──
     _print_status(
