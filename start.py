@@ -497,6 +497,24 @@ def parse_args():
              "tilt->pitch (roll=0) drive the pedestal attitude (0=off)",
     )
     slk.add_argument(
+        "--home-lat",
+        type=float,
+        default=None,
+        help="SITL virtual-GPS home latitude in degrees (bridge default: 24.128861, UAE)",
+    )
+    slk.add_argument(
+        "--home-lon",
+        type=float,
+        default=None,
+        help="SITL virtual-GPS home longitude in degrees (bridge default: 55.785944, UAE)",
+    )
+    slk.add_argument(
+        "--home-alt",
+        type=float,
+        default=None,
+        help="SITL virtual-GPS home altitude (MSL, metres) (bridge default: 0)",
+    )
+    slk.add_argument(
         "--pedestal-radius",
         type=float,
         default=None,
@@ -723,6 +741,12 @@ def main():
             bridge_args += ["--telem-port", str(args.telem_port)]
         if args.launcher_port:
             bridge_args += ["--launcher-port", str(args.launcher_port)]
+        if args.home_lat is not None:
+            bridge_args += ["--home-lat", str(args.home_lat)]
+        if args.home_lon is not None:
+            bridge_args += ["--home-lon", str(args.home_lon)]
+        if args.home_alt is not None:
+            bridge_args += ["--home-alt", str(args.home_alt)]
         log.info("Starting bf_sim_bridge (Simulink dynamics)")
         bf_bridge_proc = pm.spawn(bridge_args)
         time.sleep(2)
