@@ -178,7 +178,7 @@ def compute_model_vars(
     tracker_narrow_cam_roll_rad = math.radians(tracker_narrow_cam_roll)
 
     # Derive source heights from HFOV/VFOV (stretched to output later).
-    # Tracker (wide+narrow) and thermal are spherical/fisheye (wideanglecamera).
+    # Wide tracker is spherical/fisheye (wideanglecamera); narrow + thermal rectilinear.
     fpv_hfov_rad = math.radians(fpv_hfov_deg)
     tracker_wide_hfov_rad = math.radians(tracker_wide_hfov_deg)
     tracker_narrow_hfov_rad = math.radians(tracker_narrow_hfov_deg)
@@ -218,7 +218,7 @@ def compute_model_vars(
         "tracker_wide_img_width": tracker_wide_img_width,
         "tracker_wide_img_height": tracker_wide_img_height,
         "tracker_wide_cam_fps": max(1, int(tracker_wide_cam_fps)),
-        # Tracker NARROW camera — spherical/fisheye, narrower FOV
+        # Tracker NARROW camera — rectilinear, narrower FOV
         "tracker_narrow_enabled": bool(tracker_narrow_enabled),
         "tracker_narrow_cam_pitch_rad": tracker_narrow_cam_pitch_rad,
         "tracker_narrow_cam_roll_rad": tracker_narrow_cam_roll_rad,
@@ -226,7 +226,7 @@ def compute_model_vars(
         "tracker_narrow_img_width": tracker_narrow_img_width,
         "tracker_narrow_img_height": tracker_narrow_img_height,
         "tracker_narrow_cam_fps": max(1, int(tracker_narrow_cam_fps)),
-        # Thermal camera — spherical/fisheye, white-hot downstream
+        # Thermal camera — rectilinear, white-hot downstream
         "thermal_cam_enabled": bool(thermal_cam_enabled),
         "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
         "thermal_cam_roll_rad": thermal_cam_roll_rad,
