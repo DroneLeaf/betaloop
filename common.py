@@ -591,7 +591,10 @@ def start_fpv_bridge(args, pm: ProcessManager, osd_args=None):
             sys.exit(1)
     log.info("FPV topic: %s", topic)
 
-    bridge_cmd = [IMAGE_BRIDGE, topic, "--display"]
+    # SHM + RTSP are always active; the SDL2 window (--display) is added ONLY
+    # when not headless. --no-display runs the bridge truly headless (no SDL2
+    # window/overhead, no SDL2 build dependency) — better performance.
+    bridge_cmd = [IMAGE_BRIDGE, topic]
     cam_width = int(getattr(args, "fpv_cam_width", getattr(args, "cam_width", 640)))
     cam_height = int(getattr(args, "fpv_cam_height", getattr(args, "cam_height", 480)))
     bridge_cmd.extend(["--out-width", str(cam_width), "--out-height", str(cam_height)])
@@ -599,8 +602,7 @@ def start_fpv_bridge(args, pm: ProcessManager, osd_args=None):
         bridge_cmd.extend(osd_args)
     else:
         bridge_cmd.append("--no-osd")
-    if args.no_display:
-        bridge_cmd.append("--hidden")
+    bridge_cmd.append("--no-display" if args.no_display else "--display")
 
     proc = pm.spawn(bridge_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     flags = fcntl.fcntl(proc.stderr, fcntl.F_GETFL)
@@ -652,11 +654,10 @@ def start_chase_bridge(args, pm: ProcessManager):
         return None
 
     log.info("Chase topic: %s", chase_topic)
-    chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
+    chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
     # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
     chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
-    if getattr(args, "no_display", False):
-        chase_cmd.append("--hidden")
+    chase_cmd.append("--no-display" if getattr(args, "no_display", False) else "--display")
     return pm.spawn(chase_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

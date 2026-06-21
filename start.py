@@ -843,16 +843,18 @@ def main():
                 else:
                     log.info("Found chase camera topic: %s", chase_topic)
 
-        # Start FPV bridge (OSD always on)
+        # Start FPV bridge (OSD always on). SHM + RTSP are always active; the
+        # SDL2 window (--display) is added ONLY when not headless. --no-display
+        # runs the bridge truly headless (no SDL2 window/overhead, and no SDL2
+        # build dependency) — better performance for UI/RTSP/tracker workflows.
         bridge_cmd = [
-            IMAGE_BRIDGE, topic, "--display",
+            IMAGE_BRIDGE, topic,
             "--osd", "--msp-port", str(args.msp_port),
             "--cam-pitch", str(args.cam_pitch),
             "--out-width", str(args.fpv_cam_width),
             "--out-height", str(args.fpv_cam_height),
         ]
-        if args.no_display:
-            bridge_cmd.append("--hidden")
+        bridge_cmd.append("--no-display" if args.no_display else "--display")
 
         # Per-world target proximity detection
         target_model = world_entry.get("target_model")
@@ -898,14 +900,13 @@ def main():
             sys.exit(1)
         log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-        # Chase camera (optional, always --display for rendering)
-        # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
+        # Chase camera (optional). Hardcoded 4:3 resolution, independent of
+        # FPV/tracker cam settings. --display (SDL2 window) only when not headless.
         if chase_topic:
             log.info("Starting chase camera bridge (no OSD)")
-            chase_cmd = [IMAGE_BRIDGE, chase_topic, "--display", "--no-osd"]
+            chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
             chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
-            if args.no_display:
-                chase_cmd.append("--hidden")
+            chase_cmd.append("--no-display" if args.no_display else "--display")
             chase_bridge_proc = pm.spawn(
                 chase_cmd,
                 stdout=subprocess.DEVNULL,
@@ -926,10 +927,9 @@ def main():
             log.warning("Tracker camera topic not found — skipping")
         else:
             log.info("Found tracker camera topic: %s", tracker_topic)
-            tracker_cmd = [IMAGE_BRIDGE, tracker_topic, "--display", "--no-osd"]
+            tracker_cmd = [IMAGE_BRIDGE, tracker_topic, "--no-osd"]
             tracker_cmd.extend(["--out-width", str(args.tracker_cam_width), "--out-height", str(args.tracker_cam_height)])
-            if args.no_display:
-                tracker_cmd.append("--hidden")
+            tracker_cmd.append("--no-display" if args.no_display else "--display")
             # Optional RTSP push of the clean (no-OSD) tracker feed.
             if getattr(args, "tracker_rtsp", None):
                 tracker_cmd.extend([
@@ -969,11 +969,10 @@ def main():
                             "(is the thermal sensor in the model?)")
             else:
                 log.info("Found thermal camera topic: %s", thermal_topic)
-                thermal_cmd = [IMAGE_BRIDGE, thermal_topic, "--display", "--no-osd", "--thermal"]
+                thermal_cmd = [IMAGE_BRIDGE, thermal_topic, "--no-osd", "--thermal"]
                 thermal_cmd.extend(["--out-width", str(args.thermal_cam_width),
                                     "--out-height", str(args.thermal_cam_height)])
-                if args.no_display:
-                    thermal_cmd.append("--hidden")
+                thermal_cmd.append("--no-display" if args.no_display else "--display")
                 if getattr(args, "thermal_rtsp", None):
                     thermal_cmd.extend([
                         "--rtsp", args.thermal_rtsp,
