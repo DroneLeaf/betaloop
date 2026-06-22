@@ -42,9 +42,11 @@ import time
 
 from common import (
     AEROLOOP_HOME,
+    DEFAULT_TARGET_DRONE,
     DRONE_REFS,
     IMAGE_BRIDGE,
     SIMULINK_LIB,
+    TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
@@ -96,7 +98,7 @@ DEFAULT_DRONE = "rocket_drone"
 #   gz_name      — Gazebo <world name> element
 #   target_model — SDF model name of the target (for proximity OSD)
 #   target_link  — link inside target model whose world pose to track
-#   target_bbox  — half-extents "X,Y,Z" in metres (axis-aligned)
+#   target_drone — True if the target is a selectable drone (bbox from TARGET_REFS)
 #   patrol_joint — prismatic joint name for patrol reversal (patrol_park only)
 WORLD_MAP = {
     "park_chase": {
@@ -104,7 +106,7 @@ WORLD_MAP = {
         "gz_name":      "fpv_chase_park",
         "target_model": "moving_target_drone",
         "target_link":  "geranium_link",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
         "orbit_drive":  True,
     },
     "patrol_park": {
@@ -112,14 +114,14 @@ WORLD_MAP = {
         "gz_name":      "fpv_patrol_park",
         "target_model": "patrol_target_drone",
         "target_link":  "geranium_link",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
         "patrol_joint": "patrol_joint",
     },
     "collision_test": {
         "sim_world":    "rocket_drone_collision_test_vis.sdf",
         "gz_name":      "collision_test",
         "target_model": "collision_test_target",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
     },
     "balloon_test": {
         "sim_world":    "rocket_drone_balloon_test_vis.sdf",
@@ -203,6 +205,7 @@ def _render_all_templates(drone, world_name, args):
         cloud_density=getattr(args, "cloud_density", 0.7),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
+        target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -699,6 +702,13 @@ def parse_args():
         help="Uniform scale multiplier for the target hit box (default: 1.0)",
     )
     wld.add_argument(
+        "--target-drone",
+        choices=list(TARGET_REFS.keys()),
+        default=DEFAULT_TARGET_DRONE,
+        help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE}; "
+             f"choices: {', '.join(TARGET_REFS)})",
+    )
+    wld.add_argument(
         "--wind-intensity",
         type=float,
         default=None,
@@ -901,7 +911,9 @@ def main():
             # Per-world target proximity detection
             target_model = world_entry.get("target_model")
             target_link  = world_entry.get("target_link")
-            target_bbox  = world_entry.get("target_bbox")
+            target_bbox  = (TARGET_REFS[args.target_drone]["bbox"]
+                            if world_entry.get("target_drone")
+                            else world_entry.get("target_bbox"))
             if target_model:
                 bridge_cmd.extend(["--target-model", target_model])
                 if target_link:

@@ -36,8 +36,10 @@ import time
 from common import (
     AEROLOOP_HOME,
     DEFAULT_DRONE,
+    DEFAULT_TARGET_DRONE,
     DRONE_REFS,
     SIMULINK_LIB,
+    TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
@@ -77,17 +79,21 @@ WORLD_MAP = {
         "sim_world": "rocket_drone_park_chase_vis.sdf",
         "gz_name":   "fpv_chase_park",
         "target_model": "moving_target_drone",
+        "target_drone": True,
         "orbit_drive":  True,
     },
     "patrol_park": {
         "sim_world": "rocket_drone_patrol_park_vis.sdf",
         "gz_name":   "fpv_patrol_park",
         "target_model": "patrol_target_drone",
+        "target_drone": True,
         "patrol_joint": "patrol_joint",
     },
     "collision_test": {
         "sim_world": "rocket_drone_collision_test_vis.sdf",
         "gz_name":   "collision_test",
+        "target_model": "collision_test_target",
+        "target_drone": True,
     },
     "balloon_test": {
         "sim_world": "rocket_drone_balloon_test_vis.sdf",
@@ -270,6 +276,9 @@ def parse_args():
                      help="Balloon vertical bobbing amplitude in metres (default: 1.0)")
     tgt.add_argument("--drift-speed", type=float, default=20.0,
                      help="Balloon Lissajous frequency multiplier (default: 20.0)")
+    tgt.add_argument("--target-drone", choices=list(TARGET_REFS.keys()),
+                     default=DEFAULT_TARGET_DRONE,
+                     help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE})")
 
     return parser.parse_args()
 
@@ -347,6 +356,7 @@ def main():
         cloud_density=getattr(args, "cloud_density", 0.7),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
+        target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
@@ -416,7 +426,9 @@ def main():
     # Per-world target proximity detection
     target_model = world_entry.get("target_model")
     target_link  = world_entry.get("target_link")
-    target_bbox  = world_entry.get("target_bbox")
+    target_bbox  = (TARGET_REFS[args.target_drone]["bbox"]
+                    if world_entry.get("target_drone")
+                    else world_entry.get("target_bbox"))
     if target_model:
         osd_args.extend(["--target-model", target_model])
         if target_link:

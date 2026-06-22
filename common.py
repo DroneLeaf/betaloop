@@ -106,6 +106,31 @@ DRONE_REFS = {
     },
 }
 
+# Selectable target-drone models — swap the tracked target without editing worlds.
+#   mesh_uri    — glb for worlds that inline the visual (park_chase, patrol_park)
+#   model_uri   — full model for worlds that <include> the target (collision_test)
+#   visual_pose — mesh orientation offset (world forward-flight convention)
+#   bbox        — proximity OBB half-extents "X,Y,Z" (m) for the TARGET REACHED OSD
+TARGET_REFS = {
+    "shahed": {
+        "label": "Shahed",
+        "mesh_uri": "model://shahed_drone/meshes/shahed.glb",
+        "model_uri": "model://shahed_drone",
+        "visual_pose": "0 0 0 1.57079 0 1.5708",
+        "scale": "1 1 1",
+        "bbox": "0.792,1.047,0.186",
+    },
+    "stingjet": {
+        "label": "StingJet",
+        "mesh_uri": "model://stingjet/stingjet.glb",
+        "model_uri": "model://stingjet",
+        "visual_pose": "0 0 0 1.57079 0 1.5708",
+        "scale": "0.1 0.1 0.1",
+        "bbox": "0.94,0.54,0.16",
+    },
+}
+DEFAULT_TARGET_DRONE = "shahed"
+
 
 # ── Jinja2 Template Rendering ─────────────────────────────────────────────────
 
@@ -273,12 +298,14 @@ def compute_world_vars(
     cloud_density: float = 0.7,
     pedestal_radius: float | None = None,
     pedestal_height: float | None = None,
+    target_drone: str = DEFAULT_TARGET_DRONE,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
     Returns a dict suitable for rendering world SDF templates.
     """
     ref = DRONE_REFS[drone]
+    tref = TARGET_REFS.get(target_drone, TARGET_REFS[DEFAULT_TARGET_DRONE])
 
     # Pedestal launch-stand dimensions (vis-only cylinder under the drone).
     # Defaults mirror the Simulink model_parameters (pedestal_radius=0.5,
@@ -331,6 +358,10 @@ def compute_world_vars(
         "cloud_density": float(cloud_density),
         "pedestal_radius": _pedestal_radius,
         "pedestal_height": _pedestal_height,
+        "target_mesh_uri": tref["mesh_uri"],
+        "target_model_uri": tref["model_uri"],
+        "target_visual_pose": tref["visual_pose"],
+        "target_scale": tref["scale"],
     }
 
 
