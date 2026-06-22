@@ -36,8 +36,10 @@ import time
 from common import (
     AEROLOOP_HOME,
     DEFAULT_DRONE,
+    DEFAULT_TARGET_DRONE,
     DRONE_REFS,
     SIMULINK_LIB,
+    TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
@@ -52,6 +54,7 @@ from common import (
     start_fpv_bridge,
     start_orbit_thread,
     start_patrol_thread,
+    start_tracker_bridges,
 )
 
 logging.basicConfig(
@@ -76,17 +79,21 @@ WORLD_MAP = {
         "sim_world": "rocket_drone_park_chase_vis.sdf",
         "gz_name":   "fpv_chase_park",
         "target_model": "moving_target_drone",
+        "target_drone": True,
         "orbit_drive":  True,
     },
     "patrol_park": {
         "sim_world": "rocket_drone_patrol_park_vis.sdf",
         "gz_name":   "fpv_patrol_park",
         "target_model": "patrol_target_drone",
+        "target_drone": True,
         "patrol_joint": "patrol_joint",
     },
     "collision_test": {
         "sim_world": "rocket_drone_collision_test_vis.sdf",
         "gz_name":   "collision_test",
+        "target_model": "collision_test_target",
+        "target_drone": True,
     },
     "balloon_test": {
         "sim_world": "rocket_drone_balloon_test_vis.sdf",
@@ -113,29 +120,70 @@ def parse_args():
                      choices=list(DRONE_REFS.keys()),
                      help=f"Drone profile (default: {DEFAULT_DRONE})")
     sim.add_argument("--cam-pitch", type=float, default=-80.0,
-                     help="FPV camera pitch in degrees (default: -80)")
-    sim.add_argument("--tracker-cam-pitch", type=float, default=-80.0,
-                     help="Tracker camera pitch in degrees (default: -80)")
-    sim.add_argument("--tracker-cam-roll", type=float, default=0.0,
-                     help="Tracker camera roll in degrees (default: 0)")
+                     help="Pilot camera pitch in degrees (default: -80)")
+    # ── Per-camera on/off switches (all sensors switchable before launch) ──
+    sim.add_argument("--pilot-cam", action=argparse.BooleanOptionalAction, default=True,
+                     help="Enable the pilot/FPV camera (rectilinear, OSD) (default: on)")
+    sim.add_argument("--tracker-wide-cam", action=argparse.BooleanOptionalAction, default=True,
+                     help="Enable the wide-FOV tracker camera (spherical/fisheye) (default: on)")
+    sim.add_argument("--tracker-narrow-cam", action=argparse.BooleanOptionalAction, default=False,
+                     help="Enable the narrow-FOV tracker camera (spherical/fisheye) (default: off)")
+    sim.add_argument("--thermal-cam", action=argparse.BooleanOptionalAction, default=False,
+                     help="Enable the thermal camera (spherical/fisheye, white-hot) (default: off)")
+    # ── Pilot (FPV) camera geometry — rectilinear ──
     sim.add_argument("--fpv-hfov", type=float, default=114.6,
-                     help="FPV camera horizontal FOV in degrees (default: 114.6)")
+                     help="Pilot camera horizontal FOV in degrees (default: 114.6)")
     sim.add_argument("--fpv-vfov", type=float, default=98.9,
-                     help="FPV camera vertical FOV in degrees (default: 98.9)")
-    sim.add_argument("--tracker-hfov", type=float, default=114.6,
-                     help="Tracker camera horizontal FOV in degrees (default: 114.6)")
-    sim.add_argument("--tracker-vfov", type=float, default=98.9,
-                     help="Tracker camera vertical FOV in degrees (default: 98.9)")
+                     help="Pilot camera vertical FOV in degrees (default: 98.9)")
     sim.add_argument("--fpv-cam-width", type=float, default=640,
                      help="Pilot camera output width in pixels (default: 640)")
     sim.add_argument("--fpv-cam-height", type=float, default=480,
                      help="Pilot camera output height in pixels (default: 480)")
-    sim.add_argument("--tracker-cam-width", type=float, default=640,
-                     help="Tracker camera source width in pixels (default: 640)")
-    sim.add_argument("--tracker-cam-height", type=float, default=480,
-                     help="Tracker camera output height in pixels (default: 480)")
-    sim.add_argument("--tracker-cam-fps", type=int, default=30,
-                     help="Tracker camera Gazebo update rate in Hz (default: 30)")
+    # ── Tracker WIDE camera geometry — spherical/fisheye ──
+    sim.add_argument("--tracker-wide-cam-pitch", type=float, default=-80.0,
+                     help="Wide tracker camera pitch in degrees (default: -80)")
+    sim.add_argument("--tracker-wide-cam-roll", type=float, default=0.0,
+                     help="Wide tracker camera roll in degrees (default: 0)")
+    sim.add_argument("--tracker-wide-hfov", type=float, default=114.6,
+                     help="Wide tracker camera horizontal FOV in degrees (default: 114.6)")
+    sim.add_argument("--tracker-wide-vfov", type=float, default=98.9,
+                     help="Wide tracker camera vertical FOV in degrees (default: 98.9)")
+    sim.add_argument("--tracker-wide-cam-width", type=float, default=640,
+                     help="Wide tracker camera source width in pixels (default: 640)")
+    sim.add_argument("--tracker-wide-cam-height", type=float, default=480,
+                     help="Wide tracker camera output height in pixels (default: 480)")
+    sim.add_argument("--tracker-wide-cam-fps", type=int, default=30,
+                     help="Wide tracker camera Gazebo update rate in Hz (default: 30)")
+    # ── Tracker NARROW camera geometry — spherical/fisheye, narrower FOV ──
+    sim.add_argument("--tracker-narrow-cam-pitch", type=float, default=-80.0,
+                     help="Narrow tracker camera pitch in degrees (default: -80)")
+    sim.add_argument("--tracker-narrow-cam-roll", type=float, default=0.0,
+                     help="Narrow tracker camera roll in degrees (default: 0)")
+    sim.add_argument("--tracker-narrow-hfov", type=float, default=45.0,
+                     help="Narrow tracker camera horizontal FOV in degrees (default: 45)")
+    sim.add_argument("--tracker-narrow-vfov", type=float, default=34.0,
+                     help="Narrow tracker camera vertical FOV in degrees (default: 34)")
+    sim.add_argument("--tracker-narrow-cam-width", type=float, default=640,
+                     help="Narrow tracker camera source width in pixels (default: 640)")
+    sim.add_argument("--tracker-narrow-cam-height", type=float, default=480,
+                     help="Narrow tracker camera output height in pixels (default: 480)")
+    sim.add_argument("--tracker-narrow-cam-fps", type=int, default=30,
+                     help="Narrow tracker camera Gazebo update rate in Hz (default: 30)")
+    # ── Thermal camera geometry — spherical/fisheye, white-hot ──
+    sim.add_argument("--thermal-cam-pitch", type=float, default=-80.0,
+                     help="Thermal camera pitch in degrees (default: -80)")
+    sim.add_argument("--thermal-cam-roll", type=float, default=0.0,
+                     help="Thermal camera roll in degrees (default: 0)")
+    sim.add_argument("--thermal-hfov", type=float, default=114.6,
+                     help="Thermal camera horizontal FOV in degrees (default: 114.6)")
+    sim.add_argument("--thermal-vfov", type=float, default=98.9,
+                     help="Thermal camera vertical FOV in degrees (default: 98.9)")
+    sim.add_argument("--thermal-cam-width", type=float, default=640,
+                     help="Thermal camera source width in pixels (default: 640)")
+    sim.add_argument("--thermal-cam-height", type=float, default=480,
+                     help="Thermal camera output height in pixels (default: 480)")
+    sim.add_argument("--thermal-cam-fps", type=int, default=30,
+                     help="Thermal camera Gazebo update rate in Hz (default: 30)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     sim.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -147,8 +195,8 @@ def parse_args():
                      help="Disable clouds in the world skybox (default: clouds on)")
     sim.add_argument("--cloud-density", dest="cloud_density", type=float, default=0.7,
                      help="Cloud density / humidity 0.0-1.0 (default: 0.7)")
-    sim.add_argument("--chase-cam", action="store_true",
-                     help="Display chase camera (3rd-person SDL2 window)")
+    sim.add_argument("--chase-cam", action=argparse.BooleanOptionalAction, default=False,
+                     help="Enable the chase camera (3rd-person SDL2 window) (default: off)")
     sim.add_argument("--no-video", action="store_true",
                      help="Skip the video pipeline")
     sim.add_argument("--no-display", action="store_true",
@@ -228,6 +276,9 @@ def parse_args():
                      help="Balloon vertical bobbing amplitude in metres (default: 1.0)")
     tgt.add_argument("--drift-speed", type=float, default=20.0,
                      help="Balloon Lissajous frequency multiplier (default: 20.0)")
+    tgt.add_argument("--target-drone", choices=list(TARGET_REFS.keys()),
+                     default=DEFAULT_TARGET_DRONE,
+                     help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE})")
 
     return parser.parse_args()
 
@@ -237,10 +288,12 @@ def main():
 
     if args.cam_width is not None:
         args.fpv_cam_width = args.cam_width
-        args.tracker_cam_width = args.cam_width
+        args.tracker_wide_cam_width = args.cam_width
+        args.tracker_narrow_cam_width = args.cam_width
     if args.cam_height is not None:
         args.fpv_cam_height = args.cam_height
-        args.tracker_cam_height = args.cam_height
+        args.tracker_wide_cam_height = args.cam_height
+        args.tracker_narrow_cam_height = args.cam_height
 
     _px4_kill = ["pkill -9 -x px4_sim_bridge 2>/dev/null || true"]
     cleanup_before_start(extra_pkill_cmds=_px4_kill)
@@ -261,15 +314,32 @@ def main():
     # ── 1b. Render Jinja2 vis templates before Gazebo launch ──
     model_vars = compute_model_vars(
         args.drone, cam_pitch=args.cam_pitch,
-        tracker_cam_pitch=args.tracker_cam_pitch,
-        tracker_cam_roll=args.tracker_cam_roll,
+        pilot_cam_enabled=getattr(args, "pilot_cam", True),
         fpv_hfov_deg=args.fpv_hfov,
         fpv_vfov_deg=args.fpv_vfov,
-        tracker_hfov_deg=args.tracker_hfov,
-        tracker_vfov_deg=args.tracker_vfov,
         fpv_cam_width=args.fpv_cam_width,
-        tracker_cam_width=args.tracker_cam_width,
-        tracker_cam_fps=getattr(args, "tracker_cam_fps", 30),
+        tracker_wide_cam_enabled=getattr(args, "tracker_wide_cam", True),
+        tracker_wide_cam_pitch=args.tracker_wide_cam_pitch,
+        tracker_wide_cam_roll=args.tracker_wide_cam_roll,
+        tracker_wide_hfov_deg=args.tracker_wide_hfov,
+        tracker_wide_vfov_deg=args.tracker_wide_vfov,
+        tracker_wide_cam_width=args.tracker_wide_cam_width,
+        tracker_wide_cam_fps=getattr(args, "tracker_wide_cam_fps", 30),
+        tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
+        tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
+        tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
+        tracker_narrow_hfov_deg=args.tracker_narrow_hfov,
+        tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
+        tracker_narrow_cam_width=args.tracker_narrow_cam_width,
+        tracker_narrow_cam_fps=getattr(args, "tracker_narrow_cam_fps", 30),
+        thermal_cam_enabled=getattr(args, "thermal_cam", False),
+        thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
+        thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
+        thermal_hfov_deg=getattr(args, "thermal_hfov", 114.6),
+        thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
+        thermal_cam_width=getattr(args, "thermal_cam_width", 640),
+        thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
+        chase_cam_enabled=getattr(args, "chase_cam", False),
     )
     world_vars = compute_world_vars(
         args.drone, args.world,
@@ -286,6 +356,7 @@ def main():
         cloud_density=getattr(args, "cloud_density", 0.7),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
+        target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
@@ -355,7 +426,9 @@ def main():
     # Per-world target proximity detection
     target_model = world_entry.get("target_model")
     target_link  = world_entry.get("target_link")
-    target_bbox  = world_entry.get("target_bbox")
+    target_bbox  = (TARGET_REFS[args.target_drone]["bbox"]
+                    if world_entry.get("target_drone")
+                    else world_entry.get("target_bbox"))
     if target_model:
         osd_args.extend(["--target-model", target_model])
         if target_link:
@@ -368,6 +441,8 @@ def main():
     log.info("MAVLink OSD enabled (UDP port %d)", args.mavlink_port)
     fpv_bridge_proc, width, height = start_fpv_bridge(args, pm, osd_args=osd_args)
     chase_bridge_proc = start_chase_bridge(args, pm)
+    # Optional clean (no-OSD) spherical/fisheye wide + narrow tracker + thermal feeds.
+    start_tracker_bridges(args, pm)
 
     # ── 5. Target trajectory threads ──
     traj_stop = threading.Event()

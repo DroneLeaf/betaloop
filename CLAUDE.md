@@ -118,3 +118,19 @@ any new motion so Ctrl-C exits cleanly.
 - Thaqib profile defaults were synced to `F7_104_tuning.txt` profile 0/rateprofile 0.
    If a transmitter still toggles CH10 for ANGLE, mode engagement will no longer
    match expectations; use CH11 for ANGLE with current defaults.
+
+## Session Addendum (2026-06-22)
+
+- `--physics` retained but simulink-only (`choices=["simulink"]`); physics-world
+  rendering removed from `_render_all_templates`; `bf_sim_bridge` always runs.
+- Cameras: per-feed BooleanOptional toggles (`--pilot-cam` / `--tracker-wide-cam`
+  / `--tracker-narrow-cam` / `--thermal-cam` / `--chase-cam`). Wide tracker
+  renamed `fpv_tracker_cam`→`fpv_tracker_wide_cam`; narrow geometry
+  `--tracker-narrow-*`. Clean tracker/thermal feeds spawn via shared
+  `common.start_tracker_bridges()`. `compute_model_vars` gained per-camera enable
+  flags + `tracker_wide_*` / `tracker_narrow_*` vars.
+- Targets: `common.TARGET_REFS` (shahed/stingjet);
+  `compute_world_vars(target_drone=)` emits `target_mesh_uri` /
+  `target_model_uri` / `target_visual_pose` / `target_scale`. `--target-drone` on
+  both launchers; WORLD_MAP marks drone-target worlds `"target_drone": True`
+  (proximity bbox then comes from `TARGET_REFS`, not WORLD_MAP).

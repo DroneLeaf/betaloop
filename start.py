@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Unified simulation launcher — Betaflight SITL + Gazebo + optional Simulink dynamics.
+"""Unified simulation launcher — Betaflight SITL + Gazebo + Simulink dynamics.
 
-Consolidates all betaloop start scripts into a single entry point.  Choose the
-world file and physics engine on the command line; OSD is always enabled.
+Gazebo runs visualization-only: the drone pose is driven over UDP by
+bf_sim_bridge, which loads a pre-compiled Simulink .so and steps the rigid-body
+dynamics at 250 Hz.  OSD is always enabled.
 
-Supported physics backends:
-  - **gazebo** (default) — BetaflightPlugin drives motor forces in Gazebo's
-    rigid-body solver.
-  - **simulink** — bf_sim_bridge loads a pre-compiled Simulink .so and steps
-    it at 250 Hz; Gazebo is a visualizer only.
+Cameras (each independently switchable on/off before launch):
+  - pilot          fpv_cam                rectilinear, OSD   --pilot-cam/--no-pilot-cam
+  - tracker-wide   fpv_tracker_wide_cam   spherical/fisheye  --tracker-wide-cam/--no-...
+  - tracker-narrow fpv_tracker_narrow_cam spherical/fisheye  --tracker-narrow-cam/--no-...
+  - thermal        fpv_thermal_cam        fisheye, white-hot --thermal-cam/--no-thermal-cam
+  - chase          chase_cam              rectilinear 3rd-pp --chase-cam/--no-chase-cam
+
+The tracker + thermal cameras are spherical (fisheye) so they match the
+spherical-calibrated camera the MSC/PN guidance estimator assumes.
 
 Usage:
-    # Gazebo physics (default)
     python3 start.py --world park_chase --gazebo
     python3 start.py --world collision_test --cam-pitch -90 --gazebo
     python3 start.py --drone iris --gazebo --chase-cam
-
-    # Simulink dynamics backend (world file selected automatically)
-    python3 start.py --world park_chase --physics simulink --gazebo --chase-cam
-    python3 start.py --world collision_test --physics simulink --gazebo
+    python3 start.py --world park_chase --tracker-narrow-cam --thermal-cam --gazebo
+    python3 start.py --world park_chase --no-pilot-cam --gazebo
 
     # Tune drone params
     python3 start.py --world park_chase --ctw 5 --angular-damping 0.05
@@ -40,9 +42,11 @@ import time
 
 from common import (
     AEROLOOP_HOME,
+    DEFAULT_TARGET_DRONE,
     DRONE_REFS,
     IMAGE_BRIDGE,
     SIMULINK_LIB,
+    TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
@@ -59,6 +63,7 @@ from common import (
     start_balloon_thread,
     start_orbit_thread,
     start_patrol_thread,
+    start_tracker_bridges,
     wait_for_port,
 )
 
@@ -89,41 +94,36 @@ DEFAULT_WORLD = "park_chase"
 DEFAULT_DRONE = "rocket_drone"
 
 # Short world name → dict of world attributes.
-#   gz_world     — Gazebo physics world file
-#   sim_world    — Simulink vis-only SDF file
+#   sim_world    — Simulink vis-only SDF file (Gazebo = visualization only)
 #   gz_name      — Gazebo <world name> element
 #   target_model — SDF model name of the target (for proximity OSD)
 #   target_link  — link inside target model whose world pose to track
-#   target_bbox  — half-extents "X,Y,Z" in metres (axis-aligned)
+#   target_drone — True if the target is a selectable drone (bbox from TARGET_REFS)
 #   patrol_joint — prismatic joint name for patrol reversal (patrol_park only)
 WORLD_MAP = {
     "park_chase": {
-        "gz_world":     "rocket_drone_park_chase.world",
         "sim_world":    "rocket_drone_park_chase_vis.sdf",
         "gz_name":      "fpv_chase_park",
         "target_model": "moving_target_drone",
         "target_link":  "geranium_link",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
         "orbit_drive":  True,
     },
     "patrol_park": {
-        "gz_world":     "rocket_drone_patrol_park.world",
         "sim_world":    "rocket_drone_patrol_park_vis.sdf",
         "gz_name":      "fpv_patrol_park",
         "target_model": "patrol_target_drone",
         "target_link":  "geranium_link",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
         "patrol_joint": "patrol_joint",
     },
     "collision_test": {
-        "gz_world":     "rocket_drone_collision_test.world",
         "sim_world":    "rocket_drone_collision_test_vis.sdf",
         "gz_name":      "collision_test",
         "target_model": "collision_test_target",
-        "target_bbox":  "0.792,1.047,0.186",
+        "target_drone": True,
     },
     "balloon_test": {
-        "gz_world":     "rocket_drone_balloon_test.world",
         "sim_world":    "rocket_drone_balloon_test_vis.sdf",
         "gz_name":      "balloon_test",
         "target_model": "balloon_target",
@@ -135,10 +135,8 @@ WORLD_MAP = {
 
 
 def _render_all_templates(drone, world_name, args):
-    """Render all Jinja2 templates for the selected drone and world."""
+    """Render the vis-only Jinja2 templates for the selected drone and world."""
     ref = DRONE_REFS[drone]
-    models_dir = os.path.join(AEROLOOP_HOME, "models")
-    worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
 
     # ── Damping overrides (BF-only CLI args) ──
     damping_overrides = {}
@@ -158,15 +156,24 @@ def _render_all_templates(drone, world_name, args):
     model_vars = compute_model_vars(
         drone, ctw=ctw, cam_pitch=args.cam_pitch,
         standoff=standoff, damping_overrides=damping_overrides,
-        tracker_cam_pitch=args.tracker_cam_pitch,
-        tracker_cam_roll=args.tracker_cam_roll,
+        pilot_cam_enabled=getattr(args, "pilot_cam", True),
         fpv_hfov_deg=args.fpv_hfov,
         fpv_vfov_deg=args.fpv_vfov,
-        tracker_hfov_deg=args.tracker_hfov,
-        tracker_vfov_deg=args.tracker_vfov,
         fpv_cam_width=args.fpv_cam_width,
-        tracker_cam_width=args.tracker_cam_width,
-        tracker_cam_fps=getattr(args, "tracker_cam_fps", 30),
+        tracker_wide_cam_enabled=getattr(args, "tracker_wide_cam", True),
+        tracker_wide_cam_pitch=args.tracker_wide_cam_pitch,
+        tracker_wide_cam_roll=args.tracker_wide_cam_roll,
+        tracker_wide_hfov_deg=args.tracker_wide_hfov,
+        tracker_wide_vfov_deg=args.tracker_wide_vfov,
+        tracker_wide_cam_width=args.tracker_wide_cam_width,
+        tracker_wide_cam_fps=getattr(args, "tracker_wide_cam_fps", 30),
+        tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
+        tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
+        tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
+        tracker_narrow_hfov_deg=args.tracker_narrow_hfov,
+        tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
+        tracker_narrow_cam_width=args.tracker_narrow_cam_width,
+        tracker_narrow_cam_fps=getattr(args, "tracker_narrow_cam_fps", 30),
         thermal_cam_enabled=getattr(args, "thermal_cam", False),
         thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
         thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
@@ -174,17 +181,13 @@ def _render_all_templates(drone, world_name, args):
         thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
         thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
+        chase_cam_enabled=getattr(args, "chase_cam", False),
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
              ctw or ref["default_ctw"],
              model_vars["mass"], model_vars["ixx"], model_vars["iyy"], model_vars["izz"],
              model_vars["standoff_height"], args.cam_pitch)
-
-    # ── Render physics model SDF (BF only — PX4 doesn't use it) ──
-    phys_j2 = os.path.join(models_dir, ref["model_sdf"] + ".j2")
-    if os.path.isfile(phys_j2):
-        render_template(phys_j2, model_vars)
 
     # ── World variables (shared helper) ──
     world_vars = compute_world_vars(
@@ -202,16 +205,11 @@ def _render_all_templates(drone, world_name, args):
         cloud_density=getattr(args, "cloud_density", 0.7),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
+        target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
     )
 
     # ── Render vis model + vis world (shared helper) ──
     render_vis_templates(drone, world_name, WORLD_MAP, model_vars, world_vars)
-
-    # ── Render physics world (BF only) ──
-    wm = WORLD_MAP[world_name]
-    gz_j2 = os.path.join(worlds_dir, wm["gz_world"] + ".j2")
-    if os.path.isfile(gz_j2):
-        render_template(gz_j2, world_vars)
 
     return world_vars
 
@@ -245,7 +243,7 @@ def send_bf_cli_commands(commands, host="127.0.0.1", port=5761, timeout=2.0):
 def parse_args():
     epilog_lines = ["available worlds:"]
     for name, entry in sorted(WORLD_MAP.items()):
-        epilog_lines.append(f"  {name:20s}  gazebo: {entry['gz_world']}  simulink: {entry['sim_world']}")
+        epilog_lines.append(f"  {name:20s}  {entry['sim_world']}")
 
     parser = argparse.ArgumentParser(
         description="Unified Betaflight SITL + Gazebo simulation launcher",
@@ -263,9 +261,10 @@ def parse_args():
     )
     sim.add_argument(
         "--physics",
-        choices=["gazebo", "simulink"],
-        default="gazebo",
-        help="Dynamics backend (default: gazebo)",
+        choices=["simulink"],
+        default="simulink",
+        help="Dynamics backend; engines follow the simulink interface "
+             "(Gazebo is visualization-only). Only 'simulink' for now.",
     )
     sim.add_argument(
         "--gazebo",
@@ -286,10 +285,30 @@ def parse_args():
         default=0.7,
         help="Cloud density / humidity 0.0-1.0 (default: 0.7)",
     )
+    # ── Per-camera on/off switches (all sensors switchable before launch) ──
+    sim.add_argument(
+        "--pilot-cam",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the pilot/FPV camera (rectilinear, OSD) (default: on)",
+    )
+    sim.add_argument(
+        "--tracker-wide-cam",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the wide-FOV tracker camera (spherical/fisheye) (default: on)",
+    )
+    sim.add_argument(
+        "--tracker-narrow-cam",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the narrow-FOV tracker camera (spherical/fisheye) (default: off)",
+    )
     sim.add_argument(
         "--chase-cam",
-        action="store_true",
-        help="Also display the chase camera (3rd-person SDL2 window)",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the chase camera (3rd-person SDL2 window) (default: off)",
     )
     sim.add_argument(
         "--no-transmitter",
@@ -357,72 +376,120 @@ def parse_args():
         default=-80.0,
         help="FPV camera pitch in degrees (default: -80, i.e. 10° from +Z)",
     )
-    drn.add_argument(
-        "--tracker-cam-pitch",
-        type=float,
-        default=-80.0,
-        help="Tracker camera pitch in degrees (default: -80)",
-    )
-    drn.add_argument(
-        "--tracker-cam-roll",
-        type=float,
-        default=0.0,
-        help="Tracker camera roll in degrees (default: 0; use 90 for landscape)",
-    )
+    # ── Pilot (FPV) camera geometry — rectilinear ──
     drn.add_argument(
         "--fpv-hfov",
         type=float,
         default=114.6,
-        help="FPV camera horizontal FOV in degrees (default: 114.6)",
+        help="Pilot camera horizontal FOV in degrees (default: 114.6)",
     )
     drn.add_argument(
         "--fpv-vfov",
         type=float,
         default=98.9,
-        help="FPV camera vertical FOV in degrees (default: 98.9)",
-    )
-    drn.add_argument(
-        "--tracker-hfov",
-        type=float,
-        default=114.6,
-        help="Tracker camera horizontal FOV in degrees (default: 114.6)",
-    )
-    drn.add_argument(
-        "--tracker-vfov",
-        type=float,
-        default=98.9,
-        help="Tracker camera vertical FOV in degrees (default: 98.9)",
+        help="Pilot camera vertical FOV in degrees (default: 98.9)",
     )
     drn.add_argument("--fpv-cam-width", type=float, default=640,
                      help="Pilot camera output width in pixels (default: 640)")
     drn.add_argument("--fpv-cam-height", type=float, default=480,
                      help="Pilot camera output height in pixels (default: 480)")
-    drn.add_argument("--tracker-cam-width", type=float, default=640,
-                     help="Tracker camera output width in pixels (default: 640)")
-    drn.add_argument("--tracker-cam-height", type=float, default=480,
-                     help="Tracker camera output height in pixels (default: 480)")
-    drn.add_argument("--tracker-cam-fps", type=int, default=30,
-                     help="Tracker camera Gazebo update rate in Hz; also the RTSP "
-                          "stream framerate (default: 30)")
-    # Tracker camera RTSP stream (no OSD) — pushed to an external RTSP server.
-    drn.add_argument("--tracker-rtsp", type=str, default=None, metavar="URL",
-                     help="Push the (clean, no-OSD) tracker camera feed as H.264 to "
-                          "this RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker (off if unset)")
-    drn.add_argument("--tracker-rtsp-bitrate", type=str, default="4M",
-                     help="Tracker RTSP libx264 target bitrate (default: 4M)")
-    drn.add_argument("--tracker-rtsp-preset", type=str, default="ultrafast",
-                     help="Tracker RTSP libx264 preset (default: ultrafast)")
-    drn.add_argument("--tracker-rtsp-tune", type=str, default="zerolatency",
-                     help="Tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
-    drn.add_argument("--tracker-rtsp-width", type=int, default=0,
-                     help="Explicit RTSP stream output width in px (0=camera width)")
-    drn.add_argument("--tracker-rtsp-height", type=int, default=0,
-                     help="Explicit RTSP stream output height in px (0=camera height)")
 
-    # ── Thermal camera (optional dedicated sensor; white-hot, mirrors tracker) ──
-    drn.add_argument("--thermal-cam", action="store_true",
+    # ── Tracker WIDE camera geometry — spherical/fisheye ──
+    drn.add_argument(
+        "--tracker-wide-cam-pitch",
+        type=float,
+        default=-80.0,
+        help="Wide tracker camera pitch in degrees (default: -80)",
+    )
+    drn.add_argument(
+        "--tracker-wide-cam-roll",
+        type=float,
+        default=0.0,
+        help="Wide tracker camera roll in degrees (default: 0; use 90 for landscape)",
+    )
+    drn.add_argument(
+        "--tracker-wide-hfov",
+        type=float,
+        default=114.6,
+        help="Wide tracker camera horizontal FOV in degrees (default: 114.6)",
+    )
+    drn.add_argument(
+        "--tracker-wide-vfov",
+        type=float,
+        default=98.9,
+        help="Wide tracker camera vertical FOV in degrees (default: 98.9)",
+    )
+    drn.add_argument("--tracker-wide-cam-width", type=float, default=640,
+                     help="Wide tracker camera output width in pixels (default: 640)")
+    drn.add_argument("--tracker-wide-cam-height", type=float, default=480,
+                     help="Wide tracker camera output height in pixels (default: 480)")
+    drn.add_argument("--tracker-wide-cam-fps", type=int, default=30,
+                     help="Wide tracker camera Gazebo update rate in Hz; also the RTSP "
+                          "stream framerate (default: 30)")
+    drn.add_argument("--tracker-wide-rtsp", type=str, default=None, metavar="URL",
+                     help="Push the (clean, no-OSD) wide tracker feed as H.264 to this "
+                          "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_wide (off if unset)")
+    drn.add_argument("--tracker-wide-rtsp-bitrate", type=str, default="4M",
+                     help="Wide tracker RTSP libx264 target bitrate (default: 4M)")
+    drn.add_argument("--tracker-wide-rtsp-preset", type=str, default="ultrafast",
+                     help="Wide tracker RTSP libx264 preset (default: ultrafast)")
+    drn.add_argument("--tracker-wide-rtsp-tune", type=str, default="zerolatency",
+                     help="Wide tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--tracker-wide-rtsp-width", type=int, default=0,
+                     help="Explicit wide tracker RTSP output width in px (0=camera width)")
+    drn.add_argument("--tracker-wide-rtsp-height", type=int, default=0,
+                     help="Explicit wide tracker RTSP output height in px (0=camera height)")
+
+    # ── Tracker NARROW camera geometry — spherical/fisheye, narrower FOV ──
+    drn.add_argument(
+        "--tracker-narrow-cam-pitch",
+        type=float,
+        default=-80.0,
+        help="Narrow tracker camera pitch in degrees (default: -80)",
+    )
+    drn.add_argument(
+        "--tracker-narrow-cam-roll",
+        type=float,
+        default=0.0,
+        help="Narrow tracker camera roll in degrees (default: 0)",
+    )
+    drn.add_argument(
+        "--tracker-narrow-hfov",
+        type=float,
+        default=45.0,
+        help="Narrow tracker camera horizontal FOV in degrees (default: 45)",
+    )
+    drn.add_argument(
+        "--tracker-narrow-vfov",
+        type=float,
+        default=34.0,
+        help="Narrow tracker camera vertical FOV in degrees (default: 34)",
+    )
+    drn.add_argument("--tracker-narrow-cam-width", type=float, default=640,
+                     help="Narrow tracker camera output width in pixels (default: 640)")
+    drn.add_argument("--tracker-narrow-cam-height", type=float, default=480,
+                     help="Narrow tracker camera output height in pixels (default: 480)")
+    drn.add_argument("--tracker-narrow-cam-fps", type=int, default=30,
+                     help="Narrow tracker camera Gazebo update rate in Hz; also the RTSP "
+                          "stream framerate (default: 30)")
+    drn.add_argument("--tracker-narrow-rtsp", type=str, default=None, metavar="URL",
+                     help="Push the (clean, no-OSD) narrow tracker feed as H.264 to this "
+                          "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_narrow (off if unset)")
+    drn.add_argument("--tracker-narrow-rtsp-bitrate", type=str, default="4M",
+                     help="Narrow tracker RTSP libx264 target bitrate (default: 4M)")
+    drn.add_argument("--tracker-narrow-rtsp-preset", type=str, default="ultrafast",
+                     help="Narrow tracker RTSP libx264 preset (default: ultrafast)")
+    drn.add_argument("--tracker-narrow-rtsp-tune", type=str, default="zerolatency",
+                     help="Narrow tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--tracker-narrow-rtsp-width", type=int, default=0,
+                     help="Explicit narrow tracker RTSP output width in px (0=camera width)")
+    drn.add_argument("--tracker-narrow-rtsp-height", type=int, default=0,
+                     help="Explicit narrow tracker RTSP output height in px (0=camera height)")
+
+    # ── Thermal camera (optional dedicated spherical/fisheye sensor; white-hot) ──
+    drn.add_argument("--thermal-cam", action=argparse.BooleanOptionalAction, default=False,
                      help="Enable the simulated thermal camera (a 2nd tracker feed, "
-                          "white-hot grayscale, dedicated Gazebo sensor)")
+                          "white-hot grayscale, dedicated spherical/fisheye sensor) (default: off)")
     drn.add_argument("--thermal-cam-pitch", type=float, default=-80.0,
                      help="Thermal camera tilt in degrees (default: -80)")
     drn.add_argument("--thermal-cam-roll", type=float, default=0.0,
@@ -635,6 +702,13 @@ def parse_args():
         help="Uniform scale multiplier for the target hit box (default: 1.0)",
     )
     wld.add_argument(
+        "--target-drone",
+        choices=list(TARGET_REFS.keys()),
+        default=DEFAULT_TARGET_DRONE,
+        help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE}; "
+             f"choices: {', '.join(TARGET_REFS)})",
+    )
+    wld.add_argument(
         "--wind-intensity",
         type=float,
         default=None,
@@ -661,10 +735,12 @@ def main():
 
     if args.cam_width is not None:
         args.fpv_cam_width = args.cam_width
-        args.tracker_cam_width = args.cam_width
+        args.tracker_wide_cam_width = args.cam_width
+        args.tracker_narrow_cam_width = args.cam_width
     if args.cam_height is not None:
         args.fpv_cam_height = args.cam_height
-        args.tracker_cam_height = args.cam_height
+        args.tracker_wide_cam_height = args.cam_height
+        args.tracker_narrow_cam_height = args.cam_height
 
     _bf_kill = [
         "pkill -9 -f 'betaflight_SITL.elf' 2>/dev/null || true",
@@ -701,7 +777,7 @@ def main():
 
     # ── 2. Gazebo ──
     world_entry = WORLD_MAP[args.world]
-    world_file = world_entry["sim_world"] if is_simulink else world_entry["gz_world"]
+    world_file = world_entry["sim_world"]
     gz_world_name = world_entry["gz_name"]
     world_path = os.path.join(AEROLOOP_HOME, "worlds", world_file)
     if not os.path.isfile(world_path):
@@ -714,46 +790,43 @@ def main():
     gz_args.extend(["-r", "-v", "3", world_path])
 
     log.info(
-        "Starting Gazebo%s: %s%s",
+        "Starting Gazebo%s: %s (vis-only, Simulink dynamics)",
         " (GUI)" if args.gazebo else " (headless)",
         os.path.basename(world_path),
-        " (vis-only)" if is_simulink else "",
     )
     pm.spawn(gz_args)
     time.sleep(8)
 
-    # ── 3. bf_sim_bridge (Simulink dynamics) ──
-    bf_bridge_proc = None
-    if is_simulink:
-        if not os.path.isfile(args.bridge):
-            log.error("bf_sim_bridge not found: %s", args.bridge)
-            pm.shutdown()
-            sys.exit(1)
-        if not os.path.isfile(args.sim_lib):
-            log.error("libinterface_simulink.so not found: %s", args.sim_lib)
-            pm.shutdown()
-            sys.exit(1)
+    # ── 3. bf_sim_bridge (Simulink dynamics — the only backend) ──
+    if not os.path.isfile(args.bridge):
+        log.error("bf_sim_bridge not found: %s", args.bridge)
+        pm.shutdown()
+        sys.exit(1)
+    if not os.path.isfile(args.sim_lib):
+        log.error("libinterface_simulink.so not found: %s", args.sim_lib)
+        pm.shutdown()
+        sys.exit(1)
 
-        bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
-        if args.params:
-            bridge_args += ["--params", os.path.abspath(args.params)]
-        if args.telem_port:
-            bridge_args += ["--telem-port", str(args.telem_port)]
-        if args.launcher_port:
-            bridge_args += ["--launcher-port", str(args.launcher_port)]
-        if args.home_lat is not None:
-            bridge_args += ["--home-lat", str(args.home_lat)]
-        if args.home_lon is not None:
-            bridge_args += ["--home-lon", str(args.home_lon)]
-        if args.home_alt is not None:
-            bridge_args += ["--home-alt", str(args.home_alt)]
-        log.info("Starting bf_sim_bridge (Simulink dynamics)")
-        bf_bridge_proc = pm.spawn(bridge_args)
-        time.sleep(2)
-        if bf_bridge_proc.poll() is not None:
-            log.error("bf_sim_bridge exited immediately (code %d)", bf_bridge_proc.returncode)
-            pm.shutdown()
-            sys.exit(1)
+    bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
+    if args.params:
+        bridge_args += ["--params", os.path.abspath(args.params)]
+    if args.telem_port:
+        bridge_args += ["--telem-port", str(args.telem_port)]
+    if args.launcher_port:
+        bridge_args += ["--launcher-port", str(args.launcher_port)]
+    if args.home_lat is not None:
+        bridge_args += ["--home-lat", str(args.home_lat)]
+    if args.home_lon is not None:
+        bridge_args += ["--home-lon", str(args.home_lon)]
+    if args.home_alt is not None:
+        bridge_args += ["--home-alt", str(args.home_alt)]
+    log.info("Starting bf_sim_bridge (Simulink dynamics)")
+    bf_bridge_proc = pm.spawn(bridge_args)
+    time.sleep(2)
+    if bf_bridge_proc.poll() is not None:
+        log.error("bf_sim_bridge exited immediately (code %d)", bf_bridge_proc.returncode)
+        pm.shutdown()
+        sys.exit(1)
 
     # ── 4. Betaflight SITL ──
     if not os.path.isfile(args.elf):
@@ -786,10 +859,8 @@ def main():
     # ── 5. Video pipeline ──
     topic = None
     chase_topic = None
-    tracker_topic = None
     bridge_proc = None
     chase_bridge_proc = None
-    tracker_bridge_proc = None
     width = height = 0
 
     if args.no_video:
@@ -803,27 +874,87 @@ def main():
             pm.shutdown()
             sys.exit(1)
 
-        # FPV camera topic
-        if args.fpv_topic:
-            topic = args.fpv_topic
-            log.info("Using explicit FPV topic: %s", topic)
+        # ── FPV (pilot) camera — rectilinear, OSD always on. Only when enabled. ──
+        if not args.pilot_cam:
+            log.info("Pilot camera disabled (--no-pilot-cam) — skipping FPV/OSD feed")
         else:
-            log.info("Discovering FPV camera image topic …")
-            fpv_candidates = list_camera_topics(name_hint="fpv_cam")
-            if fpv_candidates:
-                log.info("FPV candidates: %s", ", ".join(fpv_candidates))
-            topic = discover_camera_topic(
-                name_hint="fpv_cam",
-                timeout=30,
-                model_hint=args.topic_model_hint,
+            if args.fpv_topic:
+                topic = args.fpv_topic
+                log.info("Using explicit FPV topic: %s", topic)
+            else:
+                log.info("Discovering FPV camera image topic …")
+                fpv_candidates = list_camera_topics(name_hint="fpv_cam")
+                if fpv_candidates:
+                    log.info("FPV candidates: %s", ", ".join(fpv_candidates))
+                topic = discover_camera_topic(
+                    name_hint="fpv_cam",
+                    timeout=30,
+                    model_hint=args.topic_model_hint,
+                )
+                if not topic:
+                    log.error("Could not find FPV camera topic")
+                    pm.shutdown()
+                    sys.exit(1)
+                log.info("Found FPV camera topic: %s", topic)
+
+            # SHM + RTSP are always active; the SDL2 window (--display) is added
+            # ONLY when not headless. --no-display runs the bridge truly headless.
+            bridge_cmd = [
+                IMAGE_BRIDGE, topic,
+                "--osd", "--msp-port", str(args.msp_port),
+                "--cam-pitch", str(args.cam_pitch),
+                "--out-width", str(args.fpv_cam_width),
+                "--out-height", str(args.fpv_cam_height),
+            ]
+            bridge_cmd.append("--no-display" if args.no_display else "--display")
+
+            # Per-world target proximity detection
+            target_model = world_entry.get("target_model")
+            target_link  = world_entry.get("target_link")
+            target_bbox  = (TARGET_REFS[args.target_drone]["bbox"]
+                            if world_entry.get("target_drone")
+                            else world_entry.get("target_bbox"))
+            if target_model:
+                bridge_cmd.extend(["--target-model", target_model])
+                if target_link:
+                    bridge_cmd.extend(["--target-link", target_link])
+                if target_bbox:
+                    bridge_cmd.extend(["--target-bbox", target_bbox])
+                if args.hit_box_scale is not None:
+                    bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
+                log.info("Target proximity: model='%s' link=%s bbox=%s scale=%s",
+                         target_model, target_link or "(model root)",
+                         target_bbox or "default",
+                         args.hit_box_scale if args.hit_box_scale is not None else "1.0")
+
+            log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
+
+            bridge_proc = pm.spawn(
+                bridge_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-            if not topic:
-                log.error("Could not find FPV camera topic")
+            flags = fcntl.fcntl(bridge_proc.stderr, fcntl.F_GETFL)
+            fcntl.fcntl(bridge_proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            log.info("Waiting for first camera frame …")
+            width, height, pix_fmt = read_image_meta(bridge_proc, timeout=30)
+            if width is None:
+                log.error("No image metadata from bridge — camera may not be rendering")
+                try:
+                    remaining_stderr = bridge_proc.stderr.read(2048)
+                    if remaining_stderr:
+                        log.error(
+                            "Bridge stderr: %s",
+                            remaining_stderr.decode("utf-8", errors="replace"),
+                        )
+                except Exception:
+                    pass
                 pm.shutdown()
                 sys.exit(1)
-            log.info("Found FPV camera topic: %s", topic)
+            log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-        # Chase camera topic (optional)
+        # ── Chase camera — rectilinear 3rd-person, optional (--chase-cam). ──
         if args.chase_cam:
             if args.chase_topic:
                 chase_topic = args.chase_topic
@@ -839,160 +970,24 @@ def main():
                     model_hint=args.topic_model_hint,
                 )
                 if not chase_topic:
-                    log.warning("Chase camera topic not found — FPV only")
+                    log.warning("Chase camera topic not found — skipping")
                 else:
                     log.info("Found chase camera topic: %s", chase_topic)
+            # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
+            if chase_topic:
+                log.info("Starting chase camera bridge (no OSD)")
+                chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
+                chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
+                chase_cmd.append("--no-display" if args.no_display else "--display")
+                chase_bridge_proc = pm.spawn(
+                    chase_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
-        # Start FPV bridge (OSD always on). SHM + RTSP are always active; the
-        # SDL2 window (--display) is added ONLY when not headless. --no-display
-        # runs the bridge truly headless (no SDL2 window/overhead, and no SDL2
-        # build dependency) — better performance for UI/RTSP/tracker workflows.
-        bridge_cmd = [
-            IMAGE_BRIDGE, topic,
-            "--osd", "--msp-port", str(args.msp_port),
-            "--cam-pitch", str(args.cam_pitch),
-            "--out-width", str(args.fpv_cam_width),
-            "--out-height", str(args.fpv_cam_height),
-        ]
-        bridge_cmd.append("--no-display" if args.no_display else "--display")
-
-        # Per-world target proximity detection
-        target_model = world_entry.get("target_model")
-        target_link  = world_entry.get("target_link")
-        target_bbox  = world_entry.get("target_bbox")
-        if target_model:
-            bridge_cmd.extend(["--target-model", target_model])
-            if target_link:
-                bridge_cmd.extend(["--target-link", target_link])
-            if target_bbox:
-                bridge_cmd.extend(["--target-bbox", target_bbox])
-            if args.hit_box_scale is not None:
-                bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
-            log.info("Target proximity: model='%s' link=%s bbox=%s scale=%s",
-                     target_model, target_link or "(model root)",
-                     target_bbox or "default",
-                     args.hit_box_scale if args.hit_box_scale is not None else "1.0")
-
-        log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
-
-        bridge_proc = pm.spawn(
-            bridge_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        flags = fcntl.fcntl(bridge_proc.stderr, fcntl.F_GETFL)
-        fcntl.fcntl(bridge_proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-        log.info("Waiting for first camera frame …")
-        width, height, pix_fmt = read_image_meta(bridge_proc, timeout=30)
-        if width is None:
-            log.error("No image metadata from bridge — camera may not be rendering")
-            try:
-                remaining_stderr = bridge_proc.stderr.read(2048)
-                if remaining_stderr:
-                    log.error(
-                        "Bridge stderr: %s",
-                        remaining_stderr.decode("utf-8", errors="replace"),
-                    )
-            except Exception:
-                pass
-            pm.shutdown()
-            sys.exit(1)
-        log.info("Camera: %dx%d %s", width, height, pix_fmt)
-
-        # Chase camera (optional). Hardcoded 4:3 resolution, independent of
-        # FPV/tracker cam settings. --display (SDL2 window) only when not headless.
-        if chase_topic:
-            log.info("Starting chase camera bridge (no OSD)")
-            chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
-            chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
-            chase_cmd.append("--no-display" if args.no_display else "--display")
-            chase_bridge_proc = pm.spawn(
-                chase_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        # Tracker camera (always launched if video is on, no OSD)
-        log.info("Discovering tracker camera topic …")
-        tracker_candidates = list_camera_topics(name_hint="fpv_tracker_cam")
-        if tracker_candidates:
-            log.info("Tracker candidates: %s", ", ".join(tracker_candidates))
-        tracker_topic = discover_camera_topic(
-            name_hint="fpv_tracker_cam",
-            timeout=30,
-            model_hint=args.topic_model_hint,
-        )
-        if not tracker_topic:
-            log.warning("Tracker camera topic not found — skipping")
-        else:
-            log.info("Found tracker camera topic: %s", tracker_topic)
-            tracker_cmd = [IMAGE_BRIDGE, tracker_topic, "--no-osd"]
-            tracker_cmd.extend(["--out-width", str(args.tracker_cam_width), "--out-height", str(args.tracker_cam_height)])
-            tracker_cmd.append("--no-display" if args.no_display else "--display")
-            # Optional RTSP push of the clean (no-OSD) tracker feed.
-            if getattr(args, "tracker_rtsp", None):
-                tracker_cmd.extend([
-                    "--rtsp", args.tracker_rtsp,
-                    "--stream-fps", str(getattr(args, "tracker_cam_fps", 30)),
-                    "--stream-bitrate", str(getattr(args, "tracker_rtsp_bitrate", "4M")),
-                    "--stream-preset", str(getattr(args, "tracker_rtsp_preset", "ultrafast")),
-                    "--stream-tune", str(getattr(args, "tracker_rtsp_tune", "zerolatency")),
-                ])
-                rtsp_w = int(getattr(args, "tracker_rtsp_width", 0) or 0)
-                rtsp_h = int(getattr(args, "tracker_rtsp_height", 0) or 0)
-                if rtsp_w > 0 and rtsp_h > 0:
-                    tracker_cmd.extend(["--stream-width", str(rtsp_w),
-                                        "--stream-height", str(rtsp_h)])
-                log.info("Tracker RTSP stream → %s (%dfps, %s, preset=%s, tune=%s, res=%s)",
-                         args.tracker_rtsp, getattr(args, "tracker_cam_fps", 30),
-                         getattr(args, "tracker_rtsp_bitrate", "4M"),
-                         getattr(args, "tracker_rtsp_preset", "ultrafast"),
-                         getattr(args, "tracker_rtsp_tune", "zerolatency"),
-                         f"{rtsp_w}x{rtsp_h}" if rtsp_w > 0 and rtsp_h > 0 else "camera")
-            tracker_bridge_proc = pm.spawn(
-                tracker_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        # Thermal camera (optional — a 2nd tracker feed, white-hot, no OSD).
-        if getattr(args, "thermal_cam", False):
-            log.info("Discovering thermal camera topic …")
-            thermal_topic = discover_camera_topic(
-                name_hint="fpv_thermal_cam",
-                timeout=30,
-                model_hint=args.topic_model_hint,
-            )
-            if not thermal_topic:
-                log.warning("Thermal camera topic not found — skipping "
-                            "(is the thermal sensor in the model?)")
-            else:
-                log.info("Found thermal camera topic: %s", thermal_topic)
-                thermal_cmd = [IMAGE_BRIDGE, thermal_topic, "--no-osd", "--thermal"]
-                thermal_cmd.extend(["--out-width", str(args.thermal_cam_width),
-                                    "--out-height", str(args.thermal_cam_height)])
-                thermal_cmd.append("--no-display" if args.no_display else "--display")
-                if getattr(args, "thermal_rtsp", None):
-                    thermal_cmd.extend([
-                        "--rtsp", args.thermal_rtsp,
-                        "--stream-fps", str(getattr(args, "thermal_cam_fps", 30)),
-                        "--stream-bitrate", str(getattr(args, "thermal_rtsp_bitrate", "4M")),
-                        "--stream-preset", str(getattr(args, "thermal_rtsp_preset", "ultrafast")),
-                        "--stream-tune", str(getattr(args, "thermal_rtsp_tune", "zerolatency")),
-                    ])
-                    t_w = int(getattr(args, "thermal_rtsp_width", 0) or 0)
-                    t_h = int(getattr(args, "thermal_rtsp_height", 0) or 0)
-                    if t_w > 0 and t_h > 0:
-                        thermal_cmd.extend(["--stream-width", str(t_w),
-                                            "--stream-height", str(t_h)])
-                    log.info("Thermal RTSP stream → %s (%dfps, %s, preset=%s, tune=%s, res=%s)",
-                             args.thermal_rtsp, getattr(args, "thermal_cam_fps", 30),
-                             getattr(args, "thermal_rtsp_bitrate", "4M"),
-                             getattr(args, "thermal_rtsp_preset", "ultrafast"),
-                             getattr(args, "thermal_rtsp_tune", "zerolatency"),
-                             f"{t_w}x{t_h}" if t_w > 0 and t_h > 0 else "camera")
-                pm.spawn(thermal_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # ── Tracker WIDE / NARROW + thermal feeds (spherical/fisheye, no OSD). ──
+        # Each is gated by its --…-cam toggle inside the shared helper.
+        start_tracker_bridges(args, pm)
 
     # ── 6. Print connection info ──
     _print_status(
