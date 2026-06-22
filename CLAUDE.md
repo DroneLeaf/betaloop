@@ -134,3 +134,13 @@ any new motion so Ctrl-C exits cleanly.
   `target_model_uri` / `target_visual_pose` / `target_scale`. `--target-drone` on
   both launchers; WORLD_MAP marks drone-target worlds `"target_drone": True`
   (proximity bbox then comes from `TARGET_REFS`, not WORLD_MAP).
+
+## Session Addendum (2026-06-23) — per-camera fisheye toggle
+
+- `--tracker-wide-fisheye` / `--tracker-narrow-fisheye` / `--thermal-fisheye`
+  (BooleanOptional on both `start.py` and `start_px4.py`) pick fisheye
+  (wideanglecamera) vs rectilinear per feed; defaults wide=fisheye,
+  narrow=rectilinear, thermal=rectilinear. `compute_model_vars` gained
+  `tracker_wide_fisheye` / `tracker_narrow_fisheye` / `thermal_fisheye`, emitted to
+  the model templates. `launch.sh`/`launch_px4.sh` forward the flags via their
+  catch-all `*)` case (no explicit case needed).

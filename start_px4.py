@@ -125,11 +125,11 @@ def parse_args():
     sim.add_argument("--pilot-cam", action=argparse.BooleanOptionalAction, default=True,
                      help="Enable the pilot/FPV camera (rectilinear, OSD) (default: on)")
     sim.add_argument("--tracker-wide-cam", action=argparse.BooleanOptionalAction, default=True,
-                     help="Enable the wide-FOV tracker camera (spherical/fisheye) (default: on)")
+                     help="Enable the wide-FOV tracker camera (fisheye by default) (default: on)")
     sim.add_argument("--tracker-narrow-cam", action=argparse.BooleanOptionalAction, default=False,
-                     help="Enable the narrow-FOV tracker camera (spherical/fisheye) (default: off)")
+                     help="Enable the narrow-FOV tracker camera (rectilinear by default) (default: off)")
     sim.add_argument("--thermal-cam", action=argparse.BooleanOptionalAction, default=False,
-                     help="Enable the thermal camera (spherical/fisheye, white-hot) (default: off)")
+                     help="Enable the thermal camera (rectilinear by default, white-hot) (default: off)")
     # ── Pilot (FPV) camera geometry — rectilinear ──
     sim.add_argument("--fpv-hfov", type=float, default=114.6,
                      help="Pilot camera horizontal FOV in degrees (default: 114.6)")
@@ -139,7 +139,7 @@ def parse_args():
                      help="Pilot camera output width in pixels (default: 640)")
     sim.add_argument("--fpv-cam-height", type=float, default=480,
                      help="Pilot camera output height in pixels (default: 480)")
-    # ── Tracker WIDE camera geometry — spherical/fisheye ──
+    # ── Tracker WIDE camera geometry (fisheye/rectilinear via --tracker-wide-fisheye) ──
     sim.add_argument("--tracker-wide-cam-pitch", type=float, default=-80.0,
                      help="Wide tracker camera pitch in degrees (default: -80)")
     sim.add_argument("--tracker-wide-cam-roll", type=float, default=0.0,
@@ -154,7 +154,10 @@ def parse_args():
                      help="Wide tracker camera output height in pixels (default: 480)")
     sim.add_argument("--tracker-wide-cam-fps", type=int, default=30,
                      help="Wide tracker camera Gazebo update rate in Hz (default: 30)")
-    # ── Tracker NARROW camera geometry — spherical/fisheye, narrower FOV ──
+    sim.add_argument("--tracker-wide-fisheye", action=argparse.BooleanOptionalAction, default=True,
+                     help="Render the wide tracker as fisheye (wideanglecamera); "
+                          "--no-tracker-wide-fisheye makes it rectilinear (default: fisheye)")
+    # ── Tracker NARROW camera geometry (rectilinear/fisheye via --tracker-narrow-fisheye) ──
     sim.add_argument("--tracker-narrow-cam-pitch", type=float, default=-80.0,
                      help="Narrow tracker camera pitch in degrees (default: -80)")
     sim.add_argument("--tracker-narrow-cam-roll", type=float, default=0.0,
@@ -169,7 +172,10 @@ def parse_args():
                      help="Narrow tracker camera output height in pixels (default: 480)")
     sim.add_argument("--tracker-narrow-cam-fps", type=int, default=30,
                      help="Narrow tracker camera Gazebo update rate in Hz (default: 30)")
-    # ── Thermal camera geometry — spherical/fisheye, white-hot ──
+    sim.add_argument("--tracker-narrow-fisheye", action=argparse.BooleanOptionalAction, default=False,
+                     help="Render the narrow tracker as fisheye (wideanglecamera); default "
+                          "rectilinear, pass --tracker-narrow-fisheye to enable (default: rectilinear)")
+    # ── Thermal camera geometry (rectilinear/fisheye via --thermal-fisheye), white-hot ──
     sim.add_argument("--thermal-cam-pitch", type=float, default=-80.0,
                      help="Thermal camera pitch in degrees (default: -80)")
     sim.add_argument("--thermal-cam-roll", type=float, default=0.0,
@@ -184,6 +190,9 @@ def parse_args():
                      help="Thermal camera output height in pixels (default: 480)")
     sim.add_argument("--thermal-cam-fps", type=int, default=30,
                      help="Thermal camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--thermal-fisheye", action=argparse.BooleanOptionalAction, default=False,
+                     help="Render the thermal cam as fisheye (wideanglecamera); default "
+                          "rectilinear, pass --thermal-fisheye to enable (default: rectilinear)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     sim.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -325,6 +334,7 @@ def main():
         tracker_wide_vfov_deg=args.tracker_wide_vfov,
         tracker_wide_cam_width=args.tracker_wide_cam_width,
         tracker_wide_cam_fps=getattr(args, "tracker_wide_cam_fps", 30),
+        tracker_wide_fisheye=getattr(args, "tracker_wide_fisheye", True),
         tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
         tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
@@ -332,6 +342,7 @@ def main():
         tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
         tracker_narrow_cam_width=args.tracker_narrow_cam_width,
         tracker_narrow_cam_fps=getattr(args, "tracker_narrow_cam_fps", 30),
+        tracker_narrow_fisheye=getattr(args, "tracker_narrow_fisheye", False),
         thermal_cam_enabled=getattr(args, "thermal_cam", False),
         thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
         thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
@@ -339,6 +350,7 @@ def main():
         thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
         thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
+        thermal_fisheye=getattr(args, "thermal_fisheye", False),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
     world_vars = compute_world_vars(
@@ -441,7 +453,7 @@ def main():
     log.info("MAVLink OSD enabled (UDP port %d)", args.mavlink_port)
     fpv_bridge_proc, width, height = start_fpv_bridge(args, pm, osd_args=osd_args)
     chase_bridge_proc = start_chase_bridge(args, pm)
-    # Optional clean (no-OSD) spherical/fisheye wide + narrow tracker + thermal feeds.
+    # Optional clean (no-OSD) wide + narrow tracker + thermal feeds.
     start_tracker_bridges(args, pm)
 
     # ── 5. Target trajectory threads ──

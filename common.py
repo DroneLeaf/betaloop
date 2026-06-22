@@ -166,6 +166,7 @@ def compute_model_vars(
     tracker_wide_vfov_deg: float = 98.9,
     tracker_wide_cam_width: int = 640,
     tracker_wide_cam_fps: int = 30,
+    tracker_wide_fisheye: bool = True,
     tracker_narrow_enabled: bool = False,
     tracker_narrow_cam_pitch: float = -80.0,
     tracker_narrow_cam_roll: float = 0.0,
@@ -173,6 +174,7 @@ def compute_model_vars(
     tracker_narrow_vfov_deg: float = 34.0,
     tracker_narrow_cam_width: int = 640,
     tracker_narrow_cam_fps: int = 30,
+    tracker_narrow_fisheye: bool = False,
     thermal_cam_enabled: bool = False,
     thermal_cam_pitch: float = -80.0,
     thermal_cam_roll: float = 0.0,
@@ -180,6 +182,7 @@ def compute_model_vars(
     thermal_vfov_deg: float = 98.9,
     thermal_cam_width: int = 640,
     thermal_cam_fps: int = 30,
+    thermal_fisheye: bool = False,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -203,7 +206,7 @@ def compute_model_vars(
     tracker_narrow_cam_roll_rad = math.radians(tracker_narrow_cam_roll)
 
     # Derive source heights from HFOV/VFOV (stretched to output later).
-    # Wide tracker is spherical/fisheye (wideanglecamera); narrow + thermal rectilinear.
+    # Source heights derive from HFOV/VFOV; fisheye vs rectilinear is per-camera (*_fisheye).
     fpv_hfov_rad = math.radians(fpv_hfov_deg)
     tracker_wide_hfov_rad = math.radians(tracker_wide_hfov_deg)
     tracker_narrow_hfov_rad = math.radians(tracker_narrow_hfov_deg)
@@ -217,7 +220,7 @@ def compute_model_vars(
     tracker_narrow_img_height = round(tracker_narrow_img_width * math.tan(math.radians(tracker_narrow_vfov_deg) / 2)
                                       / math.tan(tracker_narrow_hfov_rad / 2))
 
-    # Thermal: optional spherical/fisheye sensor; white-hot applied downstream.
+    # Thermal: optional sensor (fisheye/rectilinear per thermal_fisheye); white-hot downstream.
     thermal_cam_pitch_rad = math.radians(thermal_cam_pitch)
     thermal_cam_roll_rad = math.radians(thermal_cam_roll)
     thermal_hfov_rad = math.radians(thermal_hfov_deg)
@@ -235,7 +238,7 @@ def compute_model_vars(
         "fpv_hfov_rad": fpv_hfov_rad,
         "fpv_img_width": fpv_img_width,
         "fpv_img_height": fpv_img_height,
-        # Tracker WIDE camera — spherical/fisheye
+        # Tracker WIDE camera (fisheye by default; tracker_wide_fisheye)
         "tracker_wide_cam_enabled": bool(tracker_wide_cam_enabled),
         "tracker_wide_cam_pitch_rad": tracker_wide_cam_pitch_rad,
         "tracker_wide_cam_roll_rad": tracker_wide_cam_roll_rad,
@@ -243,7 +246,8 @@ def compute_model_vars(
         "tracker_wide_img_width": tracker_wide_img_width,
         "tracker_wide_img_height": tracker_wide_img_height,
         "tracker_wide_cam_fps": max(1, int(tracker_wide_cam_fps)),
-        # Tracker NARROW camera — rectilinear, narrower FOV
+        "tracker_wide_fisheye": bool(tracker_wide_fisheye),
+        # Tracker NARROW camera (rectilinear by default; tracker_narrow_fisheye), narrower FOV
         "tracker_narrow_enabled": bool(tracker_narrow_enabled),
         "tracker_narrow_cam_pitch_rad": tracker_narrow_cam_pitch_rad,
         "tracker_narrow_cam_roll_rad": tracker_narrow_cam_roll_rad,
@@ -251,7 +255,8 @@ def compute_model_vars(
         "tracker_narrow_img_width": tracker_narrow_img_width,
         "tracker_narrow_img_height": tracker_narrow_img_height,
         "tracker_narrow_cam_fps": max(1, int(tracker_narrow_cam_fps)),
-        # Thermal camera — rectilinear, white-hot downstream
+        "tracker_narrow_fisheye": bool(tracker_narrow_fisheye),
+        # Thermal camera (rectilinear by default; thermal_fisheye), white-hot downstream
         "thermal_cam_enabled": bool(thermal_cam_enabled),
         "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
         "thermal_cam_roll_rad": thermal_cam_roll_rad,
@@ -259,6 +264,7 @@ def compute_model_vars(
         "thermal_img_width": thermal_img_width,
         "thermal_img_height": thermal_img_height,
         "thermal_cam_fps": max(1, int(thermal_cam_fps)),
+        "thermal_fisheye": bool(thermal_fisheye),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
         "standoff_height": _standoff, "leg_z": leg_z,
@@ -276,6 +282,8 @@ def compute_model_vars(
     log.info("Cameras: pilot=%s wide=%s narrow=%s thermal=%s chase=%s",
              pilot_cam_enabled, tracker_wide_cam_enabled, tracker_narrow_enabled,
              thermal_cam_enabled, chase_cam_enabled)
+    log.info("Fisheye: wide=%s narrow=%s thermal=%s",
+             tracker_wide_fisheye, tracker_narrow_fisheye, thermal_fisheye)
     log.info("Camera source sizes: FPV %dx%d, wide %dx%d, narrow %dx%d",
              fpv_img_width, fpv_img_height, tracker_wide_img_width, tracker_wide_img_height,
              tracker_narrow_img_width, tracker_narrow_img_height)
@@ -750,8 +758,8 @@ def _append_rtsp(cmd, rtsp_url, fps, bitrate, preset, tune, width, height, label
 def start_tracker_bridges(args, pm: ProcessManager):
     """Spawn the optional clean (no-OSD) tracker feeds — shared by BF + PX4 stacks.
 
-    Spawns a gz_image_bridge per enabled sensor: the spherical/fisheye wide and
-    narrow tracker cameras and the spherical/fisheye white-hot thermal camera.
+    Spawns a gz_image_bridge per enabled sensor: the wide and narrow tracker
+    cameras and the white-hot thermal camera (each fisheye or rectilinear).
     Each is gated by its ``--…-cam`` toggle; missing topics are skipped, not fatal.
     """
     if getattr(args, "no_video", False):

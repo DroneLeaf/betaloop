@@ -7,13 +7,16 @@ dynamics at 250 Hz.  OSD is always enabled.
 
 Cameras (each independently switchable on/off before launch):
   - pilot          fpv_cam                rectilinear, OSD   --pilot-cam/--no-pilot-cam
-  - tracker-wide   fpv_tracker_wide_cam   spherical/fisheye  --tracker-wide-cam/--no-...
-  - tracker-narrow fpv_tracker_narrow_cam spherical/fisheye  --tracker-narrow-cam/--no-...
-  - thermal        fpv_thermal_cam        fisheye, white-hot --thermal-cam/--no-thermal-cam
+  - tracker-wide   fpv_tracker_wide_cam   fisheye (default)  --tracker-wide-cam/--no-...
+  - tracker-narrow fpv_tracker_narrow_cam rectilinear (def.) --tracker-narrow-cam/--no-...
+  - thermal        fpv_thermal_cam        rectilinear, w-hot --thermal-cam/--no-thermal-cam
   - chase          chase_cam              rectilinear 3rd-pp --chase-cam/--no-chase-cam
 
-The tracker + thermal cameras are spherical (fisheye) so they match the
-spherical-calibrated camera the MSC/PN guidance estimator assumes.
+Each tracker/thermal feed's projection is independently selectable between fisheye
+(wideanglecamera) and rectilinear via --<feed>-fisheye / --no-<feed>-fisheye.
+Fisheye matches the spherical-calibrated camera the MSC/PN guidance estimator
+assumes; rectilinear renders faster (fisheye cubemaps serialise the gz render
+thread). Defaults: wide=fisheye, narrow=rectilinear, thermal=rectilinear.
 
 Usage:
     python3 start.py --world park_chase --gazebo
@@ -167,6 +170,7 @@ def _render_all_templates(drone, world_name, args):
         tracker_wide_vfov_deg=args.tracker_wide_vfov,
         tracker_wide_cam_width=args.tracker_wide_cam_width,
         tracker_wide_cam_fps=getattr(args, "tracker_wide_cam_fps", 30),
+        tracker_wide_fisheye=getattr(args, "tracker_wide_fisheye", True),
         tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
         tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
@@ -174,6 +178,7 @@ def _render_all_templates(drone, world_name, args):
         tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
         tracker_narrow_cam_width=args.tracker_narrow_cam_width,
         tracker_narrow_cam_fps=getattr(args, "tracker_narrow_cam_fps", 30),
+        tracker_narrow_fisheye=getattr(args, "tracker_narrow_fisheye", False),
         thermal_cam_enabled=getattr(args, "thermal_cam", False),
         thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
         thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
@@ -181,6 +186,7 @@ def _render_all_templates(drone, world_name, args):
         thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
         thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
+        thermal_fisheye=getattr(args, "thermal_fisheye", False),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
 
@@ -296,13 +302,13 @@ def parse_args():
         "--tracker-wide-cam",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable the wide-FOV tracker camera (spherical/fisheye) (default: on)",
+        help="Enable the wide-FOV tracker camera (fisheye by default) (default: on)",
     )
     sim.add_argument(
         "--tracker-narrow-cam",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable the narrow-FOV tracker camera (spherical/fisheye) (default: off)",
+        help="Enable the narrow-FOV tracker camera (rectilinear by default) (default: off)",
     )
     sim.add_argument(
         "--chase-cam",
@@ -394,7 +400,7 @@ def parse_args():
     drn.add_argument("--fpv-cam-height", type=float, default=480,
                      help="Pilot camera output height in pixels (default: 480)")
 
-    # ── Tracker WIDE camera geometry — spherical/fisheye ──
+    # ── Tracker WIDE camera geometry (fisheye/rectilinear via --tracker-wide-fisheye) ──
     drn.add_argument(
         "--tracker-wide-cam-pitch",
         type=float,
@@ -426,6 +432,9 @@ def parse_args():
     drn.add_argument("--tracker-wide-cam-fps", type=int, default=30,
                      help="Wide tracker camera Gazebo update rate in Hz; also the RTSP "
                           "stream framerate (default: 30)")
+    drn.add_argument("--tracker-wide-fisheye", action=argparse.BooleanOptionalAction, default=True,
+                     help="Render the wide tracker as fisheye (wideanglecamera). "
+                          "--no-tracker-wide-fisheye makes it rectilinear (default: fisheye)")
     drn.add_argument("--tracker-wide-rtsp", type=str, default=None, metavar="URL",
                      help="Push the (clean, no-OSD) wide tracker feed as H.264 to this "
                           "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_wide (off if unset)")
@@ -440,7 +449,7 @@ def parse_args():
     drn.add_argument("--tracker-wide-rtsp-height", type=int, default=0,
                      help="Explicit wide tracker RTSP output height in px (0=camera height)")
 
-    # ── Tracker NARROW camera geometry — spherical/fisheye, narrower FOV ──
+    # ── Tracker NARROW camera geometry (rectilinear/fisheye via --tracker-narrow-fisheye), narrower FOV ──
     drn.add_argument(
         "--tracker-narrow-cam-pitch",
         type=float,
@@ -472,6 +481,9 @@ def parse_args():
     drn.add_argument("--tracker-narrow-cam-fps", type=int, default=30,
                      help="Narrow tracker camera Gazebo update rate in Hz; also the RTSP "
                           "stream framerate (default: 30)")
+    drn.add_argument("--tracker-narrow-fisheye", action=argparse.BooleanOptionalAction, default=False,
+                     help="Render the narrow tracker as fisheye (wideanglecamera). Default is "
+                          "rectilinear; pass --tracker-narrow-fisheye to enable (default: rectilinear)")
     drn.add_argument("--tracker-narrow-rtsp", type=str, default=None, metavar="URL",
                      help="Push the (clean, no-OSD) narrow tracker feed as H.264 to this "
                           "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_narrow (off if unset)")
@@ -486,10 +498,10 @@ def parse_args():
     drn.add_argument("--tracker-narrow-rtsp-height", type=int, default=0,
                      help="Explicit narrow tracker RTSP output height in px (0=camera height)")
 
-    # ── Thermal camera (optional dedicated spherical/fisheye sensor; white-hot) ──
+    # ── Thermal camera (optional dedicated sensor, rectilinear/fisheye via --thermal-fisheye; white-hot) ──
     drn.add_argument("--thermal-cam", action=argparse.BooleanOptionalAction, default=False,
                      help="Enable the simulated thermal camera (a 2nd tracker feed, "
-                          "white-hot grayscale, dedicated spherical/fisheye sensor) (default: off)")
+                          "white-hot grayscale, dedicated sensor, rectilinear by default) (default: off)")
     drn.add_argument("--thermal-cam-pitch", type=float, default=-80.0,
                      help="Thermal camera tilt in degrees (default: -80)")
     drn.add_argument("--thermal-cam-roll", type=float, default=0.0,
@@ -504,6 +516,9 @@ def parse_args():
                      help="Thermal camera output height in px (default: 480)")
     drn.add_argument("--thermal-cam-fps", type=int, default=30,
                      help="Thermal camera Gazebo update rate / RTSP framerate (default: 30)")
+    drn.add_argument("--thermal-fisheye", action=argparse.BooleanOptionalAction, default=False,
+                     help="Render the thermal cam as fisheye (wideanglecamera). Default is "
+                          "rectilinear; pass --thermal-fisheye to enable (default: rectilinear)")
     drn.add_argument("--thermal-rtsp", type=str, default=None, metavar="URL",
                      help="Push the thermal feed as H.264 to this RTSP URL "
                           "(off if unset), e.g. rtsp://127.0.0.1:8554/thermal")
@@ -985,7 +1000,7 @@ def main():
                     stderr=subprocess.DEVNULL,
                 )
 
-        # ── Tracker WIDE / NARROW + thermal feeds (spherical/fisheye, no OSD). ──
+        # ── Tracker WIDE / NARROW + thermal feeds (clean, no OSD). ──
         # Each is gated by its --…-cam toggle inside the shared helper.
         start_tracker_bridges(args, pm)
 
