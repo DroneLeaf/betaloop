@@ -144,3 +144,14 @@ any new motion so Ctrl-C exits cleanly.
   `tracker_wide_fisheye` / `tracker_narrow_fisheye` / `thermal_fisheye`, emitted to
   the model templates. `launch.sh`/`launch_px4.sh` forward the flags via their
   catch-all `*)` case (no explicit case needed).
+
+## Session Addendum (2026-06-23) — utility camera
+
+- `--utility-cam` (+ `--utility-cam-pitch/-roll`, `--utility-hfov/-vfov`,
+  `--utility-cam-width/-height/-fps`, `--utility-fisheye`, and BF-only
+  `--utility-rtsp[...]`) add a 4th clean tracker-style feed `fpv_utility_cam`, cloned
+  from the wide tracker. `compute_model_vars` gained `utility_*` params/vars;
+  `start_tracker_bridges` feeds tuple got
+  `("utility_cam","fpv_utility_cam",[],"utility","Utility")` → SHM + (BF) RTSP.
+  start_px4.py mirrors enable+geometry+fisheye (no per-feed RTSP, like the other px4
+  feeds). Defaults seeded from wide (fisheye on, 114.6/98.9), enable default off.

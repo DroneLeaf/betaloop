@@ -187,6 +187,14 @@ def _render_all_templates(drone, world_name, args):
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
         thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
         thermal_fisheye=getattr(args, "thermal_fisheye", False),
+        utility_cam_enabled=getattr(args, "utility_cam", False),
+        utility_cam_pitch=getattr(args, "utility_cam_pitch", -80.0),
+        utility_cam_roll=getattr(args, "utility_cam_roll", 0.0),
+        utility_hfov_deg=getattr(args, "utility_hfov", 114.6),
+        utility_vfov_deg=getattr(args, "utility_vfov", 98.9),
+        utility_cam_width=getattr(args, "utility_cam_width", 640),
+        utility_cam_fps=getattr(args, "utility_cam_fps", 30),
+        utility_fisheye=getattr(args, "utility_fisheye", True),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
 
@@ -532,6 +540,42 @@ def parse_args():
                      help="Explicit thermal RTSP output width in px (0=camera width)")
     drn.add_argument("--thermal-rtsp-height", type=int, default=0,
                      help="Explicit thermal RTSP output height in px (0=camera height)")
+
+    # ── Utility camera (clone of the wide tracker; clean, no OSD; own SHM + RTSP) ──
+    drn.add_argument("--utility-cam", action=argparse.BooleanOptionalAction, default=False,
+                     help="Enable the utility camera — a clone of the wide tracker feed "
+                          "(clean/no-OSD, own SHM `fpv_utility_cam` + optional RTSP) (default: off)")
+    drn.add_argument("--utility-cam-pitch", type=float, default=-80.0,
+                     help="Utility camera tilt in degrees (default: -80)")
+    drn.add_argument("--utility-cam-roll", type=float, default=0.0,
+                     help="Utility camera twist in degrees (default: 0)")
+    drn.add_argument("--utility-hfov", type=float, default=114.6,
+                     help="Utility camera horizontal FOV in degrees (default: 114.6)")
+    drn.add_argument("--utility-vfov", type=float, default=98.9,
+                     help="Utility camera vertical FOV in degrees (default: 98.9)")
+    drn.add_argument("--utility-cam-width", type=float, default=640,
+                     help="Utility camera output width in px (default: 640)")
+    drn.add_argument("--utility-cam-height", type=float, default=480,
+                     help="Utility camera output height in px (default: 480)")
+    drn.add_argument("--utility-cam-fps", type=int, default=30,
+                     help="Utility camera Gazebo update rate / RTSP framerate (default: 30)")
+    drn.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
+                     help="Render the utility cam as fisheye (wideanglecamera); "
+                          "--no-utility-fisheye makes it rectilinear (default: fisheye)")
+    drn.add_argument("--utility-rtsp", type=str, default=None, metavar="URL",
+                     help="Push the utility feed as H.264 to this RTSP URL "
+                          "(off if unset), e.g. rtsp://127.0.0.1:8554/utility")
+    drn.add_argument("--utility-rtsp-bitrate", type=str, default="4M",
+                     help="Utility RTSP libx264 target bitrate (default: 4M)")
+    drn.add_argument("--utility-rtsp-preset", type=str, default="ultrafast",
+                     help="Utility RTSP libx264 preset (default: ultrafast)")
+    drn.add_argument("--utility-rtsp-tune", type=str, default="zerolatency",
+                     help="Utility RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--utility-rtsp-width", type=int, default=0,
+                     help="Explicit utility RTSP output width in px (0=camera width)")
+    drn.add_argument("--utility-rtsp-height", type=int, default=0,
+                     help="Explicit utility RTSP output height in px (0=camera height)")
+
     # Backward compatibility: applies to both cameras if explicitly provided.
     drn.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")

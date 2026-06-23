@@ -183,6 +183,14 @@ def compute_model_vars(
     thermal_cam_width: int = 640,
     thermal_cam_fps: int = 30,
     thermal_fisheye: bool = False,
+    utility_cam_enabled: bool = False,
+    utility_cam_pitch: float = -80.0,
+    utility_cam_roll: float = 0.0,
+    utility_hfov_deg: float = 114.6,
+    utility_vfov_deg: float = 98.9,
+    utility_cam_width: int = 640,
+    utility_cam_fps: int = 30,
+    utility_fisheye: bool = True,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -228,6 +236,14 @@ def compute_model_vars(
     thermal_img_height = round(thermal_img_width * math.tan(math.radians(thermal_vfov_deg) / 2)
                                / math.tan(thermal_hfov_rad / 2))
 
+    # Utility camera: clone of the wide tracker (fisheye/rectilinear per utility_fisheye).
+    utility_cam_pitch_rad = math.radians(utility_cam_pitch)
+    utility_cam_roll_rad = math.radians(utility_cam_roll)
+    utility_hfov_rad = math.radians(utility_hfov_deg)
+    utility_img_width = max(64, int(utility_cam_width))
+    utility_img_height = round(utility_img_width * math.tan(math.radians(utility_vfov_deg) / 2)
+                               / math.tan(utility_hfov_rad / 2))
+
     dd = ref["default_damping"]
     do = damping_overrides or {}
     model_vars = {
@@ -265,6 +281,15 @@ def compute_model_vars(
         "thermal_img_height": thermal_img_height,
         "thermal_cam_fps": max(1, int(thermal_cam_fps)),
         "thermal_fisheye": bool(thermal_fisheye),
+        # Utility camera (clone of wide tracker; fisheye by default; utility_fisheye)
+        "utility_cam_enabled": bool(utility_cam_enabled),
+        "utility_cam_pitch_rad": utility_cam_pitch_rad,
+        "utility_cam_roll_rad": utility_cam_roll_rad,
+        "utility_hfov_rad": utility_hfov_rad,
+        "utility_img_width": utility_img_width,
+        "utility_img_height": utility_img_height,
+        "utility_cam_fps": max(1, int(utility_cam_fps)),
+        "utility_fisheye": bool(utility_fisheye),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
         "standoff_height": _standoff, "leg_z": leg_z,
@@ -279,11 +304,11 @@ def compute_model_vars(
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
              _ctw, mass, ixx, iyy, izz, _standoff, cam_pitch)
-    log.info("Cameras: pilot=%s wide=%s narrow=%s thermal=%s chase=%s",
+    log.info("Cameras: pilot=%s wide=%s narrow=%s thermal=%s utility=%s chase=%s",
              pilot_cam_enabled, tracker_wide_cam_enabled, tracker_narrow_enabled,
-             thermal_cam_enabled, chase_cam_enabled)
-    log.info("Fisheye: wide=%s narrow=%s thermal=%s",
-             tracker_wide_fisheye, tracker_narrow_fisheye, thermal_fisheye)
+             thermal_cam_enabled, utility_cam_enabled, chase_cam_enabled)
+    log.info("Fisheye: wide=%s narrow=%s thermal=%s utility=%s",
+             tracker_wide_fisheye, tracker_narrow_fisheye, thermal_fisheye, utility_fisheye)
     log.info("Camera source sizes: FPV %dx%d, wide %dx%d, narrow %dx%d",
              fpv_img_width, fpv_img_height, tracker_wide_img_width, tracker_wide_img_height,
              tracker_narrow_img_width, tracker_narrow_img_height)
@@ -776,6 +801,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         ("tracker_wide_cam",   "fpv_tracker_wide_cam",   [],            "tracker_wide",   "Wide tracker"),
         ("tracker_narrow_cam", "fpv_tracker_narrow_cam", [],            "tracker_narrow", "Narrow tracker"),
         ("thermal_cam",        "fpv_thermal_cam",        ["--thermal"], "thermal",        "Thermal"),
+        ("utility_cam",        "fpv_utility_cam",        [],            "utility",        "Utility"),
     ]
     for enable_attr, name_hint, extra_flags, rp, label in feeds:
         if not getattr(args, enable_attr, False):

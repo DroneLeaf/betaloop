@@ -193,6 +193,27 @@ def parse_args():
     sim.add_argument("--thermal-fisheye", action=argparse.BooleanOptionalAction, default=False,
                      help="Render the thermal cam as fisheye (wideanglecamera); default "
                           "rectilinear, pass --thermal-fisheye to enable (default: rectilinear)")
+    # ── Utility camera (clone of the wide tracker; clean, no OSD; own SHM) ──
+    sim.add_argument("--utility-cam", action=argparse.BooleanOptionalAction, default=False,
+                     help="Enable the utility camera — clone of the wide tracker feed "
+                          "(clean/no-OSD, own SHM fpv_utility_cam) (default: off)")
+    sim.add_argument("--utility-cam-pitch", type=float, default=-80.0,
+                     help="Utility camera pitch in degrees (default: -80)")
+    sim.add_argument("--utility-cam-roll", type=float, default=0.0,
+                     help="Utility camera roll in degrees (default: 0)")
+    sim.add_argument("--utility-hfov", type=float, default=114.6,
+                     help="Utility camera horizontal FOV in degrees (default: 114.6)")
+    sim.add_argument("--utility-vfov", type=float, default=98.9,
+                     help="Utility camera vertical FOV in degrees (default: 98.9)")
+    sim.add_argument("--utility-cam-width", type=float, default=640,
+                     help="Utility camera source width in pixels (default: 640)")
+    sim.add_argument("--utility-cam-height", type=float, default=480,
+                     help="Utility camera output height in pixels (default: 480)")
+    sim.add_argument("--utility-cam-fps", type=int, default=30,
+                     help="Utility camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
+                     help="Render the utility cam as fisheye (wideanglecamera); "
+                          "--no-utility-fisheye makes it rectilinear (default: fisheye)")
     # Backward compatibility: applies to both cameras if explicitly provided.
     sim.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -351,6 +372,14 @@ def main():
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
         thermal_cam_fps=getattr(args, "thermal_cam_fps", 30),
         thermal_fisheye=getattr(args, "thermal_fisheye", False),
+        utility_cam_enabled=getattr(args, "utility_cam", False),
+        utility_cam_pitch=getattr(args, "utility_cam_pitch", -80.0),
+        utility_cam_roll=getattr(args, "utility_cam_roll", 0.0),
+        utility_hfov_deg=getattr(args, "utility_hfov", 114.6),
+        utility_vfov_deg=getattr(args, "utility_vfov", 98.9),
+        utility_cam_width=getattr(args, "utility_cam_width", 640),
+        utility_cam_fps=getattr(args, "utility_cam_fps", 30),
+        utility_fisheye=getattr(args, "utility_fisheye", True),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
     world_vars = compute_world_vars(
