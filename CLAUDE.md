@@ -166,3 +166,19 @@ any new motion so Ctrl-C exits cleanly.
   `models/<target>/model.sdf.j2` (both shahed + stingjet) with `target_scale`.
   `--target-scale` on start.py + start_px4.py; both use the scaled
   `world_vars["target_bbox"]` for `--target-bbox`.
+
+## Session Addendum (2026-06-23) — parametric moving_target trajectory
+
+- `common.py`: `start_orbit_thread`/`start_patrol_thread` superseded by
+  `start_trajectory_thread` (60 Hz, `<Qd3d4d` to 9016 + mirror 9018, reset on 9017
+  → s=0). Pure helpers `_traj_local_path` (oval/circle/line, path(0)=(0,0), +X start),
+  `trajectory_sample` (world E/N/yaw after rotation+offset), `trajectory_start_pose`
+  (s=0, for the world spawn). `TRAJ_TYPES = (oval,circle,line)`.
+- `compute_world_vars` gained `traj_type/traj_rotation_deg/traj_offset_ew/ns/
+  oval_ew_len/oval_ns_len/corner_radius/circle_radius/line_length/player_heading_deg`
+  (all None-coalesced) → emits `target_spawn_x/y/yaw` + `player_heading_rad`.
+- WORLD_MAP collapsed to `moving_target` (`trajectory_drive: True`,
+  target_model `moving_target`); `park_chase`/`patrol_park` removed from both
+  start.py + start_px4.py + reset_world.py. Dispatch is a single
+  `if trajectory_drive: start_trajectory_thread(...)`. `DEFAULT_WORLD=moving_target`
+  (start.py). The legacy `--target-orbit-*`/`--patrol-*` args remain defined but unused.

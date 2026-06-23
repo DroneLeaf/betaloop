@@ -11,7 +11,7 @@ to px4_sim_bridge on the host via TCP port 4560.
 
 Usage:
     # Minimal — start bridge + Gazebo, PX4 connects from container
-    python3 start_px4.py --world park_chase --gazebo
+    python3 start_px4.py --world moving_target --gazebo
 
     # With video pipeline
     python3 start_px4.py --world balloon_test --gazebo --chase-cam
@@ -52,8 +52,8 @@ from common import (
     start_balloon_thread,
     start_chase_bridge,
     start_fpv_bridge,
-    start_orbit_thread,
-    start_patrol_thread,
+    start_trajectory_thread,
+    TRAJ_TYPES,
     start_tracker_bridges,
 )
 
@@ -75,19 +75,13 @@ PX4_SIM_BRIDGE = default_path(
 DEFAULT_WORLD = "balloon_test"
 
 WORLD_MAP = {
-    "park_chase": {
-        "sim_world": "rocket_drone_park_chase_vis.sdf",
-        "gz_name":   "fpv_chase_park",
-        "target_model": "moving_target_drone",
+    "moving_target": {
+        "sim_world": "rocket_drone_moving_target_vis.sdf",
+        "gz_name":   "fpv_moving_target",
+        "target_model": "moving_target",
+        "target_link":  "geranium_link",
         "target_drone": True,
-        "orbit_drive":  True,
-    },
-    "patrol_park": {
-        "sim_world": "rocket_drone_patrol_park_vis.sdf",
-        "gz_name":   "fpv_patrol_park",
-        "target_model": "patrol_target_drone",
-        "target_drone": True,
-        "patrol_joint": "patrol_joint",
+        "trajectory_drive": True,
     },
     "collision_test": {
         "sim_world": "rocket_drone_collision_test_vis.sdf",
@@ -268,13 +262,13 @@ def parse_args():
 
     tgt = parser.add_argument_group("Target trajectory")
     tgt.add_argument("--target-altitude", type=float, default=None,
-                     help="Target altitude in metres (park_chase: 50, patrol_park: 100, balloon: 10)")
+                     help="Target altitude in metres (moving_target: 50, balloon: 10)")
     tgt.add_argument("--target-distance-x", type=float, default=None,
                      help="Target initial X position in metres (default: 30)")
     tgt.add_argument("--target-distance-y", type=float, default=None,
                      help="Target initial Y position in metres (default: 0)")
     tgt.add_argument("--target-speed", type=float, default=None,
-                     help="Target speed km/h (park_chase orbit: 5.4, patrol_park: 20)")
+                     help="Target speed km/h along the moving_target trajectory (default: 18)")
     tgt.add_argument("--target-orbit-radius", type=float, default=None,
                      help="Park-chase orbit radius in metres (default: 30)")
     tgt.add_argument("--target-orbit-center-x", type=float, default=None,
@@ -300,6 +294,28 @@ def parse_args():
                      help="Patrol lateral offset in metres so the target does not fly directly overhead (default: 0)")
     tgt.add_argument("--patrol-rotation", type=float, default=None,
                      help="Patrol path rotation in degrees clockwise when viewed from above (default: 0)")
+    # ── Moving-target parametric trajectory (oval / circle / line) ──
+    tgt.add_argument("--traj-type", choices=list(TRAJ_TYPES), default=None,
+                     help="Trajectory preset (oval | circle | line) — seeds the loop "
+                          "geometry; any loop param overrides it (default: oval)")
+    tgt.add_argument("--traj-rotation-deg", type=float, default=None,
+                     help="Trajectory rotation from the east axis in degrees, applied first (default: 0)")
+    tgt.add_argument("--traj-offset-ew", type=float, default=None,
+                     help="Target start offset EAST of the player in metres, after rotation (default: 0)")
+    tgt.add_argument("--traj-offset-ns", type=float, default=None,
+                     help="Target start offset NORTH of the player in metres, after rotation (default: 0)")
+    tgt.add_argument("--oval-ew-length", type=float, default=None,
+                     help="Loop straight E-W section length in metres (0 ⇒ no E-W straight)")
+    tgt.add_argument("--oval-ns-length", type=float, default=None,
+                     help="Loop straight N-S section length in metres (0 ⇒ no N-S straight)")
+    tgt.add_argument("--corner-radius", type=float, default=None,
+                     help="Loop rounded-corner radius in metres (0 ⇒ sharp; circle ⇒ the radius)")
+    tgt.add_argument("--player-heading-deg", type=float, default=None,
+                     help="Player drone initial heading in degrees from east, CCW (default: 0)")
+    tgt.add_argument("--traj-start-pos", type=float, default=None,
+                     help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
+    tgt.add_argument("--traj-reverse", action="store_true",
+                     help="Reverse the target's travel direction along the loop")
     tgt.add_argument("--wind-intensity", type=float, default=2.0,
                      help="Balloon lateral drift amplitude in metres (default: 2.0)")
     tgt.add_argument("--wind-randomness", type=float, default=1.0,
@@ -402,6 +418,16 @@ def main():
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
         target_scale=getattr(args, "target_scale", None),
+        traj_type=getattr(args, "traj_type", None),
+        traj_rotation_deg=getattr(args, "traj_rotation_deg", None),
+        traj_offset_ew=getattr(args, "traj_offset_ew", None),
+        traj_offset_ns=getattr(args, "traj_offset_ns", None),
+        oval_ew_len=getattr(args, "oval_ew_length", None),
+        oval_ns_len=getattr(args, "oval_ns_length", None),
+        corner_radius=getattr(args, "corner_radius", None),
+        traj_start_pos=getattr(args, "traj_start_pos", None),
+        traj_reverse=getattr(args, "traj_reverse", False),
+        player_heading_deg=getattr(args, "player_heading_deg", None),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
@@ -492,38 +518,22 @@ def main():
     # ── 5. Target trajectory threads ──
     traj_stop = threading.Event()
 
-    if world_entry.get("orbit_drive") and world_entry.get("target_model"):
-        orbit_radius = args.target_orbit_radius if args.target_orbit_radius is not None else 30.0
-        speed_kmh = args.target_speed if args.target_speed is not None else 5.4
-        orbit_omega = (speed_kmh / 3.6) / orbit_radius
+    if world_entry.get("trajectory_drive") and world_entry.get("target_model"):
+        speed_ms = (args.target_speed if args.target_speed is not None else 18.0) / 3.6
         target_z = args.target_altitude if args.target_altitude is not None else 50.0
-        orbit_cx = args.target_orbit_center_x if args.target_orbit_center_x is not None else 0.0
-        orbit_cy = args.target_orbit_center_y if args.target_orbit_center_y is not None else 0.0
-        orbit_theta = args.target_orbit_theta_deg if args.target_orbit_theta_deg is not None else 0.0
-        start_orbit_thread(
-            traj_stop, orbit_radius, orbit_omega, target_z,
-            orbit_center_x=orbit_cx, orbit_center_y=orbit_cy,
-            orbit_theta_deg=orbit_theta,
-        )
-
-    elif world_entry.get("patrol_joint") and world_entry.get("target_model"):
-        patrol_length = args.patrol_length if args.patrol_length is not None else 500.0
-        launch_offset = args.target_launch_offset if args.target_launch_offset is not None else 50.0
-        speed_kmh = args.target_speed if args.target_speed is not None else 20.0
-        speed_ms = speed_kmh / 3.6
-        target_z = args.target_altitude if args.target_altitude is not None else 100.0
-        start_patrol_thread(
+        start_trajectory_thread(
             traj_stop,
-            patrol_length=patrol_length,
-            launch_offset=launch_offset,
+            traj_type=getattr(args, "traj_type", None) or "oval",
             speed_ms=speed_ms,
             target_z=target_z,
-            sine_amp_xy=args.sine_amplitude_xy or 0.0,
-            sine_period_xy=args.sine_period_xy or 200.0,
-            sine_amp_z=args.sine_amplitude_z or 0.0,
-            sine_period_z=args.sine_period_z or 200.0,
-            lateral_offset=args.patrol_lateral_offset or 0.0,
-            rotation_deg=args.patrol_rotation or 0.0,
+            rotation_deg=args.traj_rotation_deg if args.traj_rotation_deg is not None else 0.0,
+            offset_ew=args.traj_offset_ew if args.traj_offset_ew is not None else 0.0,
+            offset_ns=args.traj_offset_ns if args.traj_offset_ns is not None else 0.0,
+            oval_ew_len=args.oval_ew_length,
+            oval_ns_len=args.oval_ns_length,
+            corner_radius=args.corner_radius,
+            start_pos=args.traj_start_pos if args.traj_start_pos is not None else 0.0,
+            reverse=getattr(args, "traj_reverse", False),
         )
 
     elif world_entry.get("balloon_wind") and world_entry.get("target_model"):

@@ -19,14 +19,14 @@ assumes; rectilinear renders faster (fisheye cubemaps serialise the gz render
 thread). Defaults: wide=fisheye, narrow=rectilinear, thermal=rectilinear.
 
 Usage:
-    python3 start.py --world park_chase --gazebo
+    python3 start.py --world moving_target --gazebo
     python3 start.py --world collision_test --cam-pitch -90 --gazebo
     python3 start.py --drone iris --gazebo --chase-cam
-    python3 start.py --world park_chase --tracker-narrow-cam --thermal-cam --gazebo
-    python3 start.py --world park_chase --no-pilot-cam --gazebo
+    python3 start.py --world moving_target --tracker-narrow-cam --thermal-cam --gazebo
+    python3 start.py --world moving_target --no-pilot-cam --gazebo
 
     # Tune drone params
-    python3 start.py --world park_chase --ctw 5 --angular-damping 0.05
+    python3 start.py --world moving_target --ctw 5 --angular-damping 0.05
 """
 
 import argparse
@@ -64,8 +64,8 @@ from common import (
     render_vis_templates,
     setup_gazebo_env,
     start_balloon_thread,
-    start_orbit_thread,
-    start_patrol_thread,
+    start_trajectory_thread,
+    TRAJ_TYPES,
     start_tracker_bridges,
     wait_for_port,
 )
@@ -93,7 +93,7 @@ BF_SIM_BRIDGE = default_path(
     os.path.join("bf_sim_bridge", "build", "bf_sim_bridge"),
 )
 
-DEFAULT_WORLD = "park_chase"
+DEFAULT_WORLD = "moving_target"
 DEFAULT_DRONE = "rocket_drone"
 
 # Short world name → dict of world attributes.
@@ -102,23 +102,15 @@ DEFAULT_DRONE = "rocket_drone"
 #   target_model — SDF model name of the target (for proximity OSD)
 #   target_link  — link inside target model whose world pose to track
 #   target_drone — True if the target is a selectable drone (bbox from TARGET_REFS)
-#   patrol_joint — prismatic joint name for patrol reversal (patrol_park only)
+#   trajectory_drive — drive the target along a parametric trajectory (moving_target)
 WORLD_MAP = {
-    "park_chase": {
-        "sim_world":    "rocket_drone_park_chase_vis.sdf",
-        "gz_name":      "fpv_chase_park",
-        "target_model": "moving_target_drone",
+    "moving_target": {
+        "sim_world":    "rocket_drone_moving_target_vis.sdf",
+        "gz_name":      "fpv_moving_target",
+        "target_model": "moving_target",
         "target_link":  "geranium_link",
         "target_drone": True,
-        "orbit_drive":  True,
-    },
-    "patrol_park": {
-        "sim_world":    "rocket_drone_patrol_park_vis.sdf",
-        "gz_name":      "fpv_patrol_park",
-        "target_model": "patrol_target_drone",
-        "target_link":  "geranium_link",
-        "target_drone": True,
-        "patrol_joint": "patrol_joint",
+        "trajectory_drive": True,
     },
     "collision_test": {
         "sim_world":    "rocket_drone_collision_test_vis.sdf",
@@ -221,6 +213,16 @@ def _render_all_templates(drone, world_name, args):
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
         target_scale=getattr(args, "target_scale", None),
+        traj_type=getattr(args, "traj_type", None),
+        traj_rotation_deg=getattr(args, "traj_rotation_deg", None),
+        traj_offset_ew=getattr(args, "traj_offset_ew", None),
+        traj_offset_ns=getattr(args, "traj_offset_ns", None),
+        oval_ew_len=getattr(args, "oval_ew_length", None),
+        oval_ns_len=getattr(args, "oval_ns_length", None),
+        corner_radius=getattr(args, "corner_radius", None),
+        traj_start_pos=getattr(args, "traj_start_pos", None),
+        traj_reverse=getattr(args, "traj_reverse", False),
+        player_heading_deg=getattr(args, "player_heading_deg", None),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -657,12 +659,12 @@ def parse_args():
     )
 
     # ── World Settings ───────────────────────────────────────────────────
-    wld = parser.add_argument_group("World settings (collision_test / park_chase / patrol_park)")
+    wld = parser.add_argument_group("World settings (moving_target / collision_test / balloon_test)")
     wld.add_argument(
         "--target-altitude",
         type=float,
         default=None,
-        help="Target altitude in metres (collision_test default: 20, park_chase default: 50, patrol_park default: 100)",
+        help="Target altitude in metres (moving_target default: 50, collision_test: 20, balloon: 10)",
     )
     wld.add_argument(
         "--target-distance-x",
@@ -680,7 +682,7 @@ def parse_args():
         "--target-speed",
         type=float,
         default=None,
-        help="Target speed in km/h (park_chase orbit default: 5.4, patrol_park default: 20)",
+        help="Target speed in km/h along the moving_target trajectory (default: 18)",
     )
     wld.add_argument(
         "--target-orbit-radius",
@@ -755,6 +757,28 @@ def parse_args():
         default=None,
         help="Patrol path rotation in degrees clockwise when viewed from above (default: 0)",
     )
+    # ── Moving-target parametric trajectory (oval / circle / line) ──
+    wld.add_argument("--traj-type", choices=list(TRAJ_TYPES), default=None,
+                     help="Trajectory preset (oval | circle | line) — seeds the loop "
+                          "geometry below; any of the 3 loop params overrides it (default: oval)")
+    wld.add_argument("--traj-rotation-deg", type=float, default=None,
+                     help="Trajectory rotation from the east axis in degrees, applied first (default: 0)")
+    wld.add_argument("--traj-offset-ew", type=float, default=None,
+                     help="Target start offset EAST of the player in metres, after rotation (default: 0)")
+    wld.add_argument("--traj-offset-ns", type=float, default=None,
+                     help="Target start offset NORTH of the player in metres, after rotation (default: 0)")
+    wld.add_argument("--oval-ew-length", type=float, default=None,
+                     help="Loop straight E-W section length in metres (0 ⇒ no E-W straight)")
+    wld.add_argument("--oval-ns-length", type=float, default=None,
+                     help="Loop straight N-S section length in metres (0 ⇒ no N-S straight)")
+    wld.add_argument("--corner-radius", type=float, default=None,
+                     help="Loop rounded-corner radius in metres (0 ⇒ sharp; circle ⇒ the radius)")
+    wld.add_argument("--player-heading-deg", type=float, default=None,
+                     help="Player drone initial heading in degrees from east, CCW (default: 0)")
+    wld.add_argument("--traj-start-pos", type=float, default=None,
+                     help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
+    wld.add_argument("--traj-reverse", action="store_true",
+                     help="Reverse the target's travel direction along the loop")
     wld.add_argument(
         "--hit-box-scale",
         type=float,
@@ -1062,42 +1086,24 @@ def main():
         width, height, bridge_proc, chase_bridge_proc,
     )
 
-    # ── 6b. Patrol UDP drive thread (patrol_park only) ──
-    patrol_thread = None
-    patrol_stop = threading.Event()
-    patrol_joint = world_entry.get("patrol_joint")
-    if patrol_joint and world_entry.get("target_model"):
-        patrol_length = args.patrol_length if args.patrol_length is not None else 2000.0
-        launch_offset = args.target_launch_offset if args.target_launch_offset is not None else 50.0
-        speed_kmh_p = args.target_speed if args.target_speed is not None else 100.0
-        speed_ms = speed_kmh_p / 3.6
-        target_z = world_vars["target_z"]
-        patrol_thread = start_patrol_thread(
-            patrol_stop,
-            patrol_length=patrol_length,
-            launch_offset=launch_offset,
+    # ── 6b. Parametric trajectory drive thread (moving_target world) ──
+    traj_thread = None
+    traj_stop = threading.Event()
+    if world_entry.get("trajectory_drive") and world_entry.get("target_model"):
+        speed_ms = (args.target_speed if args.target_speed is not None else 18.0) / 3.6
+        traj_thread = start_trajectory_thread(
+            traj_stop,
+            traj_type=getattr(args, "traj_type", None) or "oval",
             speed_ms=speed_ms,
-            target_z=target_z,
-            sine_amp_xy=args.sine_amplitude_xy or 0.0,
-            sine_period_xy=args.sine_period_xy or 200.0,
-            sine_amp_z=args.sine_amplitude_z or 0.0,
-            sine_period_z=args.sine_period_z or 200.0,
-            lateral_offset=args.patrol_lateral_offset or 0.0,
-            rotation_deg=args.patrol_rotation or 0.0,
-        )
-
-    # ── 6b2. Orbit UDP drive thread (park_chase only) ──
-    orbit_thread = None
-    orbit_stop = threading.Event()
-    if world_entry.get("orbit_drive") and world_entry.get("target_model"):
-        orbit_radius_val = world_vars["orbit_radius"]
-        orbit_omega = world_vars["orbit_speed"]  # rad/s = v_tangential / R
-        target_z = world_vars["target_z"]
-        orbit_thread = start_orbit_thread(
-            orbit_stop, orbit_radius_val, orbit_omega, target_z,
-            orbit_center_x=world_vars["orbit_center_x"],
-            orbit_center_y=world_vars["orbit_center_y"],
-            orbit_theta_deg=world_vars["orbit_theta_deg"],
+            target_z=world_vars["target_z"],
+            rotation_deg=args.traj_rotation_deg if args.traj_rotation_deg is not None else 0.0,
+            offset_ew=args.traj_offset_ew if args.traj_offset_ew is not None else 0.0,
+            offset_ns=args.traj_offset_ns if args.traj_offset_ns is not None else 0.0,
+            oval_ew_len=args.oval_ew_length,
+            oval_ns_len=args.oval_ns_length,
+            corner_radius=args.corner_radius,
+            start_pos=args.traj_start_pos if args.traj_start_pos is not None else 0.0,
+            reverse=getattr(args, "traj_reverse", False),
         )
 
     # ── 6c. Balloon smooth drift thread (balloon_test only) ──
@@ -1135,12 +1141,9 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    if patrol_thread:
-        patrol_stop.set()
-        patrol_thread.join(timeout=2)
-    if orbit_thread:
-        orbit_stop.set()
-        orbit_thread.join(timeout=2)
+    if traj_thread:
+        traj_stop.set()
+        traj_thread.join(timeout=2)
     if wind_thread:
         wind_stop.set()
         wind_thread.join(timeout=2)
