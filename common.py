@@ -339,6 +339,16 @@ def compute_world_vars(
     pedestal_height: float | None = None,
     target_drone: str = DEFAULT_TARGET_DRONE,
     target_scale: float | None = None,
+    traj_type: str | None = None,
+    traj_rotation_deg: float | None = None,
+    traj_offset_ew: float | None = None,
+    traj_offset_ns: float | None = None,
+    oval_ew_len: float | None = None,
+    oval_ns_len: float | None = None,
+    corner_radius: float | None = None,
+    traj_start_pos: float | None = None,
+    traj_reverse: bool = False,
+    player_heading_deg: float | None = None,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
@@ -381,10 +391,24 @@ def compute_world_vars(
         _target_z = target_altitude
     elif world_name == "patrol_park":
         _target_z = 100.0
-    elif world_name == "park_chase":
+    elif world_name in ("park_chase", "moving_target"):
         _target_z = 50.0
     else:
         _target_z = 10.0
+
+    # Parametric trajectory spawn pose (moving_target world): place the target
+    # model at s=0 of the trajectory so it appears where the thread first drives
+    # it. None args fall back to per-shape defaults (mirrors trajectory_sample).
+    _def = lambda v, d: v if v is not None else d
+    _player_heading = _def(player_heading_deg, 0.0)
+    _ew, _ns, _cr = resolve_loop_geom(traj_type, oval_ew_len, oval_ns_len, corner_radius)
+    _spawn_x, _spawn_y, _spawn_yaw = trajectory_start_pose(
+        rotation_deg=_def(traj_rotation_deg, 0.0),
+        offset_ew=_def(traj_offset_ew, 0.0),
+        offset_ns=_def(traj_offset_ns, 0.0),
+        oval_ew_len=_ew, oval_ns_len=_ns, corner_radius=_cr,
+        start_pos=_def(traj_start_pos, 0.0), reverse=bool(traj_reverse),
+    )
 
     return {
         "drone_uri": ref["model_uri"],
@@ -401,6 +425,11 @@ def compute_world_vars(
         "orbit_spawn_yaw": _orbit_theta_rad + math.pi / 2,
         "target_altitude": _target_z,
         "target_x": _target_x, "target_y": _target_y, "target_z": _target_z,
+        # Parametric trajectory (moving_target world) spawn + player heading.
+        "target_spawn_x": _spawn_x,
+        "target_spawn_y": _spawn_y,
+        "target_spawn_yaw": _spawn_yaw,
+        "player_heading_rad": math.radians(_player_heading),
         "patrol_length": _patrol_length,
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
@@ -1065,6 +1094,190 @@ def start_patrol_thread(
         rst_sock.close()
 
     t = threading.Thread(target=_patrol_loop, daemon=True, name="patrol")
+    t.start()
+    return t
+
+
+# ── Parametric target trajectory (unified moving_target world) ────────────────
+#
+# A single GENERAL LOOP drives the target: a straight E-W section (oval_ew_len) +
+# a straight N-S section (oval_ns_len) + equal rounded corners (corner_radius),
+# built in a LOCAL frame where the target starts at (0,0) heading +X, then rotated
+# by `rotation_deg` from the east axis and translated by (offset_ew, offset_ns) in
+# world ENU relative to the player (origin). oval / circle / line are just PRESETS
+# of this one shape — circle = zero straights, line = zero N-S + ~zero corners
+# (degenerates to an out-and-back along X). `trajectory_sample` is the single
+# source of truth (launcher thread + world-spawn pose + the mirrored leaf-sim-ui
+# live diagram).
+
+TRAJ_TYPES = ("oval", "circle", "line")
+# Preset → (oval_ew_len, oval_ns_len, corner_radius); presets just seed the three
+# loop params, each independently overridable.
+TRAJ_PRESETS = {
+    "oval":   (100.0, 60.0, 30.0),
+    "circle": (0.0,   0.0,  50.0),
+    "line":   (200.0, 0.0,  0.0),
+}
+
+
+def resolve_loop_geom(traj_type=None, oval_ew_len=None, oval_ns_len=None,
+                      corner_radius=None):
+    """Resolve the three loop params, filling None from the preset for ``traj_type``."""
+    pe, pn, pr = TRAJ_PRESETS.get(traj_type or "oval", TRAJ_PRESETS["oval"])
+    return (pe if oval_ew_len is None else float(oval_ew_len),
+            pn if oval_ns_len is None else float(oval_ns_len),
+            pr if corner_radius is None else float(corner_radius))
+
+
+def _traj_local_path(s, oval_ew_len, oval_ns_len, corner_radius):
+    """(x, y, tangent_yaw) in the LOCAL frame at arc-length ``s`` (m) for the general
+    loop. ``path(0) == (0, 0)``, target heading +X. Circle = zero straights;
+    line = zero N-S + ~zero corners (out-and-back along X)."""
+    a = max(float(oval_ew_len), 0.0)
+    b = max(float(oval_ns_len), 0.0)
+    r = max(float(corner_radius), 1e-3)
+    qc = (math.pi / 2.0) * r                  # quarter-corner arc length
+    perim = 2.0 * a + 2.0 * b + 4.0 * qc
+    u = s % perim
+    if u < a:
+        return (u, 0.0, 0.0)
+    u -= a
+    if u < qc:                                # bottom-right corner, centre (a, r)
+        ang = -math.pi / 2.0 + u / r
+        return (a + r * math.cos(ang), r + r * math.sin(ang), ang + math.pi / 2.0)
+    u -= qc
+    if u < b:
+        return (a + r, r + u, math.pi / 2.0)
+    u -= b
+    if u < qc:                                # top-right corner, centre (a, r+b)
+        ang = u / r
+        return (a + r * math.cos(ang), (r + b) + r * math.sin(ang), ang + math.pi / 2.0)
+    u -= qc
+    if u < a:
+        return (a - u, 2.0 * r + b, math.pi)
+    u -= a
+    if u < qc:                                # top-left corner, centre (0, r+b)
+        ang = math.pi / 2.0 + u / r
+        return (r * math.cos(ang), (r + b) + r * math.sin(ang), ang + math.pi / 2.0)
+    u -= qc
+    if u < b:
+        return (-r, (r + b) - u, -math.pi / 2.0)
+    u -= b                                     # bottom-left corner, centre (0, r)
+    ang = math.pi + u / r
+    return (r * math.cos(ang), r + r * math.sin(ang), ang + math.pi / 2.0)
+
+
+def trajectory_sample(s, rotation_deg=0.0, offset_ew=0.0, offset_ns=0.0,
+                      oval_ew_len=100.0, oval_ns_len=60.0, corner_radius=30.0,
+                      start_pos=0.0, reverse=False):
+    """World-frame (x_east, y_north, yaw) of the target at arc-length ``s`` (m).
+
+    The loop is rotated about its **geometric centre** (not the target start) and
+    that centre is placed at (offset_ew, offset_ns) relative to the player at the
+    origin. ``start_pos`` (0..1 of the perimeter) sets where the target begins;
+    ``reverse`` flips the travel direction.
+    """
+    a = max(float(oval_ew_len), 0.0)
+    b = max(float(oval_ns_len), 0.0)
+    r = max(float(corner_radius), 1e-3)
+    perim = 2.0 * a + 2.0 * b + 2.0 * math.pi * r
+    cx, cy = a / 2.0, r + b / 2.0                 # geometric centre of the loop
+    s0 = (float(start_pos) % 1.0) * perim
+    sp = (s0 - s) if reverse else (s0 + s)
+    lx, ly, lyaw = _traj_local_path(sp, a, b, r)
+    px, py = lx - cx, ly - cy                     # rotate about the centre
+    th = math.radians(rotation_deg)
+    c, sn = math.cos(th), math.sin(th)
+    yaw = lyaw + (math.pi if reverse else 0.0) + th
+    return (offset_ew + px * c - py * sn,
+            offset_ns + px * sn + py * c,
+            yaw)
+
+
+def trajectory_start_pose(**params):
+    """(x_east, y_north, yaw) of the target at ``s = 0`` — used for the world-SDF
+    spawn pose so the model appears exactly where the thread first drives it."""
+    return trajectory_sample(0.0, **params)
+
+
+def start_trajectory_thread(
+    stop_event: threading.Event,
+    traj_type: str = "oval",
+    speed_ms: float = 5.0,
+    target_z: float = 50.0,
+    rotation_deg: float = 0.0,
+    offset_ew: float = 0.0,
+    offset_ns: float = 0.0,
+    oval_ew_len: float | None = None,
+    oval_ns_len: float | None = None,
+    corner_radius: float | None = None,
+    start_pos: float = 0.0,
+    reverse: bool = False,
+    udp_port: int = TARGET_UDP_PORT,
+    reset_port: int = TARGET_RESET_PORT,
+) -> threading.Thread:
+    """Drive the target along a parametric loop via UDP (unified world). The three
+    loop params fall back to the ``traj_type`` preset when None.
+
+    Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port`` (+ mirror) and
+    listens on ``reset_port`` (a reset snaps the target back to ``s = 0``).
+    """
+    _ew, _ns, _cr = resolve_loop_geom(traj_type, oval_ew_len, oval_ns_len, corner_radius)
+    geom = dict(rotation_deg=rotation_deg, offset_ew=offset_ew, offset_ns=offset_ns,
+                oval_ew_len=_ew, oval_ns_len=_ns, corner_radius=_cr,
+                start_pos=start_pos, reverse=reverse)
+
+    def _traj_loop():
+        interval = 1.0 / 60
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        addr = ("127.0.0.1", udp_port)
+        mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
+        packer = struct.Struct("<Qd3d4d")
+        seq = 0
+        t0 = time.monotonic()
+        t_prev = t0
+        s = 0.0
+
+        rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rst_sock.bind(("0.0.0.0", reset_port))
+        rst_sock.setblocking(False)
+
+        log.info("Trajectory thread: %s speed=%.1f m/s alt=%.0fm rot=%.1f° "
+                 "offset=(%.0fE,%.0fN) (port %d)", traj_type, speed_ms, target_z,
+                 rotation_deg, offset_ew, offset_ns, udp_port)
+
+        while not stop_event.is_set():
+            try:
+                while True:
+                    rst_sock.recv(64)
+                    s = 0.0
+                    t_prev = time.monotonic()
+                    log.info("Trajectory thread: reset to start")
+            except BlockingIOError:
+                pass
+
+            t_now = time.monotonic()
+            dt = t_now - t_prev
+            t_prev = t_now
+            s += speed_ms * dt
+
+            x, y, yaw = trajectory_sample(s, **geom)
+            qw = math.cos(yaw / 2.0)
+            qz = math.sin(yaw / 2.0)
+            pkt = packer.pack(seq, t_now - t0, x, y, target_z, qw, 0.0, 0.0, qz)
+            for dst in (addr, mirror_addr):
+                try:
+                    sock.sendto(pkt, dst)
+                except OSError:
+                    pass
+            seq += 1
+            stop_event.wait(timeout=interval)
+
+        sock.close()
+        rst_sock.close()
+
+    t = threading.Thread(target=_traj_loop, daemon=True, name="trajectory")
     t.start()
     return t
 
