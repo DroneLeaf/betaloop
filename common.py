@@ -117,7 +117,10 @@ TARGET_REFS = {
         "mesh_uri": "model://shahed_drone/meshes/shahed.glb",
         "model_uri": "model://shahed_drone",
         "visual_pose": "0 0 0 1.57079 0 1.5708",
-        "scale": "1 1 1",
+        # base_scale = the uniform scale at which `bbox` was measured;
+        # default_scale = the applied scale (shahed is fixed at 1.0).
+        "base_scale": 1.0,
+        "default_scale": 1.0,
         "bbox": "0.792,1.047,0.186",
     },
     "stingjet": {
@@ -125,7 +128,10 @@ TARGET_REFS = {
         "mesh_uri": "model://stingjet/stingjet.glb",
         "model_uri": "model://stingjet",
         "visual_pose": "0 0 0 1.57079 0 1.5708",
-        "scale": "0.1 0.1 0.1",
+        # bbox measured at 0.1x (the raw mesh is fighter-jet sized at 1.0x);
+        # default applied scale 0.1x, UI/CLI-overridable via --target-scale.
+        "base_scale": 0.1,
+        "default_scale": 0.1,
         "bbox": "0.94,0.54,0.16",
     },
 }
@@ -332,6 +338,7 @@ def compute_world_vars(
     pedestal_radius: float | None = None,
     pedestal_height: float | None = None,
     target_drone: str = DEFAULT_TARGET_DRONE,
+    target_scale: float | None = None,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
@@ -339,6 +346,15 @@ def compute_world_vars(
     """
     ref = DRONE_REFS[drone]
     tref = TARGET_REFS.get(target_drone, TARGET_REFS[DEFAULT_TARGET_DRONE])
+
+    # Target uniform scale. A single --target-scale multiplier applies to ANY
+    # target; when unset each target uses its own default (shahed 1.0, stingjet
+    # 0.1). The proximity bbox scales with the mesh so TARGET REACHED stays right.
+    _tscale = float(target_scale) if target_scale is not None else float(tref["default_scale"])
+    _tscale_factor = _tscale / float(tref["base_scale"])
+    _target_scale_str = f"{_tscale:g} {_tscale:g} {_tscale:g}"
+    _target_bbox = ",".join(f"{float(c) * _tscale_factor:g}" for c in tref["bbox"].split(","))
+    _target_model_name = tref["model_uri"].replace("model://", "")
 
     # Pedestal launch-stand dimensions (vis-only cylinder under the drone).
     # Defaults mirror the Simulink model_parameters (pedestal_radius=0.5,
@@ -394,7 +410,9 @@ def compute_world_vars(
         "target_mesh_uri": tref["mesh_uri"],
         "target_model_uri": tref["model_uri"],
         "target_visual_pose": tref["visual_pose"],
-        "target_scale": tref["scale"],
+        "target_scale": _target_scale_str,
+        "target_bbox": _target_bbox,
+        "target_model_name": _target_model_name,
     }
 
 
@@ -420,6 +438,14 @@ def render_vis_templates(
     vis_wj2 = os.path.join(worlds_dir, wm["sim_world"] + ".j2")
     if os.path.isfile(vis_wj2):
         render_template(vis_wj2, world_vars)
+
+    # Target model SDF (e.g. stingjet, whose scale is parameterised). shahed has
+    # no template (fixed 1.0). Rendered with world_vars so `target_scale` applies.
+    tgt_model = world_vars.get("target_model_name")
+    if tgt_model:
+        tgt_j2 = os.path.join(models_dir, tgt_model, "model.sdf.j2")
+        if os.path.isfile(tgt_j2):
+            render_template(tgt_j2, world_vars)
 
 
 # ── Process Manager ───────────────────────────────────────────────────────────

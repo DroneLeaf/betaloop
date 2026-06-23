@@ -155,3 +155,14 @@ any new motion so Ctrl-C exits cleanly.
   `("utility_cam","fpv_utility_cam",[],"utility","Utility")` → SHM + (BF) RTSP.
   start_px4.py mirrors enable+geometry+fisheye (no per-feed RTSP, like the other px4
   feeds). Defaults seeded from wide (fisheye on, 114.6/98.9), enable default off.
+
+## Session Addendum (2026-06-23) — parameterised target scale (all targets)
+
+- `TARGET_REFS` entries gained `base_scale` (scale at which `bbox` was measured) +
+  `default_scale` (applied default; shahed 1.0, stingjet 0.1).
+  `compute_world_vars(target_scale=)` applies to **any** target: effective =
+  override else `default_scale`; scales `target_bbox` by `scale/base_scale`; emits
+  `target_model_name`. `render_vis_templates` also renders
+  `models/<target>/model.sdf.j2` (both shahed + stingjet) with `target_scale`.
+  `--target-scale` on start.py + start_px4.py; both use the scaled
+  `world_vars["target_bbox"]` for `--target-bbox`.

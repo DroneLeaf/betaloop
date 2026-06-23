@@ -309,6 +309,9 @@ def parse_args():
     tgt.add_argument("--target-drone", choices=list(TARGET_REFS.keys()),
                      default=DEFAULT_TARGET_DRONE,
                      help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE})")
+    tgt.add_argument("--target-scale", type=float, default=None,
+                     help="Uniform scale multiplier for the target mesh (any target; "
+                          "default per target: shahed 1.0, stingjet 0.1). Scales the hit-box too.")
 
     return parser.parse_args()
 
@@ -398,6 +401,7 @@ def main():
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
+        target_scale=getattr(args, "target_scale", None),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 
@@ -467,7 +471,7 @@ def main():
     # Per-world target proximity detection
     target_model = world_entry.get("target_model")
     target_link  = world_entry.get("target_link")
-    target_bbox  = (TARGET_REFS[args.target_drone]["bbox"]
+    target_bbox  = (world_vars.get("target_bbox")
                     if world_entry.get("target_drone")
                     else world_entry.get("target_bbox"))
     if target_model:
