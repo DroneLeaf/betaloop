@@ -450,7 +450,9 @@ def parse_args():
                      help="Push the (clean, no-OSD) wide tracker feed as H.264 to this "
                           "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_wide (off if unset)")
     drn.add_argument("--tracker-wide-rtsp-bitrate", type=str, default="4M",
-                     help="Wide tracker RTSP libx264 target bitrate (default: 4M)")
+                     help="Wide tracker RTSP libx264 target/cap bitrate (default: 4M)")
+    drn.add_argument("--tracker-wide-rtsp-crf", type=int, default=23,
+                     help="Wide tracker RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
     drn.add_argument("--tracker-wide-rtsp-preset", type=str, default="ultrafast",
                      help="Wide tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-wide-rtsp-tune", type=str, default="zerolatency",
@@ -499,7 +501,9 @@ def parse_args():
                      help="Push the (clean, no-OSD) narrow tracker feed as H.264 to this "
                           "RTSP URL, e.g. rtsp://127.0.0.1:8554/tracker_narrow (off if unset)")
     drn.add_argument("--tracker-narrow-rtsp-bitrate", type=str, default="4M",
-                     help="Narrow tracker RTSP libx264 target bitrate (default: 4M)")
+                     help="Narrow tracker RTSP libx264 target/cap bitrate (default: 4M)")
+    drn.add_argument("--tracker-narrow-rtsp-crf", type=int, default=23,
+                     help="Narrow tracker RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
     drn.add_argument("--tracker-narrow-rtsp-preset", type=str, default="ultrafast",
                      help="Narrow tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-narrow-rtsp-tune", type=str, default="zerolatency",
@@ -534,7 +538,9 @@ def parse_args():
                      help="Push the thermal feed as H.264 to this RTSP URL "
                           "(off if unset), e.g. rtsp://127.0.0.1:8554/thermal")
     drn.add_argument("--thermal-rtsp-bitrate", type=str, default="4M",
-                     help="Thermal RTSP libx264 target bitrate (default: 4M)")
+                     help="Thermal RTSP libx264 target/cap bitrate (default: 4M)")
+    drn.add_argument("--thermal-rtsp-crf", type=int, default=23,
+                     help="Thermal RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
     drn.add_argument("--thermal-rtsp-preset", type=str, default="ultrafast",
                      help="Thermal RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--thermal-rtsp-tune", type=str, default="zerolatency",
@@ -569,7 +575,9 @@ def parse_args():
                      help="Push the utility feed as H.264 to this RTSP URL "
                           "(off if unset), e.g. rtsp://127.0.0.1:8554/utility")
     drn.add_argument("--utility-rtsp-bitrate", type=str, default="4M",
-                     help="Utility RTSP libx264 target bitrate (default: 4M)")
+                     help="Utility RTSP libx264 target/cap bitrate (default: 4M)")
+    drn.add_argument("--utility-rtsp-crf", type=int, default=23,
+                     help="Utility RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
     drn.add_argument("--utility-rtsp-preset", type=str, default="ultrafast",
                      help="Utility RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--utility-rtsp-tune", type=str, default="zerolatency",

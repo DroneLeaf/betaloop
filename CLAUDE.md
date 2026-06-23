@@ -182,3 +182,11 @@ any new motion so Ctrl-C exits cleanly.
   start.py + start_px4.py + reset_world.py. Dispatch is a single
   `if trajectory_drive: start_trajectory_thread(...)`. `DEFAULT_WORLD=moving_target`
   (start.py). The legacy `--target-orbit-*`/`--patrol-*` args remain defined but unused.
+
+## Session Addendum (2026-06-24) — RTSP CRF flag
+
+- `_append_rtsp` gained a `crf` param (after `bitrate`) → emits `--stream-crf` to the
+  bridge. New per-feed CLI args `--tracker-wide-rtsp-crf` / `--tracker-narrow-rtsp-crf`
+  / `--thermal-rtsp-crf` / `--utility-rtsp-crf` (int, default **23**; 0 = off/ABR).
+  RTSP stays BF-only (px4 passes no `*_rtsp` url → `_append_rtsp` no-ops). Fixes 480p+
+  RTSP macroblocking (bitrate starvation, not CPU). See `aeroloop_gazebo/CLAUDE.md`.

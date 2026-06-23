@@ -815,7 +815,7 @@ def start_chase_bridge(args, pm: ProcessManager):
     return pm.spawn(chase_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _append_rtsp(cmd, rtsp_url, fps, bitrate, preset, tune, width, height, label):
+def _append_rtsp(cmd, rtsp_url, fps, bitrate, crf, preset, tune, width, height, label):
     """Append RTSP H.264 push flags to a gz_image_bridge command (no-op if URL empty)."""
     if not rtsp_url:
         return
@@ -823,6 +823,7 @@ def _append_rtsp(cmd, rtsp_url, fps, bitrate, preset, tune, width, height, label
         "--rtsp", str(rtsp_url),
         "--stream-fps", str(fps),
         "--stream-bitrate", str(bitrate),
+        "--stream-crf", str(int(crf)),
         "--stream-preset", str(preset),
         "--stream-tune", str(tune),
     ])
@@ -830,8 +831,8 @@ def _append_rtsp(cmd, rtsp_url, fps, bitrate, preset, tune, width, height, label
     h = int(height or 0)
     if w > 0 and h > 0:
         cmd.extend(["--stream-width", str(w), "--stream-height", str(h)])
-    log.info("%s RTSP stream → %s (%sfps, %s, preset=%s, tune=%s, res=%s)",
-             label, rtsp_url, fps, bitrate, preset, tune,
+    log.info("%s RTSP stream → %s (%sfps, %s, crf=%s, preset=%s, tune=%s, res=%s)",
+             label, rtsp_url, fps, bitrate, crf, preset, tune,
              f"{w}x{h}" if w > 0 and h > 0 else "camera")
 
 
@@ -875,6 +876,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         _append_rtsp(cmd, getattr(args, f"{rp}_rtsp", None),
                      getattr(args, f"{rp}_cam_fps", 30),
                      getattr(args, f"{rp}_rtsp_bitrate", "4M"),
+                     getattr(args, f"{rp}_rtsp_crf", 23),
                      getattr(args, f"{rp}_rtsp_preset", "ultrafast"),
                      getattr(args, f"{rp}_rtsp_tune", "zerolatency"),
                      getattr(args, f"{rp}_rtsp_width", 0),
