@@ -155,6 +155,60 @@ def render_template(j2_path: str, variables: dict) -> None:
     log.info("Rendered %s", os.path.relpath(output_path, AEROLOOP_HOME))
 
 
+# Fisheye lens custom-function (Gazebo wideanglecamera): r = c1*f*fun(theta/c2 + c3).
+# scale_to_hfov=true makes f auto and cx/cy = image centre, so only c1/c2/c3/fun are
+# tuned. `fun` is one of LENS_FUNS. Presets seed (c1, c2, c3, fun); LENS_DEFAULT is the
+# prior hardcoded "custom" value (so the default render is byte-for-byte unchanged).
+LENS_FUNS = ("tan", "sin", "id")
+LENS_DEFAULT = (1.05, 4.0, 0.0, "tan")
+LENS_PRESETS = {
+    "stereographic": (1.0, 2.0, 0.0, "tan"),
+    "equidistant":   (1.0, 1.0, 0.0, "id"),
+    "equisolid":     (1.0, 2.0, 0.0, "sin"),
+    "orthographic":  (1.0, 1.0, 0.0, "sin"),
+}
+
+
+def sanitize_lens_fun(v) -> str:
+    """Clamp a lens mapping-function name to a valid Gazebo value (else 'tan')."""
+    return v if v in LENS_FUNS else "tan"
+
+
+# Per-camera fisheye lens intrinsics shared by both launchers (start.py / start_px4.py).
+_LENS_CAMERAS = (
+    ("tracker-wide",   "tracker_wide",   "Wide tracker"),
+    ("tracker-narrow", "tracker_narrow", "Narrow tracker"),
+    ("thermal",        "thermal",        "Thermal"),
+    ("utility",        "utility",        "Utility"),
+)
+
+
+def add_lens_args(group) -> None:
+    """Add --<cam>-lens-c1/c2/c3/fun CLI args for every fisheye-capable camera."""
+    c1d, c2d, c3d, fund = LENS_DEFAULT
+    for flag, _dest, label in _LENS_CAMERAS:
+        group.add_argument(f"--{flag}-lens-c1", type=float, default=c1d,
+                           help=f"{label} fisheye lens c1 gain — r=c1*f*fun(theta/c2+c3) (default: {c1d})")
+        group.add_argument(f"--{flag}-lens-c2", type=float, default=c2d,
+                           help=f"{label} fisheye lens c2 angle scale (default: {c2d})")
+        group.add_argument(f"--{flag}-lens-c3", type=float, default=c3d,
+                           help=f"{label} fisheye lens c3 angle offset (default: {c3d})")
+        group.add_argument(f"--{flag}-lens-fun", type=str, default=fund, choices=LENS_FUNS,
+                           help=f"{label} fisheye lens mapping function (default: {fund})")
+
+
+def lens_kwargs_from_args(args) -> dict:
+    """Collect the per-camera fisheye lens intrinsics from parsed CLI args."""
+    c1d, c2d, c3d, fund = LENS_DEFAULT
+    out = {}
+    for _flag, dest, _label in _LENS_CAMERAS:
+        out[f"{dest}_lens_c1"] = getattr(args, f"{dest}_lens_c1", c1d)
+        out[f"{dest}_lens_c2"] = getattr(args, f"{dest}_lens_c2", c2d)
+        out[f"{dest}_lens_c3"] = getattr(args, f"{dest}_lens_c3", c3d)
+        out[f"{dest}_lens_fun"] = getattr(args, f"{dest}_lens_fun", fund)
+    return out
+
+
 def compute_model_vars(
     drone: str,
     ctw: float | None = None,
@@ -197,6 +251,24 @@ def compute_model_vars(
     utility_cam_width: int = 640,
     utility_cam_fps: int = 30,
     utility_fisheye: bool = True,
+    # Fisheye lens custom-function intrinsics (r = c1*f*fun(theta/c2 + c3); f auto via
+    # scale_to_hfov). Per fisheye-capable camera; defaults = the prior hardcoded values.
+    tracker_wide_lens_c1: float = 1.05,
+    tracker_wide_lens_c2: float = 4.0,
+    tracker_wide_lens_c3: float = 0.0,
+    tracker_wide_lens_fun: str = "tan",
+    tracker_narrow_lens_c1: float = 1.05,
+    tracker_narrow_lens_c2: float = 4.0,
+    tracker_narrow_lens_c3: float = 0.0,
+    tracker_narrow_lens_fun: str = "tan",
+    thermal_lens_c1: float = 1.05,
+    thermal_lens_c2: float = 4.0,
+    thermal_lens_c3: float = 0.0,
+    thermal_lens_fun: str = "tan",
+    utility_lens_c1: float = 1.05,
+    utility_lens_c2: float = 4.0,
+    utility_lens_c3: float = 0.0,
+    utility_lens_fun: str = "tan",
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -296,6 +368,23 @@ def compute_model_vars(
         "utility_img_height": utility_img_height,
         "utility_cam_fps": max(1, int(utility_cam_fps)),
         "utility_fisheye": bool(utility_fisheye),
+        # Fisheye lens custom-function intrinsics (only used when *_fisheye is on)
+        "tracker_wide_lens_c1": float(tracker_wide_lens_c1),
+        "tracker_wide_lens_c2": float(tracker_wide_lens_c2),
+        "tracker_wide_lens_c3": float(tracker_wide_lens_c3),
+        "tracker_wide_lens_fun": sanitize_lens_fun(tracker_wide_lens_fun),
+        "tracker_narrow_lens_c1": float(tracker_narrow_lens_c1),
+        "tracker_narrow_lens_c2": float(tracker_narrow_lens_c2),
+        "tracker_narrow_lens_c3": float(tracker_narrow_lens_c3),
+        "tracker_narrow_lens_fun": sanitize_lens_fun(tracker_narrow_lens_fun),
+        "thermal_lens_c1": float(thermal_lens_c1),
+        "thermal_lens_c2": float(thermal_lens_c2),
+        "thermal_lens_c3": float(thermal_lens_c3),
+        "thermal_lens_fun": sanitize_lens_fun(thermal_lens_fun),
+        "utility_lens_c1": float(utility_lens_c1),
+        "utility_lens_c2": float(utility_lens_c2),
+        "utility_lens_c3": float(utility_lens_c3),
+        "utility_lens_fun": sanitize_lens_fun(utility_lens_fun),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
         "standoff_height": _standoff, "leg_z": leg_z,

@@ -190,3 +190,15 @@ any new motion so Ctrl-C exits cleanly.
   / `--thermal-rtsp-crf` / `--utility-rtsp-crf` (int, default **23**; 0 = off/ABR).
   RTSP stays BF-only (px4 passes no `*_rtsp` url → `_append_rtsp` no-ops). Fixes 480p+
   RTSP macroblocking (bitrate starvation, not CPU). See `aeroloop_gazebo/CLAUDE.md`.
+
+## Session Addendum (2026-06-24) — per-camera fisheye lens intrinsics
+
+- `common.py`: `compute_model_vars` gained 16 lens params (`<cam>_lens_c1/c2/c3/fun`
+  for wide/narrow/thermal/utility; defaults 1.05/4.0/0.0/"tan") → emitted to the model
+  templates (fun sanitized via `sanitize_lens_fun`). New module consts `LENS_FUNS`
+  (tan/sin/id), `LENS_DEFAULT`, `LENS_PRESETS` (stereographic/equidistant/equisolid/
+  orthographic). Shared helpers `add_lens_args(group)` (adds `--<cam>-lens-c1/c2/c3/fun`
+  to a parser) and `lens_kwargs_from_args(args)` (collects them) keep both launchers DRY.
+- `start.py` + `start_px4.py` both call `add_lens_args(drn/sim)` and pass
+  `**lens_kwargs_from_args(args)` into `compute_model_vars`. Lens only affects fisheye
+  feeds (it's inside the `{%- if <cam>_fisheye %}` block). See `aeroloop_gazebo/CLAUDE.md`.

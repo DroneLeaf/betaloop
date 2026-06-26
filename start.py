@@ -53,9 +53,11 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
+    add_lens_args,
     compute_model_vars,
     compute_world_vars,
     configure_display,
+    lens_kwargs_from_args,
     default_path,
     discover_camera_topic,
     list_camera_topics,
@@ -187,6 +189,7 @@ def _render_all_templates(drone, world_name, args):
         utility_cam_width=getattr(args, "utility_cam_width", 640),
         utility_cam_fps=getattr(args, "utility_cam_fps", 30),
         utility_fisheye=getattr(args, "utility_fisheye", True),
+        **lens_kwargs_from_args(args),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
 
@@ -571,6 +574,8 @@ def parse_args():
     drn.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the utility cam as fisheye (wideanglecamera); "
                           "--no-utility-fisheye makes it rectilinear (default: fisheye)")
+    # Per-camera fisheye lens intrinsics (--<cam>-lens-c1/c2/c3/fun); see common.add_lens_args.
+    add_lens_args(drn)
     drn.add_argument("--utility-rtsp", type=str, default=None, metavar="URL",
                      help="Push the utility feed as H.264 to this RTSP URL "
                           "(off if unset), e.g. rtsp://127.0.0.1:8554/utility")

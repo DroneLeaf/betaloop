@@ -43,9 +43,11 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     cleanup_before_start,
+    add_lens_args,
     compute_model_vars,
     compute_world_vars,
     configure_display,
+    lens_kwargs_from_args,
     default_path,
     render_vis_templates,
     setup_gazebo_env,
@@ -208,6 +210,8 @@ def parse_args():
     sim.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the utility cam as fisheye (wideanglecamera); "
                           "--no-utility-fisheye makes it rectilinear (default: fisheye)")
+    # Per-camera fisheye lens intrinsics (--<cam>-lens-c1/c2/c3/fun); see common.add_lens_args.
+    add_lens_args(sim)
     # Backward compatibility: applies to both cameras if explicitly provided.
     sim.add_argument("--cam-width", type=float, default=None,
                      help="Deprecated: output width for both pilot/tracker cameras")
@@ -399,6 +403,7 @@ def main():
         utility_cam_width=getattr(args, "utility_cam_width", 640),
         utility_cam_fps=getattr(args, "utility_cam_fps", 30),
         utility_fisheye=getattr(args, "utility_fisheye", True),
+        **lens_kwargs_from_args(args),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
     world_vars = compute_world_vars(
