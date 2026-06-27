@@ -52,6 +52,7 @@ from common import (
     render_vis_templates,
     setup_gazebo_env,
     start_balloon_thread,
+    start_static_target_thread,
     start_chase_bridge,
     start_fpv_bridge,
     start_trajectory_thread,
@@ -90,6 +91,7 @@ WORLD_MAP = {
         "gz_name":   "collision_test",
         "target_model": "collision_test_target",
         "target_drone": True,
+        "static_target": True,
     },
     "balloon_test": {
         "sim_world": "rocket_drone_balloon_test_vis.sdf",
@@ -553,6 +555,17 @@ def main():
             wind_intensity=args.wind_intensity,
             wind_randomness=args.wind_randomness,
             drift_speed=args.drift_speed,
+        )
+
+    elif world_entry.get("static_target"):
+        # Fixed <include>d target (collision_test): publish its known ENU pose to
+        # the GT mirror port so sitl_redis_bridge's target:gps populates. Uses the
+        # same world_vars the world SDF was rendered from → drawn target == GT.
+        start_static_target_thread(
+            traj_stop,
+            x=world_vars["target_x"],
+            y=world_vars["target_y"],
+            z=world_vars["target_z"],
         )
 
     # ── 6. Print status ──

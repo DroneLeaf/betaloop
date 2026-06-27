@@ -410,6 +410,22 @@ def compute_model_vars(
     return model_vars
 
 
+# Per-world default target altitude (m) — single source of truth shared by
+# compute_world_vars (launch spawn + static-target GT) and reset_world.py
+# (RC/SPACE reset), so a bare reset puts the target at the same altitude the bare
+# launch spawned it. Worlds not listed (collision_test, balloon_test) default to 10.
+DEFAULT_TARGET_ALTITUDE = {
+    "patrol_park": 100.0,
+    "park_chase": 50.0,
+    "moving_target": 50.0,
+}
+
+
+def default_target_altitude(world_name: str) -> float:
+    """Per-world default target spawn altitude in metres (default 10)."""
+    return DEFAULT_TARGET_ALTITUDE.get(world_name, 10.0)
+
+
 def compute_world_vars(
     drone: str,
     world_name: str,
@@ -476,14 +492,8 @@ def compute_world_vars(
 
     _target_x = target_x if target_x is not None else 30.0
     _target_y = target_y if target_y is not None else 0.0
-    if target_altitude is not None:
-        _target_z = target_altitude
-    elif world_name == "patrol_park":
-        _target_z = 100.0
-    elif world_name in ("park_chase", "moving_target"):
-        _target_z = 50.0
-    else:
-        _target_z = 10.0
+    _target_z = (target_altitude if target_altitude is not None
+                 else default_target_altitude(world_name))
 
     # Parametric trajectory spawn pose (moving_target world): place the target
     # model at s=0 of the trajectory so it appears where the thread first drives
