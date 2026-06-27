@@ -1408,12 +1408,13 @@ def start_balloon_thread(
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = ("127.0.0.1", udp_port)
+        mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
         packer = struct.Struct("<Qd3d4d")
         seq = 0
         t0 = time.monotonic()
 
-        log.info("Balloon drift (UDP:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
-                 udp_port, amp, amp_z, spd)
+        log.info("Balloon drift (UDP:%d, GT mirror:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
+                 udp_port, TARGET_MIRROR_PORT, amp, amp_z, spd)
 
         while not stop_event.is_set():
             t = time.monotonic() - t0
@@ -1431,7 +1432,8 @@ def start_balloon_thread(
             # identity quaternion (w=1, x=0, y=0, z=0)
             pkt = packer.pack(seq, t, bx, by, bz, 1.0, 0.0, 0.0, 0.0)
             try:
-                sock.sendto(pkt, addr)
+                sock.sendto(pkt, addr)             # drive Gazebo's balloon ExternalPosePlugin
+                sock.sendto(pkt, mirror_addr)      # mirror to sitl_redis_bridge for target:gps GT
             except OSError:
                 pass
             seq += 1
@@ -1443,3 +1445,48 @@ def start_balloon_thread(
     t = threading.Thread(target=_wind_loop, daemon=True, name="balloon_wind")
     t.start()
     return t
+
+
+def start_static_target_thread(
+    stop_event: threading.Event,
+    x: float,
+    y: float,
+    z: float,
+    udp_port: int = TARGET_MIRROR_PORT,
+) -> threading.Thread:
+    """Publish a FIXED target's ground-truth pose to the redis GT bridge.
+
+    For worlds whose target is a static ``<include>``d model (e.g. collision_test)
+    Gazebo already places the object from the world SDF — no ExternalPosePlugin
+    drives it, so nothing would otherwise feed sitl_redis_bridge's ``target:gps``.
+    This emits the known static ENU position ``(x, y, z)`` as a 72-byte
+    VisualPosePacket at ~60 Hz to ``udp_port`` (the mirror/GT port only — it must
+    NOT touch Gazebo's 9016/9014, which the moving targets own). Returns the thread.
+    """
+
+    def _static_loop():
+        interval = 1.0 / 60
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        addr = ("127.0.0.1", udp_port)
+        packer = struct.Struct("<Qd3d4d")
+        seq = 0
+        t0 = time.monotonic()
+
+        log.info("Static target GT (UDP:%d): pos=(%.1f, %.1f, %.1f) ENU", udp_port, x, y, z)
+
+        while not stop_event.is_set():
+            t = time.monotonic() - t0
+            # identity quaternion (w=1, x=0, y=0, z=0); fixed position
+            pkt = packer.pack(seq, t, x, y, z, 1.0, 0.0, 0.0, 0.0)
+            try:
+                sock.sendto(pkt, addr)
+            except OSError:
+                pass
+            seq += 1
+            stop_event.wait(timeout=interval)
+
+        sock.close()
+
+    th = threading.Thread(target=_static_loop, daemon=True, name="static_target_gt")
+    th.start()
+    return th

@@ -66,6 +66,7 @@ from common import (
     render_vis_templates,
     setup_gazebo_env,
     start_balloon_thread,
+    start_static_target_thread,
     start_trajectory_thread,
     TRAJ_TYPES,
     start_tracker_bridges,
@@ -119,6 +120,7 @@ WORLD_MAP = {
         "gz_name":      "collision_test",
         "target_model": "collision_test_target",
         "target_drone": True,
+        "static_target": True,
     },
     "balloon_test": {
         "sim_world":    "rocket_drone_balloon_test_vis.sdf",
@@ -1138,6 +1140,20 @@ def main():
             drift_speed=drift_speed,
         )
 
+    # ── 6d. Static target ground-truth publisher (collision_test only) ──
+    # The target is a fixed <include>d model with no ExternalPosePlugin driving it,
+    # so nothing else feeds sitl_redis_bridge's target:gps. Emit its known static
+    # ENU position to the GT mirror port so the ground truth is populated.
+    static_thread = None
+    static_stop = threading.Event()
+    if world_entry.get("static_target"):
+        static_thread = start_static_target_thread(
+            static_stop,
+            x=world_vars["target_x"],
+            y=world_vars["target_y"],
+            z=world_vars["target_z"],
+        )
+
     # ── 7. Keep alive ──
     try:
         while True:
@@ -1160,6 +1176,9 @@ def main():
     if wind_thread:
         wind_stop.set()
         wind_thread.join(timeout=2)
+    if static_thread:
+        static_stop.set()
+        static_thread.join(timeout=2)
 
     pm.shutdown(extra_pkill_patterns=["betaflight_SITL.elf"])
 
