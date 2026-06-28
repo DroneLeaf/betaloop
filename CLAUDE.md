@@ -215,3 +215,22 @@ any new motion so Ctrl-C exits cleanly.
 - CLI on **both** launchers: `--balloon-harmonic` (store_true) + `--balloon-amp-x/-y`,
   `--balloon-rate-x/-y`, `--balloon-phase-y-deg`. start.py reads centre from
   `world_vars["target_*"]`; start_px4.py from `args.target_distance_*`/`target_altitude`.
+
+## Session Addendum (2026-06-28) — balloon target type + windy_target rename
+
+- `common.TARGET_REFS` gained **`balloon`** (a primitive: `primitive:"sphere"`,
+  `radius`, `color`; no mesh). `compute_world_vars` now also emits
+  `target_primitive` / `target_radius` / `target_color`. `--target-drone` choices
+  include `balloon`; its default scale is 1.0.
+- World **`balloon_test` → `windy_target`** in both `WORLD_MAP`s. New keys on the
+  entry: `target_drone:True`, `default_target:"balloon"` (keeps `balloon_wind:True`).
+  `shake_test` gained `target_model:"shake_target"`, `target_drone:True`,
+  `force_target:"balloon"`, `static_target:True`.
+- New `WORLD_ALIASES = {"balloon_test":"windy_target"}`; `parse_args` (both
+  launchers) resolves the alias, then resolves the **effective target**:
+  `force_target` > explicit `--target-drone` > `default_target` > DEFAULT. So
+  shake_test is always balloon, windy_target defaults to balloon, others shahed.
+  `--target-drone` default is now `None`. shake_test also defaults the look-at
+  balloon to x=8, alt=2 when unset.
+- The balloon (drift/harmonic) thread is unchanged — it now drives whatever
+  target the windy_target world spawns (balloon sphere or a drifting mesh).

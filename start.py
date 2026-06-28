@@ -122,12 +122,33 @@ WORLD_MAP = {
         "target_drone": True,
         "static_target": True,
     },
-    "balloon_test": {
-        "sim_world":    "rocket_drone_balloon_test_vis.sdf",
-        "gz_name":      "balloon_test",
-        "target_model": "balloon_target",
-        "balloon_wind": True,
+    "windy_target": {
+        "sim_world":    "rocket_drone_windy_target_vis.sdf",
+        "gz_name":      "windy_target",
+        "target_model": "windy_target",
+        # Selectable target (balloon/shahed/stingjet), defaults to balloon. Its
+        # pose is driven by the wind (Lissajous drift / harmonic) thread on 9014.
+        "target_drone":   True,
+        "default_target": "balloon",
+        "balloon_wind":   True,
     },
+    "shake_test": {
+        "sim_world":    "rocket_drone_shake_test_vis.sdf",
+        "gz_name":      "shake_test",
+        # The bridge runs with --shake so the DRONE itself oscillates (X/Y) +
+        # rocks (roll/pitch); BF's IMU reflects it. A static balloon sits in
+        # front for the drone to look at (forced balloon, not shahed/stingjet).
+        "shake":         True,
+        "target_model":  "shake_target",
+        "target_drone":  True,
+        "force_target":  "balloon",
+        "static_target": True,
+    },
+}
+
+# Backward-compat world short-name aliases (old name → canonical).
+WORLD_ALIASES = {
+    "balloon_test": "windy_target",
 }
 
 # ── BF-specific Helpers ───────────────────────────────────────────────────────
@@ -278,7 +299,7 @@ def parse_args():
     sim.add_argument(
         "--world",
         default=DEFAULT_WORLD,
-        choices=list(WORLD_MAP.keys()),
+        choices=list(WORLD_MAP.keys()) + list(WORLD_ALIASES.keys()),
         help=f"World short name (default: {DEFAULT_WORLD})",
     )
     sim.add_argument(
@@ -803,8 +824,9 @@ def parse_args():
     wld.add_argument(
         "--target-drone",
         choices=list(TARGET_REFS.keys()),
-        default=DEFAULT_TARGET_DRONE,
-        help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE}; "
+        default=None,
+        help=f"Target drone model to track (default per world: balloon for "
+             f"windy_target/shake_test, else {DEFAULT_TARGET_DRONE}; "
              f"choices: {', '.join(TARGET_REFS)})",
     )
     wld.add_argument(
@@ -849,7 +871,62 @@ def parse_args():
                      help="Harmonic balloon Y phase offset, degrees "
                           "(90=circle/ellipse, 0=diagonal line; default: 90)")
 
-    return parser.parse_args()
+    # ── Shake-table (shake_test world, or --shake on any world) ──
+    # Kinematic harmonic shake of the DRONE itself, injected in bf_sim_bridge so
+    # BF's gyro+accel (MSP_RAW_IMU) reflect the motion. Translation drives accel;
+    # the coupled roll/pitch rocking drives the gyro.
+    shk = parser.add_argument_group("Shake-table settings (shake_test world)")
+    shk.add_argument("--shake", action="store_true",
+                     help="Force the kinematic shake-table on any world "
+                          "(the shake_test world enables it automatically)")
+    shk.add_argument("--shake-amp-x", type=float, default=0.10,
+                     help="Shake East translation amplitude in metres (default: 0.10)")
+    shk.add_argument("--shake-amp-y", type=float, default=0.10,
+                     help="Shake North translation amplitude in metres (default: 0.10)")
+    shk.add_argument("--shake-rate-x", type=float, default=1.5,
+                     help="Shake East translation rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-rate-y", type=float, default=1.5,
+                     help="Shake North translation rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-phase-y-deg", type=float, default=90.0,
+                     help="Shake North phase offset relative to East, degrees (default: 90)")
+    shk.add_argument("--shake-roll-amp-deg", type=float, default=8.0,
+                     help="Shake roll rocking amplitude in degrees (default: 8)")
+    shk.add_argument("--shake-pitch-amp-deg", type=float, default=8.0,
+                     help="Shake pitch rocking amplitude in degrees (default: 8)")
+    shk.add_argument("--shake-rate-roll", type=float, default=1.5,
+                     help="Shake roll rocking rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-rate-pitch", type=float, default=1.5,
+                     help="Shake pitch rocking rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-phase-roll-deg", type=float, default=90.0,
+                     help="Shake roll phase offset in degrees (default: 90)")
+    shk.add_argument("--shake-phase-pitch-deg", type=float, default=0.0,
+                     help="Shake pitch phase offset in degrees (default: 0)")
+
+    args = parser.parse_args()
+
+    # Resolve backward-compat world aliases (e.g. balloon_test → windy_target).
+    args.world = WORLD_ALIASES.get(args.world, args.world)
+
+    # Resolve the effective target drone per world: a world may FORCE a target
+    # (shake_test = balloon) or set a DEFAULT_target (windy_target = balloon);
+    # an explicit --target-drone overrides the default but not a forced target.
+    _entry = WORLD_MAP.get(args.world, {})
+    args.target_drone = (
+        _entry.get("force_target")
+        or args.target_drone
+        or _entry.get("default_target")
+        or DEFAULT_TARGET_DRONE
+    )
+
+    # shake_test: place the look-at balloon close and near drone height by
+    # default (it's just something to look at while the drone shakes).
+    if args.world == "shake_test":
+        if args.target_distance_x is None:
+            args.target_distance_x = 8.0
+        if args.target_altitude is None:
+            args.target_altitude = 2.0
+
+    return args
 
 
 def main():
@@ -942,6 +1019,27 @@ def main():
         bridge_args += ["--home-lon", str(args.home_lon)]
     if args.home_alt is not None:
         bridge_args += ["--home-alt", str(args.home_alt)]
+    # Kinematic shake-table: on for the shake_test world, or forced via --shake.
+    if world_entry.get("shake") or getattr(args, "shake", False):
+        bridge_args += [
+            "--shake",
+            "--shake-amp-x", str(args.shake_amp_x),
+            "--shake-amp-y", str(args.shake_amp_y),
+            "--shake-rate-x", str(args.shake_rate_x),
+            "--shake-rate-y", str(args.shake_rate_y),
+            "--shake-phase-y-deg", str(args.shake_phase_y_deg),
+            "--shake-roll-amp-deg", str(args.shake_roll_amp_deg),
+            "--shake-pitch-amp-deg", str(args.shake_pitch_amp_deg),
+            "--shake-rate-roll", str(args.shake_rate_roll),
+            "--shake-rate-pitch", str(args.shake_rate_pitch),
+            "--shake-phase-roll-deg", str(args.shake_phase_roll_deg),
+            "--shake-phase-pitch-deg", str(args.shake_phase_pitch_deg),
+        ]
+        log.info("Shake-table enabled (amp=[%.3g,%.3g]m rate=[%.3g,%.3g]Hz "
+                 "rock=[%.3g,%.3g]deg)",
+                 args.shake_amp_x, args.shake_amp_y,
+                 args.shake_rate_x, args.shake_rate_y,
+                 args.shake_roll_amp_deg, args.shake_pitch_amp_deg)
     log.info("Starting bf_sim_bridge (Simulink dynamics)")
     bf_bridge_proc = pm.spawn(bridge_args)
     time.sleep(2)
@@ -1137,7 +1235,7 @@ def main():
             reverse=getattr(args, "traj_reverse", False),
         )
 
-    # ── 6c. Balloon smooth drift thread (balloon_test only) ──
+    # ── 6c. Wind (drift/harmonic) target thread (windy_target only) ──
     wind_thread = None
     wind_stop = threading.Event()
     if world_entry.get("balloon_wind"):

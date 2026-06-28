@@ -134,6 +134,21 @@ TARGET_REFS = {
         "default_scale": 0.1,
         "bbox": "0.94,0.54,0.16",
     },
+    "balloon": {
+        # A primitive (no mesh): worlds that inline the visual draw a <sphere>
+        # instead of a <mesh>; worlds that <include> use models/balloon. Used as
+        # the default target of the wind (drifting) and shake worlds.
+        "label": "Balloon",
+        "primitive": "sphere",
+        "radius": 0.5,                 # metres at scale 1.0
+        "color": "0.9 0.1 0.1",        # red (ambient/diffuse)
+        "mesh_uri": "model://balloon/balloon.glb",   # unused (primitive), kept for parity
+        "model_uri": "model://balloon",
+        "visual_pose": "0 0 0 0 0 0",
+        "base_scale": 1.0,
+        "default_scale": 1.0,
+        "bbox": "0.5,0.5,0.5",
+    },
 }
 DEFAULT_TARGET_DRONE = "shahed"
 
@@ -471,6 +486,13 @@ def compute_world_vars(
     _target_bbox = ",".join(f"{float(c) * _tscale_factor:g}" for c in tref["bbox"].split(","))
     _target_model_name = tref["model_uri"].replace("model://", "")
 
+    # Primitive targets (e.g. balloon) are drawn as a <sphere> inline instead of
+    # a <mesh>; worlds branch on `target_primitive`. The sphere radius scales with
+    # the same factor as a mesh would.
+    _target_primitive = tref.get("primitive", "")
+    _target_radius = f"{float(tref.get('radius', 0.5)) * _tscale_factor:g}"
+    _target_color = tref.get("color", "0.9 0.1 0.1")
+
     # Pedestal launch-stand dimensions (vis-only cylinder under the drone).
     # Defaults mirror the Simulink model_parameters (pedestal_radius=0.5,
     # pedestal_height=0.30); leaf-sim-ui overrides them from the per-drone
@@ -541,6 +563,9 @@ def compute_world_vars(
         "target_scale": _target_scale_str,
         "target_bbox": _target_bbox,
         "target_model_name": _target_model_name,
+        "target_primitive": _target_primitive,
+        "target_radius": _target_radius,
+        "target_color": _target_color,
     }
 
 

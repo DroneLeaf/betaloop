@@ -93,12 +93,31 @@ WORLD_MAP = {
         "target_drone": True,
         "static_target": True,
     },
-    "balloon_test": {
-        "sim_world": "rocket_drone_balloon_test_vis.sdf",
-        "gz_name":   "balloon_test",
-        "target_model": "balloon_target",
-        "balloon_wind": True,
+    "windy_target": {
+        "sim_world": "rocket_drone_windy_target_vis.sdf",
+        "gz_name":   "windy_target",
+        "target_model": "windy_target",
+        # Selectable target (balloon/shahed/stingjet), defaults to balloon. Its
+        # pose is driven by the wind (Lissajous drift / harmonic) thread on 9014.
+        "target_drone":   True,
+        "default_target": "balloon",
+        "balloon_wind":   True,
     },
+    "shake_test": {
+        "sim_world": "rocket_drone_shake_test_vis.sdf",
+        "gz_name":   "shake_test",
+        # The kinematic IMU shake is BF-only (it lives in bf_sim_bridge); on the
+        # PX4 stack this world renders the drone static with a static balloon.
+        "target_model":  "shake_target",
+        "target_drone":  True,
+        "force_target":  "balloon",
+        "static_target": True,
+    },
+}
+
+# Backward-compat world short-name aliases (old name → canonical).
+WORLD_ALIASES = {
+    "balloon_test": "windy_target",
 }
 
 
@@ -112,7 +131,7 @@ def parse_args():
 
     sim = parser.add_argument_group("Simulation settings")
     sim.add_argument("--world", default=DEFAULT_WORLD,
-                     choices=list(WORLD_MAP.keys()),
+                     choices=list(WORLD_MAP.keys()) + list(WORLD_ALIASES.keys()),
                      help=f"World short name (default: {DEFAULT_WORLD})")
     sim.add_argument("--drone", default=DEFAULT_DRONE,
                      choices=list(DRONE_REFS.keys()),
@@ -344,13 +363,35 @@ def parse_args():
                      help="Harmonic balloon Y phase offset, degrees "
                           "(90=circle/ellipse, 0=diagonal line; default: 90)")
     tgt.add_argument("--target-drone", choices=list(TARGET_REFS.keys()),
-                     default=DEFAULT_TARGET_DRONE,
-                     help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE})")
+                     default=None,
+                     help="Target drone model to track (default per world: balloon for "
+                          f"windy_target/shake_test, else {DEFAULT_TARGET_DRONE})")
     tgt.add_argument("--target-scale", type=float, default=None,
                      help="Uniform scale multiplier for the target mesh (any target; "
                           "default per target: shahed 1.0, stingjet 0.1). Scales the hit-box too.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Resolve backward-compat world aliases (e.g. balloon_test → windy_target).
+    args.world = WORLD_ALIASES.get(args.world, args.world)
+
+    # Resolve the effective target drone per world (force > explicit > default).
+    _entry = WORLD_MAP.get(args.world, {})
+    args.target_drone = (
+        _entry.get("force_target")
+        or args.target_drone
+        or _entry.get("default_target")
+        or DEFAULT_TARGET_DRONE
+    )
+
+    # shake_test: place the look-at balloon close and near drone height.
+    if args.world == "shake_test":
+        if args.target_distance_x is None:
+            args.target_distance_x = 8.0
+        if args.target_altitude is None:
+            args.target_altitude = 2.0
+
+    return args
 
 
 def main():
