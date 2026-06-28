@@ -1394,28 +1394,33 @@ def start_balloon_thread(
     wind_intensity: float = 2.0,
     wind_randomness: float = 1.0,
     drift_speed: float = 20.0,
+    harmonic: bool = False,
+    amp_x: float = 10.0,
+    amp_y: float = 10.0,
+    rate_x: float = 0.05,
+    rate_y: float = 0.05,
+    phase_y_deg: float = 90.0,
     udp_port: int = BALLOON_UDP_PORT,
 ) -> threading.Thread:
-    """Spawn a daemon thread that drives smooth Lissajous balloon motion.
+    """Spawn a daemon thread that drives balloon motion at ~60 Hz.
 
-    Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port``.
+    Sends a 72-byte VisualPosePacket to ``udp_port`` (Gazebo) and the GT mirror
+    port. Two motion models, both centred on ``(mean_x, mean_y, mean_z)``:
+
+    * ``harmonic=False`` (default): smooth multi-sine Lissajous *drift*
+      (``wind_intensity`` horizontal amp, ``wind_randomness`` vertical bob,
+      ``drift_speed`` rate).
+    * ``harmonic=True``: simple per-axis simple-harmonic motion about the centre —
+      ``x = cx + amp_x·sin(2π·rate_x·t)``,
+      ``y = cy + amp_y·sin(2π·rate_y·t + phase_y)``, ``z = cz`` (constant).
+      Rates are in Hz. Equal amp/rate with ``phase_y_deg=90`` traces a circle;
+      ``0`` a diagonal line; unequal rates a Lissajous figure.
+
     Returns the started thread.
     """
 
     def _wind_loop():
         interval = 1.0 / 60  # 60 Hz
-        amp = wind_intensity
-        amp_z = wind_randomness
-        spd = drift_speed
-
-        px = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-        py = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-        pz = [random.uniform(0, 2 * math.pi) for _ in range(3)]
-
-        fx = [0.13 * spd, 0.31 * spd, 0.53 * spd]
-        fy = [0.17 * spd, 0.41 * spd, 0.67 * spd]
-        fz = [0.11 * spd, 0.29 * spd, 0.47 * spd]
-
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         addr = ("127.0.0.1", udp_port)
         mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
@@ -1423,21 +1428,44 @@ def start_balloon_thread(
         seq = 0
         t0 = time.monotonic()
 
-        log.info("Balloon drift (UDP:%d, GT mirror:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
-                 udp_port, TARGET_MIRROR_PORT, amp, amp_z, spd)
+        if harmonic:
+            wx = 2.0 * math.pi * rate_x
+            wy = 2.0 * math.pi * rate_y
+            phy = math.radians(phase_y_deg)
+            log.info("Balloon harmonic (UDP:%d, GT mirror:%d): centre=(%.1f,%.1f,%.1f) "
+                     "amp=(%.1f,%.1f)m rate=(%.3f,%.3f)Hz phase_y=%.0f deg",
+                     udp_port, TARGET_MIRROR_PORT, mean_x, mean_y, mean_z,
+                     amp_x, amp_y, rate_x, rate_y, phase_y_deg)
+        else:
+            amp = wind_intensity
+            amp_z = wind_randomness
+            spd = drift_speed
+            px = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+            py = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+            pz = [random.uniform(0, 2 * math.pi) for _ in range(3)]
+            fx = [0.13 * spd, 0.31 * spd, 0.53 * spd]
+            fy = [0.17 * spd, 0.41 * spd, 0.67 * spd]
+            fz = [0.11 * spd, 0.29 * spd, 0.47 * spd]
+            log.info("Balloon drift (UDP:%d, GT mirror:%d): amp=%.1f m  bob=%.1f m  speed=%.1fx",
+                     udp_port, TARGET_MIRROR_PORT, amp, amp_z, spd)
 
         while not stop_event.is_set():
             t = time.monotonic() - t0
 
-            bx = mean_x + amp * (0.5 * math.sin(fx[0] * t + px[0])
-                               + 0.3 * math.sin(fx[1] * t + px[1])
-                               + 0.2 * math.sin(fx[2] * t + px[2]))
-            by = mean_y + amp * (0.5 * math.sin(fy[0] * t + py[0])
-                               + 0.3 * math.sin(fy[1] * t + py[1])
-                               + 0.2 * math.sin(fy[2] * t + py[2]))
-            bz = mean_z + amp_z * (0.4 * math.sin(fz[0] * t + pz[0])
-                                 + 0.35 * math.sin(fz[1] * t + pz[1])
-                                 + 0.25 * math.sin(fz[2] * t + pz[2]))
+            if harmonic:
+                bx = mean_x + amp_x * math.sin(wx * t)
+                by = mean_y + amp_y * math.sin(wy * t + phy)
+                bz = mean_z
+            else:
+                bx = mean_x + amp * (0.5 * math.sin(fx[0] * t + px[0])
+                                   + 0.3 * math.sin(fx[1] * t + px[1])
+                                   + 0.2 * math.sin(fx[2] * t + px[2]))
+                by = mean_y + amp * (0.5 * math.sin(fy[0] * t + py[0])
+                                   + 0.3 * math.sin(fy[1] * t + py[1])
+                                   + 0.2 * math.sin(fy[2] * t + py[2]))
+                bz = mean_z + amp_z * (0.4 * math.sin(fz[0] * t + pz[0])
+                                     + 0.35 * math.sin(fz[1] * t + pz[1])
+                                     + 0.25 * math.sin(fz[2] * t + pz[2]))
 
             # identity quaternion (w=1, x=0, y=0, z=0)
             pkt = packer.pack(seq, t, bx, by, bz, 1.0, 0.0, 0.0, 0.0)

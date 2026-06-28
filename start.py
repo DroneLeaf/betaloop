@@ -832,6 +832,22 @@ def parse_args():
         default=None,
         help="Balloon drift speed multiplier (default: 1.0)",
     )
+    # Balloon simple-harmonic mode (about the target centre = --target-distance-x/-y
+    # + --target-altitude). Per-axis amplitude + rate; phase_y gives circle/ellipse.
+    wld.add_argument("--balloon-harmonic", action="store_true",
+                     help="Balloon: per-axis simple-harmonic oscillation about the "
+                          "target centre instead of the default Lissajous drift")
+    wld.add_argument("--balloon-amp-x", type=float, default=10.0,
+                     help="Harmonic balloon X amplitude in metres (default: 10)")
+    wld.add_argument("--balloon-amp-y", type=float, default=10.0,
+                     help="Harmonic balloon Y amplitude in metres (default: 10)")
+    wld.add_argument("--balloon-rate-x", type=float, default=0.05,
+                     help="Harmonic balloon X oscillation rate in Hz (default: 0.05)")
+    wld.add_argument("--balloon-rate-y", type=float, default=0.05,
+                     help="Harmonic balloon Y oscillation rate in Hz (default: 0.05)")
+    wld.add_argument("--balloon-phase-y-deg", type=float, default=90.0,
+                     help="Harmonic balloon Y phase offset, degrees "
+                          "(90=circle/ellipse, 0=diagonal line; default: 90)")
 
     return parser.parse_args()
 
@@ -1138,6 +1154,12 @@ def main():
             wind_intensity=wind_intensity,
             wind_randomness=wind_sigma,
             drift_speed=drift_speed,
+            harmonic=getattr(args, "balloon_harmonic", False),
+            amp_x=getattr(args, "balloon_amp_x", 10.0),
+            amp_y=getattr(args, "balloon_amp_y", 10.0),
+            rate_x=getattr(args, "balloon_rate_x", 0.05),
+            rate_y=getattr(args, "balloon_rate_y", 0.05),
+            phase_y_deg=getattr(args, "balloon_phase_y_deg", 90.0),
         )
 
     # ── 6d. Static target ground-truth publisher (collision_test only) ──

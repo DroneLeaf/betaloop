@@ -328,6 +328,21 @@ def parse_args():
                      help="Balloon vertical bobbing amplitude in metres (default: 1.0)")
     tgt.add_argument("--drift-speed", type=float, default=20.0,
                      help="Balloon Lissajous frequency multiplier (default: 20.0)")
+    # Balloon simple-harmonic mode (about the target centre); per-axis amp + rate.
+    tgt.add_argument("--balloon-harmonic", action="store_true",
+                     help="Balloon: per-axis simple-harmonic oscillation about the "
+                          "target centre instead of the default Lissajous drift")
+    tgt.add_argument("--balloon-amp-x", type=float, default=10.0,
+                     help="Harmonic balloon X amplitude in metres (default: 10)")
+    tgt.add_argument("--balloon-amp-y", type=float, default=10.0,
+                     help="Harmonic balloon Y amplitude in metres (default: 10)")
+    tgt.add_argument("--balloon-rate-x", type=float, default=0.05,
+                     help="Harmonic balloon X oscillation rate in Hz (default: 0.05)")
+    tgt.add_argument("--balloon-rate-y", type=float, default=0.05,
+                     help="Harmonic balloon Y oscillation rate in Hz (default: 0.05)")
+    tgt.add_argument("--balloon-phase-y-deg", type=float, default=90.0,
+                     help="Harmonic balloon Y phase offset, degrees "
+                          "(90=circle/ellipse, 0=diagonal line; default: 90)")
     tgt.add_argument("--target-drone", choices=list(TARGET_REFS.keys()),
                      default=DEFAULT_TARGET_DRONE,
                      help=f"Target drone model to track (default: {DEFAULT_TARGET_DRONE})")
@@ -555,6 +570,12 @@ def main():
             wind_intensity=args.wind_intensity,
             wind_randomness=args.wind_randomness,
             drift_speed=args.drift_speed,
+            harmonic=getattr(args, "balloon_harmonic", False),
+            amp_x=getattr(args, "balloon_amp_x", 10.0),
+            amp_y=getattr(args, "balloon_amp_y", 10.0),
+            rate_x=getattr(args, "balloon_rate_x", 0.05),
+            rate_y=getattr(args, "balloon_rate_y", 0.05),
+            phase_y_deg=getattr(args, "balloon_phase_y_deg", 90.0),
         )
 
     elif world_entry.get("static_target"):

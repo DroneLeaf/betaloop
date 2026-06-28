@@ -202,3 +202,16 @@ any new motion so Ctrl-C exits cleanly.
 - `start.py` + `start_px4.py` both call `add_lens_args(drn/sim)` and pass
   `**lens_kwargs_from_args(args)` into `compute_model_vars`. Lens only affects fisheye
   feeds (it's inside the `{%- if <cam>_fisheye %}` block). See `aeroloop_gazebo/CLAUDE.md`.
+
+## Session Addendum (2026-06-28) — balloon harmonic-oscillation mode
+
+- `common.start_balloon_thread` gained a **harmonic** mode (default off → existing
+  Lissajous drift preserved). Params `harmonic`, `amp_x`, `amp_y`, `rate_x`, `rate_y`
+  (Hz), `phase_y_deg`. Motion: `x = cx + amp_x·sin(2π·rate_x·t)`,
+  `y = cy + amp_y·sin(2π·rate_y·t + phase_y)`, `z = cz` (constant). The **centre is
+  the target position** (`mean_x/y/z` ← `--target-distance-x/-y` + `--target-altitude`),
+  so no new centre args. Equal amp/rate + phase 90° = circle (verified: traces a circle
+  of radius=amp about the centre to machine precision).
+- CLI on **both** launchers: `--balloon-harmonic` (store_true) + `--balloon-amp-x/-y`,
+  `--balloon-rate-x/-y`, `--balloon-phase-y-deg`. start.py reads centre from
+  `world_vars["target_*"]`; start_px4.py from `args.target_distance_*`/`target_altitude`.
