@@ -879,6 +879,10 @@ def parse_args():
     shk.add_argument("--shake", action="store_true",
                      help="Force the kinematic shake-table on any world "
                           "(the shake_test world enables it automatically)")
+    shk.add_argument("--shake-gated", action="store_true",
+                     help="Shake only while the reset switch is held high "
+                          "(reset_world.py --shake-gate); holds still at spawn "
+                          "otherwise. Great for observing onset/cessation transients.")
     shk.add_argument("--shake-amp-x", type=float, default=0.10,
                      help="Shake East translation amplitude in metres (default: 0.10)")
     shk.add_argument("--shake-amp-y", type=float, default=0.10,
@@ -1035,8 +1039,10 @@ def main():
         bridge_args += ["--home-alt", str(args.home_alt)]
     # Kinematic shake-table: on for the shake_test world, or forced via --shake.
     if world_entry.get("shake") or getattr(args, "shake", False):
+        bridge_args += ["--shake"]
+        if getattr(args, "shake_gated", False):
+            bridge_args += ["--shake-gated"]
         bridge_args += [
-            "--shake",
             "--shake-amp-x", str(args.shake_amp_x),
             "--shake-amp-y", str(args.shake_amp_y),
             "--shake-amp-z", str(args.shake_amp_z),
