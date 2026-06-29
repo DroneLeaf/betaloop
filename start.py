@@ -883,24 +883,38 @@ def parse_args():
                      help="Shake East translation amplitude in metres (default: 0.10)")
     shk.add_argument("--shake-amp-y", type=float, default=0.10,
                      help="Shake North translation amplitude in metres (default: 0.10)")
+    shk.add_argument("--shake-amp-z", type=float, default=0.10,
+                     help="Shake Up (vertical) translation amplitude in metres (default: 0.10)")
     shk.add_argument("--shake-rate-x", type=float, default=1.5,
                      help="Shake East translation rate in Hz (default: 1.5)")
     shk.add_argument("--shake-rate-y", type=float, default=1.5,
                      help="Shake North translation rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-rate-z", type=float, default=1.5,
+                     help="Shake Up (vertical) translation rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-phase-x-deg", type=float, default=0.0,
+                     help="Shake East phase offset in degrees (default: 0)")
     shk.add_argument("--shake-phase-y-deg", type=float, default=90.0,
-                     help="Shake North phase offset relative to East, degrees (default: 90)")
+                     help="Shake North phase offset in degrees (default: 90)")
+    shk.add_argument("--shake-phase-z-deg", type=float, default=0.0,
+                     help="Shake Up phase offset in degrees (default: 0)")
     shk.add_argument("--shake-roll-amp-deg", type=float, default=8.0,
-                     help="Shake roll rocking amplitude in degrees (default: 8)")
+                     help="Shake roll amplitude in degrees (default: 8)")
     shk.add_argument("--shake-pitch-amp-deg", type=float, default=8.0,
-                     help="Shake pitch rocking amplitude in degrees (default: 8)")
+                     help="Shake pitch amplitude in degrees (default: 8)")
+    shk.add_argument("--shake-yaw-amp-deg", type=float, default=8.0,
+                     help="Shake yaw amplitude in degrees (drives gyro Z; default: 8)")
     shk.add_argument("--shake-rate-roll", type=float, default=1.5,
-                     help="Shake roll rocking rate in Hz (default: 1.5)")
+                     help="Shake roll rate in Hz (default: 1.5)")
     shk.add_argument("--shake-rate-pitch", type=float, default=1.5,
-                     help="Shake pitch rocking rate in Hz (default: 1.5)")
+                     help="Shake pitch rate in Hz (default: 1.5)")
+    shk.add_argument("--shake-rate-yaw", type=float, default=1.5,
+                     help="Shake yaw rate in Hz (default: 1.5)")
     shk.add_argument("--shake-phase-roll-deg", type=float, default=90.0,
                      help="Shake roll phase offset in degrees (default: 90)")
     shk.add_argument("--shake-phase-pitch-deg", type=float, default=0.0,
                      help="Shake pitch phase offset in degrees (default: 0)")
+    shk.add_argument("--shake-phase-yaw-deg", type=float, default=0.0,
+                     help="Shake yaw phase offset in degrees (default: 0)")
 
     args = parser.parse_args()
 
@@ -1025,21 +1039,28 @@ def main():
             "--shake",
             "--shake-amp-x", str(args.shake_amp_x),
             "--shake-amp-y", str(args.shake_amp_y),
+            "--shake-amp-z", str(args.shake_amp_z),
             "--shake-rate-x", str(args.shake_rate_x),
             "--shake-rate-y", str(args.shake_rate_y),
+            "--shake-rate-z", str(args.shake_rate_z),
+            "--shake-phase-x-deg", str(args.shake_phase_x_deg),
             "--shake-phase-y-deg", str(args.shake_phase_y_deg),
+            "--shake-phase-z-deg", str(args.shake_phase_z_deg),
             "--shake-roll-amp-deg", str(args.shake_roll_amp_deg),
             "--shake-pitch-amp-deg", str(args.shake_pitch_amp_deg),
+            "--shake-yaw-amp-deg", str(args.shake_yaw_amp_deg),
             "--shake-rate-roll", str(args.shake_rate_roll),
             "--shake-rate-pitch", str(args.shake_rate_pitch),
+            "--shake-rate-yaw", str(args.shake_rate_yaw),
             "--shake-phase-roll-deg", str(args.shake_phase_roll_deg),
             "--shake-phase-pitch-deg", str(args.shake_phase_pitch_deg),
+            "--shake-phase-yaw-deg", str(args.shake_phase_yaw_deg),
         ]
-        log.info("Shake-table enabled (amp=[%.3g,%.3g]m rate=[%.3g,%.3g]Hz "
-                 "rock=[%.3g,%.3g]deg)",
-                 args.shake_amp_x, args.shake_amp_y,
-                 args.shake_rate_x, args.shake_rate_y,
-                 args.shake_roll_amp_deg, args.shake_pitch_amp_deg)
+        log.info("Shake-table enabled (transl amp=[%.3g,%.3g,%.3g]m; "
+                 "rot roll/pitch/yaw=[%.3g,%.3g,%.3g]deg)",
+                 args.shake_amp_x, args.shake_amp_y, args.shake_amp_z,
+                 args.shake_roll_amp_deg, args.shake_pitch_amp_deg,
+                 args.shake_yaw_amp_deg)
     log.info("Starting bf_sim_bridge (Simulink dynamics)")
     bf_bridge_proc = pm.spawn(bridge_args)
     time.sleep(2)
