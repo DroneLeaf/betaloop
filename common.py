@@ -692,6 +692,15 @@ def configure_display(args, pm: ProcessManager):
         nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
         if os.path.isfile(nvidia_icd):
             os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_icd
+        # PRIME render offload — force GLX/OpenGL onto the NVIDIA GPU. On hybrid
+        # (Optimus) laptops the X server on $DISPLAY runs on the Intel iGPU, and
+        # OGRE2's GL3Plus backend renders via GLX on that display — so it lands on
+        # Intel (measured ≈17 fps, RTX idle) even though the NVIDIA EGL device is
+        # probed first. These route the GL context onto the RTX. Harmless on
+        # single-NVIDIA hosts (GLX is already NVIDIA there).
+        os.environ["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+        os.environ["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+        os.environ["__VK_LAYER_NV_optimus"] = "NVIDIA_only"
     else:
         log.info("No GPU detected — software rendering (llvmpipe)")
         os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
@@ -700,7 +709,8 @@ def configure_display(args, pm: ProcessManager):
         if not os.environ.get("DISPLAY"):
             log.error("No DISPLAY set — the Gazebo GUI needs a display.")
             sys.exit(1)
-        os.environ.pop("__GLX_VENDOR_LIBRARY_NAME", None)
+        # Keep the PRIME offload set above so the GUI also renders on the NVIDIA
+        # GPU (its GL widget uses GLX just like the server's offscreen render).
         log.info("Using display %s for Gazebo GUI", os.environ["DISPLAY"])
     elif os.environ.get("DISPLAY"):
         log.info("Using native display %s", os.environ["DISPLAY"])
