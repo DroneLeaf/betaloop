@@ -479,6 +479,8 @@ def parse_args():
                      help="Wide tracker RTSP libx264 target/cap bitrate (default: 4M)")
     drn.add_argument("--tracker-wide-rtsp-crf", type=int, default=23,
                      help="Wide tracker RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
+    drn.add_argument("--tracker-wide-rtsp-gop", type=int, default=0,
+                     help="Wide tracker RTSP GOP/keyframe interval in frames; shorter=faster reader startup (0=auto: fps*2) (default: 0)")
     drn.add_argument("--tracker-wide-rtsp-preset", type=str, default="ultrafast",
                      help="Wide tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-wide-rtsp-tune", type=str, default="zerolatency",
@@ -530,6 +532,8 @@ def parse_args():
                      help="Narrow tracker RTSP libx264 target/cap bitrate (default: 4M)")
     drn.add_argument("--tracker-narrow-rtsp-crf", type=int, default=23,
                      help="Narrow tracker RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
+    drn.add_argument("--tracker-narrow-rtsp-gop", type=int, default=0,
+                     help="Narrow tracker RTSP GOP/keyframe interval in frames; shorter=faster reader startup (0=auto: fps*2) (default: 0)")
     drn.add_argument("--tracker-narrow-rtsp-preset", type=str, default="ultrafast",
                      help="Narrow tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-narrow-rtsp-tune", type=str, default="zerolatency",
@@ -567,6 +571,8 @@ def parse_args():
                      help="Thermal RTSP libx264 target/cap bitrate (default: 4M)")
     drn.add_argument("--thermal-rtsp-crf", type=int, default=23,
                      help="Thermal RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
+    drn.add_argument("--thermal-rtsp-gop", type=int, default=0,
+                     help="Thermal RTSP GOP/keyframe interval in frames; shorter=faster reader startup (0=auto: fps*2) (default: 0)")
     drn.add_argument("--thermal-rtsp-preset", type=str, default="ultrafast",
                      help="Thermal RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--thermal-rtsp-tune", type=str, default="zerolatency",
@@ -606,6 +612,8 @@ def parse_args():
                      help="Utility RTSP libx264 target/cap bitrate (default: 4M)")
     drn.add_argument("--utility-rtsp-crf", type=int, default=23,
                      help="Utility RTSP libx264 CRF 0-51 (lower=better; 0=off/use bitrate), capped by bitrate (default: 23)")
+    drn.add_argument("--utility-rtsp-gop", type=int, default=0,
+                     help="Utility RTSP GOP/keyframe interval in frames; shorter=faster reader startup (0=auto: fps*2) (default: 0)")
     drn.add_argument("--utility-rtsp-preset", type=str, default="ultrafast",
                      help="Utility RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--utility-rtsp-tune", type=str, default="zerolatency",
