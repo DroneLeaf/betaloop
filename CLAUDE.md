@@ -234,3 +234,41 @@ any new motion so Ctrl-C exits cleanly.
   balloon to x=8, alt=2 when unset.
 - The balloon (drift/harmonic) thread is unchanged — it now drives whatever
   target the windy_target world spawns (balloon sphere or a drifting mesh).
+
+## Session Addendum (2026-07-16) — terrain theme + sky brightness
+
+- `common.TERRAIN_THEMES` (desert/lush: `label`, `ground_color`) +
+  `apply_terrain_theme(theme)` — copies `models/baylands_terrain/media/Textures/
+  themes/<theme>/{Grass,Sand,DirtPath}.png` over the live textures (the DAE
+  hardcodes the filenames; filecmp no-op when already applied). Called from
+  `render_vis_templates` using `world_vars["terrain_theme"]`, so both stacks get
+  it with no launcher-specific code.
+- `common._sky_vars(brightness)`: 0.15–1.0 scalar → `sky_time`, `sun_diffuse`,
+  `sun_specular`, `sun_direction`, `background_color` (warmer/lower sun + darker
+  sky as it drops; 1.0 reproduces the previous hardcoded values exactly).
+  Merged into `compute_world_vars(...)` output.
+- New flags on **both** launchers: `--terrain-theme {desert,lush}` and
+  `--sky-brightness F` (defaults None → desert / 1.0). Only the moving_target
+  world template consumes the vars so far.
+
+## Session Addendum (2026-07-16b) — sky brightness actually dims the skybox
+
+- **Why:** Harmonic's ogre2 sky is a static cubemap; `<sky><time>/<humidity>`
+  are dead SDF params (RenderUtil only calls `SetSkyEnabled(bool)`, no
+  cubemap_uri in the sensors path). The `_sky_vars` sun/background dimming
+  alone left the sky at full noon brightness.
+- `common.ensure_sky_media(brightness)`: builds+caches a
+  `GZ_RENDERING_RESOURCE_PATH` override tree per 5% brightness step
+  (`aeroloop_gazebo/media_cache/gz_rendering_bNNN`, symlink mirror of
+  `/usr/share/gz/gz-rendering8` + a real dimmed `skybox.dds`). Called from
+  `render_vis_templates` (exports the env var; gz inherits). Returns None at
+  100% (stock media, env untouched). Stale caches auto-rebuild via a stamp
+  (source path/size/mtime + curve version `v3`).
+- `common._scale_dxt1_dds(src, dst, factors)`: vectorised numpy DXT1 cubemap
+  decode → per-channel scale → **uncompressed A8R8G8B8** cubemap DDS write.
+  Uncompressed on purpose: scaling DXT1's 5/6-bit endpoints far down causes
+  severe banding (tried first — ugly). Factors are display-ratio ** 2.2
+  (ogre2 PBR tone-mapping compensation, measured) with a subtle warm shift
+  (G × (1-0.10w), B × (1-0.18w)) so the dusk sky stays bluish, not olive.
+- Verified via headless `gz sim -s` + camera sensor frame capture: mean sky
+  RGB 167/187/207 (stock) → 113/120/128 (50%) → 79/81/84 (20%), smooth.

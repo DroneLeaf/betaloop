@@ -68,6 +68,7 @@ from common import (
     start_balloon_thread,
     start_static_target_thread,
     start_trajectory_thread,
+    TERRAIN_THEMES,
     TRAJ_TYPES,
     start_tracker_bridges,
     wait_for_port,
@@ -249,6 +250,8 @@ def _render_all_templates(drone, world_name, args):
         traj_start_pos=getattr(args, "traj_start_pos", None),
         traj_reverse=getattr(args, "traj_reverse", False),
         player_heading_deg=getattr(args, "player_heading_deg", None),
+        terrain_theme=getattr(args, "terrain_theme", None),
+        sky_brightness=getattr(args, "sky_brightness", None),
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -327,6 +330,21 @@ def parse_args():
         type=float,
         default=0.7,
         help="Cloud density / humidity 0.0-1.0 (default: 0.7)",
+    )
+    sim.add_argument(
+        "--terrain-theme",
+        choices=list(TERRAIN_THEMES),
+        default=None,
+        help="Terrain theme: swaps the baylands ground textures + ground-plane "
+             "tint (desert | lush) (default: desert)",
+    )
+    sim.add_argument(
+        "--sky-brightness",
+        dest="sky_brightness",
+        type=float,
+        default=None,
+        help="Sky/sun brightness 0.15-1.0: 1.0 = bright noon, lower = warmer, "
+             "lower sun like late afternoon (default: 1.0)",
     )
     # ── Per-camera on/off switches (all sensors switchable before launch) ──
     sim.add_argument(

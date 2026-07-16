@@ -56,6 +56,7 @@ from common import (
     start_chase_bridge,
     start_fpv_bridge,
     start_trajectory_thread,
+    TERRAIN_THEMES,
     TRAJ_TYPES,
     start_tracker_bridges,
 )
@@ -244,6 +245,12 @@ def parse_args():
                      help="Disable clouds in the world skybox (default: clouds on)")
     sim.add_argument("--cloud-density", dest="cloud_density", type=float, default=0.7,
                      help="Cloud density / humidity 0.0-1.0 (default: 0.7)")
+    sim.add_argument("--terrain-theme", choices=list(TERRAIN_THEMES), default=None,
+                     help="Terrain theme: swaps the baylands ground textures + "
+                          "ground-plane tint (desert | lush) (default: desert)")
+    sim.add_argument("--sky-brightness", dest="sky_brightness", type=float, default=None,
+                     help="Sky/sun brightness 0.15-1.0: 1.0 = bright noon, lower = "
+                          "warmer, lower sun like late afternoon (default: 1.0)")
     sim.add_argument("--chase-cam", action=argparse.BooleanOptionalAction, default=False,
                      help="Enable the chase camera (3rd-person SDL2 window) (default: off)")
     sim.add_argument("--no-video", action="store_true",
@@ -491,6 +498,8 @@ def main():
         traj_start_pos=getattr(args, "traj_start_pos", None),
         traj_reverse=getattr(args, "traj_reverse", False),
         player_heading_deg=getattr(args, "player_heading_deg", None),
+        terrain_theme=getattr(args, "terrain_theme", None),
+        sky_brightness=getattr(args, "sky_brightness", None),
     )
     render_vis_templates(args.drone, args.world, WORLD_MAP, model_vars, world_vars)
 

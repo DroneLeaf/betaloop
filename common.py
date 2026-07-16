@@ -6,12 +6,14 @@ trajectory generation so that both BF and PX4 launchers stay in sync.
 """
 
 import fcntl
+import filecmp
 import glob
 import logging
 import math
 import os
 import random
 import select
+import shutil
 import socket
 import struct
 import subprocess
@@ -151,6 +153,223 @@ TARGET_REFS = {
     },
 }
 DEFAULT_TARGET_DRONE = "shahed"
+
+
+# ── Terrain themes ────────────────────────────────────────────────────────────
+# The baylands terrain DAE hardcodes its ground texture filenames (Grass.png,
+# Sand.png, DirtPath.png), so a theme is applied by copying that theme's texture
+# set from models/baylands_terrain/media/Textures/themes/<theme>/ over the live
+# files before Gazebo starts (apply_terrain_theme). `ground_color` additionally
+# tints the giant ground plane in worlds that template it (moving_target).
+TERRAIN_THEMES = {
+    "desert": {
+        "label": "Desert",
+        "ground_color": "0.76 0.60 0.42",   # sandy tan
+    },
+    "lush": {
+        "label": "Lush Green",
+        "ground_color": "0.13 0.20 0.09",   # dark lush green
+    },
+}
+DEFAULT_TERRAIN_THEME = "desert"
+_TERRAIN_TEXTURE_NAMES = ("Grass.png", "Sand.png", "DirtPath.png")
+
+# Sky brightness (1.0 = bright noon … lower = late afternoon). A single scalar
+# drives the sun light color/intensity, the sun elevation (longer shadows), the
+# scene background, and the skybox <time> in worlds that template them.
+DEFAULT_SKY_BRIGHTNESS = 1.0
+_SKY_BRIGHTNESS_MIN = 0.15   # keep the scene readable — never pitch black
+
+
+def _sky_vars(brightness: float | None) -> dict:
+    """Derive sun/sky template vars from a 0.15–1.0 brightness scalar.
+
+    As brightness drops the light warms toward orange, the sun lowers toward
+    the horizon, the background darkens, and the skybox time advances from
+    mid-day toward ~17:00 (late afternoon).
+
+    NOTE (Gazebo Harmonic): ogre2 renders the <sky> as a STATIC cubemap
+    (skybox.dds) — <sky><time>/<clouds>/<humidity> are parsed but ignored, and
+    gz-sim 8's sensor path (RenderUtil) has no cubemap_uri support either. The
+    skybox itself is therefore dimmed by ensure_sky_media(), which builds a
+    GZ_RENDERING_RESOURCE_PATH override tree with a brightness-scaled
+    skybox.dds. The vars below still drive the sun light, background color and
+    ground shading (all honored).
+    """
+    b = DEFAULT_SKY_BRIGHTNESS if brightness is None else float(brightness)
+    b = min(1.0, max(_SKY_BRIGHTNESS_MIN, b))
+    w = 1.0 - b                       # warm/afternoon factor
+    lerp = lambda a, c: a + (c - a) * w
+    intensity = 0.35 + 0.65 * b       # overall light-level floor
+    rgb = lambda noon, dusk, k=1.0: " ".join(
+        f"{lerp(n, d) * k:.3f}" for n, d in zip(noon, dusk))
+    return {
+        "sky_brightness": b,
+        # sky shader time-of-day: 10 (current mid-day look) → ~17 (late afternoon)
+        "sky_time": round(10.0 + 7.0 * w, 2),
+        "sun_diffuse": rgb((0.95, 0.85, 0.70), (1.00, 0.50, 0.25), intensity),
+        "sun_specular": rgb((0.30, 0.25, 0.20), (0.35, 0.20, 0.10), intensity),
+        # lower sun as brightness drops (shallower -Z) → longer shadows
+        "sun_direction": f"-0.5 0.1 {-lerp(0.9, 0.25):.3f}",
+        "background_color": rgb((0.50, 0.70, 0.90), (0.60, 0.50, 0.45),
+                                0.40 + 0.60 * b),
+    }
+
+
+def _scale_dxt1_dds(src_path: str, dst_path: str,
+                    factors: tuple[float, float, float]) -> None:
+    """Decode a DXT1 cubemap .dds, scale colors, write an uncompressed copy.
+
+    The output is an A8R8G8B8 cubemap DDS: DXT1's 5/6-bit endpoints posterize
+    badly when scaled far down (visible banding on a dimmed sky), so the dimmed
+    copy is written uncompressed at full 8-bit precision. Face order/layout is
+    preserved; the source must be a single-level (no mips) DXT1 cubemap like
+    gz-rendering's skybox.dds.
+    """
+    import numpy as np
+
+    raw = np.fromfile(src_path, dtype=np.uint8)
+    hdr = raw[:128]
+    fourcc = hdr[84:88].tobytes()
+    height = int.from_bytes(hdr[12:16], "little")
+    width = int.from_bytes(hdr[16:20], "little")
+    caps2 = int.from_bytes(hdr[112:116], "little")
+    if hdr[:4].tobytes() != b"DDS " or fourcc != b"DXT1":
+        raise ValueError(f"not a DXT1 DDS: {src_path} (fourcc={fourcc!r})")
+
+    # ── decode all DXT1 blocks (vectorised) ──
+    blocks = raw[128:].view("<u2").reshape(-1, 4)
+    c = blocks[:, :2].astype(np.float32)
+    c565 = blocks[:, :2].astype(np.uint32)
+    ep = np.empty((len(blocks), 2, 3), np.float32)          # endpoint RGB888
+    ep[:, :, 0] = ((c565 >> 11) & 0x1F) * (255.0 / 31.0)
+    ep[:, :, 1] = ((c565 >> 5) & 0x3F) * (255.0 / 63.0)
+    ep[:, :, 2] = (c565 & 0x1F) * (255.0 / 31.0)
+    opaque = (c565[:, 0] > c565[:, 1])[:, None]
+    pal = np.empty((len(blocks), 4, 3), np.float32)
+    pal[:, 0] = ep[:, 0]
+    pal[:, 1] = ep[:, 1]
+    pal[:, 2] = np.where(opaque, (2 * ep[:, 0] + ep[:, 1]) / 3, (ep[:, 0] + ep[:, 1]) / 2)
+    pal[:, 3] = np.where(opaque, (ep[:, 0] + 2 * ep[:, 1]) / 3, 0.0)
+    idx_bits = blocks[:, 2].astype(np.uint32) | (blocks[:, 3].astype(np.uint32) << 16)
+    shifts = np.arange(16, dtype=np.uint32) * 2
+    idx = (idx_bits[:, None] >> shifts[None, :]) & 0x3      # N×16 texel indices
+    texels = pal[np.arange(len(blocks))[:, None], idx]      # N×16×3
+
+    # ── scale + repack block layout (4×4) into face images ──
+    texels = np.clip(np.rint(texels * np.asarray(factors, np.float32)), 0, 255)
+    bw, bh = width // 4, height // 4
+    faces = texels.reshape(-1, bh, bw, 4, 4, 3).transpose(0, 1, 3, 2, 4, 5)
+    faces = faces.reshape(-1, height, width, 3).astype(np.uint8)
+
+    # ── write uncompressed A8R8G8B8 cubemap DDS ──
+    import struct as _struct
+    DDSD = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8                   # caps|h|w|pf|pitch
+    pf = _struct.pack("<2I4s5I", 32, 0x41, b"\0\0\0\0", 32,  # DDPF_RGB|ALPHA
+                      0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
+    header = (b"DDS " + _struct.pack("<7I", 124, DDSD, height, width,
+                                     width * 4, 0, 0) + b"\0" * 44 + pf +
+              _struct.pack("<4I", 0x1008, caps2, 0, 0) + b"\0" * 4)
+    assert len(header) == 128
+    bgra = np.empty((*faces.shape[:3], 4), np.uint8)
+    bgra[..., 0] = faces[..., 2]
+    bgra[..., 1] = faces[..., 1]
+    bgra[..., 2] = faces[..., 0]
+    bgra[..., 3] = 255
+    with open(dst_path, "wb") as f:
+        f.write(header)
+        f.write(bgra.tobytes())
+
+
+def ensure_sky_media(brightness: float | None) -> str | None:
+    """Build (and cache) a GZ_RENDERING_RESOURCE_PATH tree with a dimmed skybox.
+
+    Gazebo Harmonic's ogre2 sky is the static cubemap
+    <gz-rendering media>/ogre2/media/materials/textures/skybox.dds; nothing in
+    SDF can dim it (see _sky_vars note). This mirrors the stock media tree via
+    symlinks into aeroloop_gazebo/media_cache/ (gitignored), materializing only
+    a brightness/warm-scaled skybox.dds, and returns the tree root to export as
+    GZ_RENDERING_RESOURCE_PATH. Returns None at full brightness (stock media).
+    Brightness is quantized to 5% steps so repeated launches reuse the cache.
+    """
+    b = DEFAULT_SKY_BRIGHTNESS if brightness is None else float(brightness)
+    b = min(1.0, max(_SKY_BRIGHTNESS_MIN, b))
+    key = int(round(b * 20)) * 5          # percent, 5% steps
+    if key >= 100:
+        return None
+
+    src_root = os.environ.get("GZ_RENDERING_RESOURCE_PATH")
+    if not src_root or not os.path.isdir(src_root):
+        candidates = sorted(glob.glob("/usr/share/gz/gz-rendering*"))
+        src_root = candidates[-1] if candidates else None
+    skybox_rel = os.path.join("ogre2", "media", "materials", "textures", "skybox.dds")
+    if not src_root or not os.path.isfile(os.path.join(src_root, skybox_rel)):
+        log.warning("gz-rendering media not found — sky brightness limited to "
+                    "sun/background dimming (skybox stays stock)")
+        return None
+
+    src_skybox = os.path.join(src_root, skybox_rel)
+    dst_root = os.path.join(AEROLOOP_HOME, "media_cache", f"gz_rendering_b{key:03d}")
+    dst_skybox = os.path.join(dst_root, skybox_rel)
+    src_stat = os.stat(src_skybox)
+    stamp = f"v3 {src_root} {src_stat.st_size} {src_stat.st_mtime_ns} b{key}"
+    stamp_file = os.path.join(dst_root, ".skybox_stamp")
+    try:
+        if os.path.isfile(dst_skybox) and open(stamp_file).read() == stamp:
+            return dst_root
+    except OSError:
+        pass
+
+    # Mirror the stock tree as symlinks (real dirs, linked files) so every
+    # shader/material resolves; only skybox.dds is a real, transformed file.
+    if os.path.isdir(dst_root):
+        shutil.rmtree(dst_root)
+    shutil.copytree(src_root, dst_root, symlinks=True,
+                    copy_function=lambda s, d: os.symlink(os.path.abspath(s), d))
+    os.remove(dst_skybox)
+    frac = key / 100.0
+    w = 1.0 - frac
+    intensity = 0.35 + 0.65 * frac        # match _sky_vars' light floor
+    # ogre2's PBR pipeline decodes the cubemap as sRGB and tone-maps, so an
+    # on-screen ratio R needs a texture-space factor of ~R^2.2 (measured:
+    # texture 0.48 → rendered 0.71 ≈ 0.48^(1/2.2)). The warm shift is kept
+    # subtle so the sky stays bluish instead of turning olive.
+    _scale_dxt1_dds(src_skybox, dst_skybox, (
+        intensity ** 2.2,                 # red kept highest — warm shift
+        (intensity * (1.0 - 0.10 * w)) ** 2.2,
+        (intensity * (1.0 - 0.18 * w)) ** 2.2,
+    ))
+    with open(stamp_file, "w") as f:
+        f.write(stamp)
+    log.info("Sky brightness %d%%: built skybox override %s", key, dst_root)
+    return dst_root
+
+
+def apply_terrain_theme(theme: str | None) -> None:
+    """Copy the terrain theme's texture set over the live baylands textures.
+
+    No-op per file when the live texture already matches (content compare), so
+    repeated launches with the same theme don't rewrite ~10 MB of PNGs. Unknown
+    themes fall back to the default (desert).
+    """
+    theme = theme if theme in TERRAIN_THEMES else DEFAULT_TERRAIN_THEME
+    tex_dir = os.path.join(AEROLOOP_HOME, "models", "baylands_terrain",
+                           "media", "Textures")
+    theme_dir = os.path.join(tex_dir, "themes", theme)
+    if not os.path.isdir(theme_dir):
+        log.warning("Terrain theme dir missing, keeping current textures: %s",
+                    theme_dir)
+        return
+    for name in _TERRAIN_TEXTURE_NAMES:
+        src = os.path.join(theme_dir, name)
+        dst = os.path.join(tex_dir, name)
+        if not os.path.isfile(src):
+            log.warning("Terrain theme '%s' is missing %s — skipped", theme, name)
+            continue
+        if os.path.isfile(dst) and filecmp.cmp(src, dst, shallow=False):
+            continue
+        shutil.copyfile(src, dst)
+        log.info("Terrain theme '%s': applied %s", theme, name)
 
 
 # ── Jinja2 Template Rendering ─────────────────────────────────────────────────
@@ -469,6 +688,8 @@ def compute_world_vars(
     traj_start_pos: float | None = None,
     traj_reverse: bool = False,
     player_heading_deg: float | None = None,
+    terrain_theme: str | None = None,
+    sky_brightness: float | None = None,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
@@ -476,6 +697,11 @@ def compute_world_vars(
     """
     ref = DRONE_REFS[drone]
     tref = TARGET_REFS.get(target_drone, TARGET_REFS[DEFAULT_TARGET_DRONE])
+
+    # Terrain theme (desert / lush): ground-plane tint here; the matching
+    # baylands texture swap happens in render_vis_templates → apply_terrain_theme.
+    _theme = terrain_theme if terrain_theme in TERRAIN_THEMES else DEFAULT_TERRAIN_THEME
+    _ground_color = TERRAIN_THEMES[_theme]["ground_color"]
 
     # Target uniform scale. A single --target-scale multiplier applies to ANY
     # target; when unset each target uses its own default (shahed 1.0, stingjet
@@ -555,6 +781,9 @@ def compute_world_vars(
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
         "cloud_density": float(cloud_density),
+        "terrain_theme": _theme,
+        "ground_color": _ground_color,
+        **_sky_vars(sky_brightness),
         "pedestal_radius": _pedestal_radius,
         "pedestal_height": _pedestal_height,
         "target_mesh_uri": tref["mesh_uri"],
@@ -580,6 +809,21 @@ def render_vis_templates(
     models_dir = os.path.join(AEROLOOP_HOME, "models")
     worlds_dir = os.path.join(AEROLOOP_HOME, "worlds")
     ref = DRONE_REFS[drone]
+
+    # Swap the baylands ground textures to the selected terrain theme (the DAE
+    # hardcodes the texture filenames, so themes are applied by file copy).
+    apply_terrain_theme(world_vars.get("terrain_theme"))
+
+    # Dim the ogre2 skybox cubemap to the requested sky brightness (SDF can't —
+    # see ensure_sky_media). The env var is inherited by the gz sim processes.
+    # Failure (e.g. no numpy) degrades to sun/background dimming only.
+    try:
+        sky_media = ensure_sky_media(world_vars.get("sky_brightness"))
+    except Exception as exc:
+        log.warning("skybox dimming unavailable (%s) — sky stays stock", exc)
+        sky_media = None
+    if sky_media:
+        os.environ["GZ_RENDERING_RESOURCE_PATH"] = sky_media
 
     # Vis model SDF
     vis_j2 = os.path.join(models_dir, ref["model_vis_sdf"] + ".j2")
