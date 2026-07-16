@@ -216,15 +216,11 @@ def _sky_vars(brightness: float | None) -> dict:
     }
 
 
-def _scale_dxt1_dds(src_path: str, dst_path: str,
-                    factors: tuple[float, float, float]) -> None:
-    """Decode a DXT1 cubemap .dds, scale colors, write an uncompressed copy.
+def _dxt1_faces(src_path: str):
+    """Decode a single-level DXT1 cubemap .dds → (faces float32 [n,h,w,3], caps2).
 
-    The output is an A8R8G8B8 cubemap DDS: DXT1's 5/6-bit endpoints posterize
-    badly when scaled far down (visible banding on a dimmed sky), so the dimmed
-    copy is written uncompressed at full 8-bit precision. Face order/layout is
-    preserved; the source must be a single-level (no mips) DXT1 cubemap like
-    gz-rendering's skybox.dds.
+    Vectorised numpy DXT1 decode (endpoints + 2-bit palette indices per 4×4
+    block); the source must be mip-less like gz-rendering's skybox.dds.
     """
     import numpy as np
 
@@ -237,9 +233,7 @@ def _scale_dxt1_dds(src_path: str, dst_path: str,
     if hdr[:4].tobytes() != b"DDS " or fourcc != b"DXT1":
         raise ValueError(f"not a DXT1 DDS: {src_path} (fourcc={fourcc!r})")
 
-    # ── decode all DXT1 blocks (vectorised) ──
     blocks = raw[128:].view("<u2").reshape(-1, 4)
-    c = blocks[:, :2].astype(np.float32)
     c565 = blocks[:, :2].astype(np.uint32)
     ep = np.empty((len(blocks), 2, 3), np.float32)          # endpoint RGB888
     ep[:, :, 0] = ((c565 >> 11) & 0x1F) * (255.0 / 31.0)
@@ -256,14 +250,134 @@ def _scale_dxt1_dds(src_path: str, dst_path: str,
     idx = (idx_bits[:, None] >> shifts[None, :]) & 0x3      # N×16 texel indices
     texels = pal[np.arange(len(blocks))[:, None], idx]      # N×16×3
 
-    # ── scale + repack block layout (4×4) into face images ──
-    texels = np.clip(np.rint(texels * np.asarray(factors, np.float32)), 0, 255)
     bw, bh = width // 4, height // 4
     faces = texels.reshape(-1, bh, bw, 4, 4, 3).transpose(0, 1, 3, 2, 4, 5)
-    faces = faces.reshape(-1, height, width, 3).astype(np.uint8)
+    return faces.reshape(-1, height, width, 3).copy(), caps2
 
-    # ── write uncompressed A8R8G8B8 cubemap DDS ──
+
+def _cube_dirs(h: int, w: int):
+    """Unit view directions for each cubemap texel, D3D/DDS face order."""
+    import numpy as np
+
+    vv, uu = np.meshgrid((np.arange(h) + 0.5) / h * 2 - 1,
+                         (np.arange(w) + 0.5) / w * 2 - 1, indexing="ij")
+    one = np.ones_like(uu)
+    faces = [(one, -vv, -uu), (-one, -vv, uu),       # +X, -X
+             (uu, one, vv), (uu, -one, -vv),         # +Y, -Y
+             (uu, -vv, one), (-uu, -vv, -one)]       # +Z, -Z
+    d = np.stack([np.stack(f, axis=-1) for f in faces]).astype(np.float32)
+    return d / np.linalg.norm(d, axis=-1, keepdims=True)
+
+
+def _thin_clouds(faces, density: float):
+    """Fade the skybox's baked cloud layer toward a clear-sky gradient.
+
+    Harmonic's ogre2 sky is a static cubemap — <clouds><humidity> is a dead SDF
+    param — so cloud density is implemented here in texture space. A single
+    GLOBAL elevation→color gradient is fitted from the saturated-blue sky
+    texels across all faces (seamless by construction — a per-face fill shows
+    seams and goes gray on mostly-cloudy faces), then every texel's deviation
+    from it (bright cloud AND dark cloud-shadow mottling) is scaled by
+    `density`. 1.0 = stock clouds, 0.0 ≈ smooth clear sky. The sun glow and
+    dark ground silhouettes are protected.
+    """
+    import numpy as np
+
+    d = min(1.0, max(0.0, density))
+    if d >= 0.999:
+        return faces
+
+    n, h, w = faces.shape[:3]
+    mx = faces.max(axis=3)
+    mn = faces.min(axis=3)
+    sat = (mx - mn) / np.maximum(mx, 1.0)
+    v = mx / 255.0
+    blue = faces[..., 2] >= mx - 1.0
+
+    # Texel elevation: up axis = opposite of the darkest (ground) face's axis.
+    dirs = _cube_dirs(h, w)
+    axes = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0],
+                     [0, -1, 0], [0, 0, 1], [0, 0, -1]], np.float32)
+    ground = int(np.argmin(mx.reshape(n, -1).mean(axis=1)))
+    up = -axes[ground]
+    elev = dirs @ up                                   # [n,h,w] in [-1,1]
+
+    # Global clear-sky ramp: mean sky color per elevation bin (interpolated
+    # across cloud-only bins, lightly smoothed).
+    sky = (sat > 0.26) & blue & (v > 0.30) & (elev > 0.03)
+    nbins = 96
+    bin_idx = np.clip(((elev + 1.0) * 0.5 * nbins).astype(np.int32), 0, nbins - 1)
+    flat_idx = bin_idx[sky]
+    counts = np.bincount(flat_idx, minlength=nbins)
+    ramp = np.empty((nbins, 3), np.float32)
+    for c in range(3):
+        sums = np.bincount(flat_idx, weights=faces[..., c][sky], minlength=nbins)
+        ramp[:, c] = np.divide(sums, counts, out=np.zeros(nbins, np.float32),
+                               where=counts > 0)
+    good = counts >= 50
+    if not good.any():
+        return faces                                   # no sky found — keep stock
+    centers = np.arange(nbins) + 0.5
+    centers_elev = centers / nbins * 2.0 - 1.0
+    clear = np.empty(faces.shape, np.float32)
+    for c in range(3):
+        ramp[:, c] = np.interp(centers, centers[good], ramp[good, c])
+        ramp[1:-1, c] = (ramp[:-2, c] + ramp[1:-1, c] + ramp[2:, c]) / 3.0
+        # Continuous evaluation — nearest-bin lookup leaves faint concentric
+        # elevation rings on the zenith.
+        clear[..., c] = np.interp(elev.ravel(), centers_elev,
+                                  ramp[:, c]).reshape(elev.shape)
+
+    # Density = cloud COVERAGE, not opacity: keep the strongest `d` fraction of
+    # cloud energy at full contrast and replace the rest with the clear
+    # gradient. (Uniformly fading deviations instead leaves flat ghost patches
+    # at low density — tried, looks unnatural.) Cloud strength = smoothed
+    # absolute deviation from the gradient; threshold at the energy quantile.
+    def blur(img, radius, passes=2):
+        for _ in range(passes):
+            for axis in (1, 2):
+                m = img.shape[axis]
+                cs = np.cumsum(img, axis=axis, dtype=np.float64)
+                cs = np.concatenate([np.zeros_like(np.take(cs, [0], axis=axis)), cs],
+                                    axis=axis)
+                idx = np.arange(m)
+                lo = np.clip(idx - radius, 0, m)
+                hi = np.clip(idx + radius + 1, 0, m)
+                shape = [1, 1, 1]
+                shape[axis] = m
+                img = ((np.take(cs, hi, axis=axis) - np.take(cs, lo, axis=axis))
+                       / (hi - lo).reshape(shape))
+        return img
+
+    dev = faces.mean(axis=3) - clear.mean(axis=3)
+    strength = blur(np.abs(dev), 12)
+    region = elev > 0.03
+    vals = np.sort(strength[region])[::-1]
+    total = vals.sum()
+    if total <= 1e-6:
+        return faces
+    cut = np.searchsorted(np.cumsum(vals), d * total)
+    t = vals[min(cut, len(vals) - 1)]
+    keep = np.clip((strength - 0.85 * t) / (0.30 * max(t, 1e-6)), 0.0, 1.0)
+    a = 1.0 - keep
+    a *= 1.0 - np.clip((v - 0.78) / 0.14, 0.0, 1.0)    # keep the sun
+    a *= np.clip((v - 0.25) / 0.10, 0.0, 1.0)          # keep dark ground
+    a *= np.clip(elev / 0.05, 0.0, 1.0)                # keep below-horizon
+    a = a[..., None]
+    return np.clip(faces * (1.0 - a) + clear * a, 0, 255)
+
+
+def _write_argb_cubemap(dst_path: str, faces, caps2: int) -> None:
+    """Write float [n,h,w,3] faces as an uncompressed A8R8G8B8 cubemap DDS.
+
+    Uncompressed on purpose: re-quantizing a dimmed sky into DXT1's 5/6-bit
+    endpoints causes severe banding.
+    """
+    import numpy as np
     import struct as _struct
+
+    faces = np.clip(np.rint(faces), 0, 255).astype(np.uint8)
+    n, height, width = faces.shape[:3]
     DDSD = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8                   # caps|h|w|pf|pitch
     pf = _struct.pack("<2I4s5I", 32, 0x41, b"\0\0\0\0", 32,  # DDPF_RGB|ALPHA
                       0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
@@ -271,7 +385,7 @@ def _scale_dxt1_dds(src_path: str, dst_path: str,
                                      width * 4, 0, 0) + b"\0" * 44 + pf +
               _struct.pack("<4I", 0x1008, caps2, 0, 0) + b"\0" * 4)
     assert len(header) == 128
-    bgra = np.empty((*faces.shape[:3], 4), np.uint8)
+    bgra = np.empty((n, height, width, 4), np.uint8)
     bgra[..., 0] = faces[..., 2]
     bgra[..., 1] = faces[..., 1]
     bgra[..., 2] = faces[..., 0]
@@ -281,25 +395,39 @@ def _scale_dxt1_dds(src_path: str, dst_path: str,
         f.write(bgra.tobytes())
 
 
-def ensure_sky_media(brightness: float | None) -> str | None:
-    """Build (and cache) a GZ_RENDERING_RESOURCE_PATH tree with a dimmed skybox.
+def ensure_sky_media(brightness: float | None,
+                     cloud_density: float | None = None) -> str | None:
+    """Build (and cache) a GZ_RENDERING_RESOURCE_PATH tree with a custom skybox.
 
     Gazebo Harmonic's ogre2 sky is the static cubemap
     <gz-rendering media>/ogre2/media/materials/textures/skybox.dds; nothing in
-    SDF can dim it (see _sky_vars note). This mirrors the stock media tree via
-    symlinks into aeroloop_gazebo/media_cache/ (gitignored), materializing only
-    a brightness/warm-scaled skybox.dds, and returns the tree root to export as
-    GZ_RENDERING_RESOURCE_PATH. Returns None at full brightness (stock media).
-    Brightness is quantized to 5% steps so repeated launches reuse the cache.
+    SDF can dim it or change its cloud cover (see _sky_vars / _thin_clouds).
+    This mirrors the stock media tree via symlinks into
+    aeroloop_gazebo/media_cache/ (gitignored), materializing only a transformed
+    skybox.dds (cloud thinning by `cloud_density`, then brightness/warm
+    scaling), and returns the tree root to export as
+    GZ_RENDERING_RESOURCE_PATH. Returns None when both knobs are stock
+    (brightness 1.0, density 1.0). Brightness quantizes to 5% steps, density to
+    10%, so repeated launches reuse the cache.
     """
     b = DEFAULT_SKY_BRIGHTNESS if brightness is None else float(brightness)
     b = min(1.0, max(_SKY_BRIGHTNESS_MIN, b))
     key = int(round(b * 20)) * 5          # percent, 5% steps
-    if key >= 100:
+    d = 1.0 if cloud_density is None else min(1.0, max(0.0, float(cloud_density)))
+    dkey = int(round(d * 10)) * 10        # percent, 10% steps
+    if key >= 100 and dkey >= 100:
         return None
 
+    # Source = the stock gz media tree. An inherited GZ_RENDERING_RESOURCE_PATH
+    # is honoured as source ONLY if it isn't one of our own override trees —
+    # otherwise a rebuilt override would try to transform its own (uncompressed)
+    # output as input.
     src_root = os.environ.get("GZ_RENDERING_RESOURCE_PATH")
-    if not src_root or not os.path.isdir(src_root):
+    cache_base = os.path.abspath(os.path.join(AEROLOOP_HOME, "media_cache"))
+    if src_root and (not os.path.isdir(src_root)
+                     or os.path.abspath(src_root).startswith(cache_base)):
+        src_root = None
+    if not src_root:
         candidates = sorted(glob.glob("/usr/share/gz/gz-rendering*"))
         src_root = candidates[-1] if candidates else None
     skybox_rel = os.path.join("ogre2", "media", "materials", "textures", "skybox.dds")
@@ -309,10 +437,11 @@ def ensure_sky_media(brightness: float | None) -> str | None:
         return None
 
     src_skybox = os.path.join(src_root, skybox_rel)
-    dst_root = os.path.join(AEROLOOP_HOME, "media_cache", f"gz_rendering_b{key:03d}")
+    dst_root = os.path.join(AEROLOOP_HOME, "media_cache",
+                            f"gz_rendering_b{key:03d}_c{dkey:03d}")
     dst_skybox = os.path.join(dst_root, skybox_rel)
     src_stat = os.stat(src_skybox)
-    stamp = f"v3 {src_root} {src_stat.st_size} {src_stat.st_mtime_ns} b{key}"
+    stamp = f"v9 {src_root} {src_stat.st_size} {src_stat.st_mtime_ns} b{key} c{dkey}"
     stamp_file = os.path.join(dst_root, ".skybox_stamp")
     try:
         if os.path.isfile(dst_skybox) and open(stamp_file).read() == stamp:
@@ -327,6 +456,10 @@ def ensure_sky_media(brightness: float | None) -> str | None:
     shutil.copytree(src_root, dst_root, symlinks=True,
                     copy_function=lambda s, d: os.symlink(os.path.abspath(s), d))
     os.remove(dst_skybox)
+
+    import numpy as np
+    faces, caps2 = _dxt1_faces(src_skybox)
+    faces = _thin_clouds(faces, dkey / 100.0)
     frac = key / 100.0
     w = 1.0 - frac
     intensity = 0.35 + 0.65 * frac        # match _sky_vars' light floor
@@ -334,14 +467,16 @@ def ensure_sky_media(brightness: float | None) -> str | None:
     # on-screen ratio R needs a texture-space factor of ~R^2.2 (measured:
     # texture 0.48 → rendered 0.71 ≈ 0.48^(1/2.2)). The warm shift is kept
     # subtle so the sky stays bluish instead of turning olive.
-    _scale_dxt1_dds(src_skybox, dst_skybox, (
+    faces = faces * np.asarray((
         intensity ** 2.2,                 # red kept highest — warm shift
         (intensity * (1.0 - 0.10 * w)) ** 2.2,
         (intensity * (1.0 - 0.18 * w)) ** 2.2,
-    ))
+    ), np.float32)
+    _write_argb_cubemap(dst_skybox, faces, caps2)
     with open(stamp_file, "w") as f:
         f.write(stamp)
-    log.info("Sky brightness %d%%: built skybox override %s", key, dst_root)
+    log.info("Sky brightness %d%% / cloud density %d%%: built skybox override %s",
+             key, dkey, dst_root)
     return dst_root
 
 
@@ -814,16 +949,24 @@ def render_vis_templates(
     # hardcodes the texture filenames, so themes are applied by file copy).
     apply_terrain_theme(world_vars.get("terrain_theme"))
 
-    # Dim the ogre2 skybox cubemap to the requested sky brightness (SDF can't —
-    # see ensure_sky_media). The env var is inherited by the gz sim processes.
-    # Failure (e.g. no numpy) degrades to sun/background dimming only.
+    # Rebuild the ogre2 skybox cubemap for the requested sky brightness and
+    # cloud density (SDF can't do either — see ensure_sky_media). The env var
+    # is inherited by the gz sim processes. Failure (e.g. no numpy) degrades
+    # to sun/background dimming only.
     try:
-        sky_media = ensure_sky_media(world_vars.get("sky_brightness"))
+        sky_media = ensure_sky_media(world_vars.get("sky_brightness"),
+                                     world_vars.get("cloud_density"))
     except Exception as exc:
-        log.warning("skybox dimming unavailable (%s) — sky stays stock", exc)
+        log.warning("skybox customisation unavailable (%s) — sky stays stock", exc)
         sky_media = None
     if sky_media:
         os.environ["GZ_RENDERING_RESOURCE_PATH"] = sky_media
+    else:
+        # Don't leak a stale override inherited from a previous launch.
+        prev = os.environ.get("GZ_RENDERING_RESOURCE_PATH", "")
+        cache_base = os.path.abspath(os.path.join(AEROLOOP_HOME, "media_cache"))
+        if os.path.abspath(prev).startswith(cache_base):
+            del os.environ["GZ_RENDERING_RESOURCE_PATH"]
 
     # Vis model SDF
     vis_j2 = os.path.join(models_dir, ref["model_vis_sdf"] + ".j2")

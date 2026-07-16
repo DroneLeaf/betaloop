@@ -272,3 +272,40 @@ any new motion so Ctrl-C exits cleanly.
   (G × (1-0.10w), B × (1-0.18w)) so the dusk sky stays bluish, not olive.
 - Verified via headless `gz sim -s` + camera sensor frame capture: mean sky
   RGB 167/187/207 (stock) → 113/120/128 (50%) → 79/81/84 (20%), smooth.
+
+## Session Addendum (2026-07-16c) — cloud density implemented via skybox synthesis
+
+- `ensure_sky_media(brightness, cloud_density)` (was brightness-only): cache
+  dirs are now `gz_rendering_b{key}_c{dkey}` (density quantized to 10%);
+  returns None only when BOTH knobs are stock. `render_vis_templates` passes
+  `world_vars["cloud_density"]` — note compute_world_vars defaults it to 0.7,
+  so default launches now build+use `b100_c070` (clouds ~30% thinner than the
+  stock texture). Stamp `v7`.
+- Pipeline split into `_dxt1_faces` (vectorised DXT1 cubemap decode),
+  `_thin_clouds`, `_box_blur` (cumsum box blur), `_write_argb_cubemap`.
+- `_thin_clouds`: per face, seed a clear-sky estimate from strongly-saturated
+  blue texels (sat>0.26, v>0.30) via normalized convolution (3× box blur r=64 —
+  ONE pass leaves rectangular kernel artifacts), then fade each texel by its
+  **luminance excess** over that estimate (excess/25, clamped). A color-only
+  cloud classifier fails here — the skybox's clouds are wispy blue-tinted
+  (sat 0.2-0.4). Sun disc/glow protected via a v>0.78 highlight guard; ground
+  silhouettes (darker than sky) untouched by construction.
+- Source-resolution guard: an inherited GZ_RENDERING_RESOURCE_PATH is used as
+  the SOURCE tree only if it isn't inside our media_cache (else a rebuild would
+  decode its own uncompressed output as DXT1 and fail); when the override is
+  stock, a stale cache-pointing env var is actively unset.
+- Cloud MOTION is not implementable this way (static cubemap) — needs a custom
+  plugin (e.g. scrolling cloud-layer dome) if ever wanted.
+- **v9 correction (same session):** three approaches were tried and the first
+  two look bad — (1) per-face normalized-convolution fill turns mostly-cloudy
+  faces gray with visible face seams; (2) uniformly fading deviations leaves
+  flat "ghost" patches at low density. Final algorithm: fit ONE global
+  elevation→color ramp from saturated-blue sky texels across all faces
+  (`_cube_dirs` gives per-texel directions; up axis = opposite the darkest
+  face; ramp evaluated CONTINUOUSLY via np.interp — nearest-bin lookup leaves
+  concentric zenith rings), then treat density as cloud COVERAGE: smooth
+  |deviation| field → keep the top `d` fraction of cloud energy at full
+  contrast (soft threshold at the energy quantile), replace the rest with the
+  ramp. Guards: sun glow (v>0.78), dark ground (v<0.25), below-horizon
+  (elev<0.05). Verified in-engine: density 0.1 = clear blue zenith with a few
+  natural clouds; no seams, no ghost patches. Stamp `v9`.
