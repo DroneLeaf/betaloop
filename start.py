@@ -236,6 +236,7 @@ def _render_all_templates(drone, world_name, args):
         target_y=getattr(args, "target_distance_y", None),
         clouds=getattr(args, "clouds", True),
         cloud_density=getattr(args, "cloud_density", 0.7),
+        cloud_darkness=getattr(args, "cloud_darkness", 0.0),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
@@ -329,7 +330,17 @@ def parse_args():
         dest="cloud_density",
         type=float,
         default=0.7,
-        help="Cloud density / humidity 0.0-1.0 (default: 0.7)",
+        help="Cloud coverage 0.0-1.0: 0.8 = stock skybox clouds, 1.0 = denser "
+             "than stock, lower keeps only the strongest clouds (wispy cirrus), "
+             "0 ≈ clear (default: 0.7)",
+    )
+    sim.add_argument(
+        "--cloud-darkness",
+        dest="cloud_darkness",
+        type=float,
+        default=0.0,
+        help="Cloud darkness 0.0-1.0: 0 = white clouds, 1 ≈ dark grey nimbus "
+             "(default: 0)",
     )
     sim.add_argument(
         "--terrain-theme",

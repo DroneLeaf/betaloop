@@ -269,22 +269,42 @@ def _cube_dirs(h: int, w: int):
     return d / np.linalg.norm(d, axis=-1, keepdims=True)
 
 
-def _thin_clouds(faces, density: float):
-    """Fade the skybox's baked cloud layer toward a clear-sky gradient.
+def _thin_clouds(faces, density: float, darkness: float = 0.0):
+    """Reshape the skybox's baked cloud layer: coverage, wispiness, darkness.
 
     Harmonic's ogre2 sky is a static cubemap — <clouds><humidity> is a dead SDF
-    param — so cloud density is implemented here in texture space. A single
-    GLOBAL elevation→color gradient is fitted from the saturated-blue sky
-    texels across all faces (seamless by construction — a per-face fill shows
-    seams and goes gray on mostly-cloudy faces), then every texel's deviation
-    from it (bright cloud AND dark cloud-shadow mottling) is scaled by
-    `density`. 1.0 = stock clouds, 0.0 ≈ smooth clear sky. The sun glow and
-    dark ground silhouettes are protected.
+    param — so cloud appearance is synthesised in texture space:
+
+    - A GLOBAL elevation→color clear-sky ramp is fitted from the saturated-blue
+      sky texels across all faces (per-bin MEDIAN — a mean picks up cloud
+      contamination whose elevation-dependent bias renders as concentric
+      rings — then heavily smoothed and evaluated on a fine grid).
+    - The cloud-strength field is rasterised into an elevation×azimuth grid and
+      smoothed/streaked THERE (azimuth axis wraps): seamless across cube faces
+      (per-face blurs cut clouds with straight edges at face seams) and the
+      streak direction is true world-horizontal.
+    - `density` (0..1) = cloud COVERAGE: keep the strongest `density` fraction
+      of cloud energy (energy quantile of the streaked field) and replace the
+      rest with the clear ramp. Kept clouds show the ORIGINAL texture — only
+      the coverage footprint is stretched into wisps as density drops, so
+      remnants read as fibrous cirrus, not out-of-focus smudges.
+    - `darkness` (0..1) multiplicatively darkens kept cloud texels:
+      0 = stock white, 1 ≈ dark grey nimbus.
+
+    Sky between clouds, the sun glow and ground silhouettes are unaffected.
     """
     import numpy as np
 
     d = min(1.0, max(0.0, density))
-    if d >= 0.999:
+    k = min(1.0, max(0.0, darkness))
+    # Density scale: STOCK cloud cover sits at the pivot (80%); below it the
+    # coverage thins, above it the faint haze/veil deviations already baked
+    # into the texture are amplified so 100% reads as a denser cirrocumulus
+    # deck than stock.
+    _PIVOT = 0.8
+    cov = min(d / _PIVOT, 1.0)
+    enh = max(0.0, (d - _PIVOT) / (1.0 - _PIVOT))
+    if cov >= 0.999 and enh <= 0.001 and k <= 0.001:
         return faces
 
     n, h, w = faces.shape[:3]
@@ -294,77 +314,146 @@ def _thin_clouds(faces, density: float):
     v = mx / 255.0
     blue = faces[..., 2] >= mx - 1.0
 
-    # Texel elevation: up axis = opposite of the darkest (ground) face's axis.
+    # Texel elevation/azimuth: up axis = opposite of the darkest (ground) face.
     dirs = _cube_dirs(h, w)
     axes = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0],
                      [0, -1, 0], [0, 0, 1], [0, 0, -1]], np.float32)
     ground = int(np.argmin(mx.reshape(n, -1).mean(axis=1)))
     up = -axes[ground]
     elev = dirs @ up                                   # [n,h,w] in [-1,1]
+    o1, o2 = [i for i in range(3) if i != int(np.argmax(np.abs(up)))]
+    az = np.arctan2(dirs[..., o1], dirs[..., o2])      # [-pi, pi]
 
-    # Global clear-sky ramp: mean sky color per elevation bin (interpolated
-    # across cloud-only bins, lightly smoothed).
+    # ── Clear-sky ramp: per-elevation-bin MEDIAN of sky texels ──
     sky = (sat > 0.26) & blue & (v > 0.30) & (elev > 0.03)
     nbins = 96
     bin_idx = np.clip(((elev + 1.0) * 0.5 * nbins).astype(np.int32), 0, nbins - 1)
-    flat_idx = bin_idx[sky]
-    counts = np.bincount(flat_idx, minlength=nbins)
-    ramp = np.empty((nbins, 3), np.float32)
-    for c in range(3):
-        sums = np.bincount(flat_idx, weights=faces[..., c][sky], minlength=nbins)
-        ramp[:, c] = np.divide(sums, counts, out=np.zeros(nbins, np.float32),
-                               where=counts > 0)
+    sky_bins = bin_idx[sky]
+    counts = np.bincount(sky_bins, minlength=nbins)
     good = counts >= 50
     if not good.any():
         return faces                                   # no sky found — keep stock
+    ramp = np.zeros((nbins, 3), np.float32)
+    starts = np.searchsorted(np.sort(sky_bins), np.arange(nbins), side="left")
+    ends = np.searchsorted(np.sort(sky_bins), np.arange(nbins), side="right")
+    for c in range(3):
+        vals = faces[..., c][sky]
+        order = np.lexsort((vals, sky_bins))
+        sv = vals[order]
+        mid = np.clip((starts + ends) // 2, 0, max(len(sv) - 1, 0))
+        ramp[:, c] = sv[mid] if len(sv) else 0.0
     centers = np.arange(nbins) + 0.5
-    centers_elev = centers / nbins * 2.0 - 1.0
+    fine = np.linspace(0.5, nbins - 0.5, 1024)
     clear = np.empty(faces.shape, np.float32)
     for c in range(3):
-        ramp[:, c] = np.interp(centers, centers[good], ramp[good, c])
-        ramp[1:-1, c] = (ramp[:-2, c] + ramp[1:-1, c] + ramp[2:, c]) / 3.0
-        # Continuous evaluation — nearest-bin lookup leaves faint concentric
-        # elevation rings on the zenith.
-        clear[..., c] = np.interp(elev.ravel(), centers_elev,
-                                  ramp[:, c]).reshape(elev.shape)
+        r = np.interp(centers, centers[good], ramp[good, c])
+        for _ in range(3):                             # heavy smoothing — ramp
+            r = np.convolve(np.pad(r, 4, mode="edge"),  # wiggles render as rings
+                            np.ones(9) / 9.0, mode="valid")
+        rf = np.interp(fine, centers, r)
+        clear[..., c] = np.interp((elev + 1.0) * 0.5 * nbins, fine,
+                                  rf).reshape(elev.shape).astype(np.float32)
 
-    # Density = cloud COVERAGE, not opacity: keep the strongest `d` fraction of
-    # cloud energy at full contrast and replace the rest with the clear
-    # gradient. (Uniformly fading deviations instead leaves flat ghost patches
-    # at low density — tried, looks unnatural.) Cloud strength = smoothed
-    # absolute deviation from the gradient; threshold at the energy quantile.
-    def blur(img, radius, passes=2):
+    # Protected texels keep their stock appearance entirely: the sun disc +
+    # glow, dark ground silhouettes, and everything below the horizon. The sun
+    # is protected GEOMETRICALLY (a small cone around its direction) — a
+    # brightness threshold also shields every bright cloud near the sun, which
+    # left a stock cloud bank untouched at low density.
+    lum_all = faces.mean(axis=3)
+    sun_w = np.clip(lum_all - 235.0, 0.0, None) * (elev > 0.05)
+    if sun_w.sum() > 1.0:
+        sun_dir = (dirs * sun_w[..., None]).sum(axis=(0, 1, 2))
+        sun_dir /= max(float(np.linalg.norm(sun_dir)), 1e-6)
+        cosang = dirs @ sun_dir
+        cos_in, cos_out = np.cos(np.radians(7.0)), np.cos(np.radians(16.0))
+        sun_protect = np.clip((cosang - cos_out) / (cos_in - cos_out), 0.0, 1.0)
+    else:
+        sun_protect = np.zeros_like(elev)
+    protect = np.maximum.reduce([
+        sun_protect,
+        1.0 - np.clip((v - 0.25) / 0.10, 0.0, 1.0),
+        1.0 - np.clip(elev / 0.05, 0.0, 1.0),
+    ])
+    dev = (faces - clear) * (1.0 - protect)[..., None]
+    # Densify beyond stock: boost weak deviations (the faint inter-cloud veil)
+    # much more than the already-white cores, which just clip. Shaping: no
+    # boost near the horizon (the warm haze band amplifies into a salmon
+    # stripe), feathered off around the sun (its faint glow rays amplify into
+    # a visible fan), and darker-than-sky mottling is boosted at half strength
+    # (full strength turns the blue sky navy).
+    if enh > 0.001:
+        dlum = dev.mean(axis=3)
+        lum0 = np.abs(dlum)
+        enh_w = enh * np.clip((elev - 0.08) / 0.12, 0.0, 1.0)
+        if sun_w.sum() > 1.0:
+            c30, c60 = np.cos(np.radians(30.0)), np.cos(np.radians(60.0))
+            enh_w *= 1.0 - 0.9 * np.clip((cosang - c60) / (c30 - c60), 0.0, 1.0)
+        strength_gain = np.where(dlum >= 0.0, 2.4, 0.9)
+        dev *= (1.0 + strength_gain * enh_w * (20.0 / (lum0 + 20.0)))[..., None]
+    lum = np.abs(dev.mean(axis=3))
+
+    # ── Cloud-strength field on an elevation×azimuth grid (seamless) ──
+    GW, GH = 512, 256
+    gx = ((az + np.pi) / (2 * np.pi) * GW).astype(np.int32) % GW
+    gy = np.clip(((elev + 1.0) * 0.5 * GH).astype(np.int32), 0, GH - 1)
+    flat = (gy * GW + gx).ravel()
+    cnt = np.bincount(flat, minlength=GH * GW).reshape(GH, GW)
+    ssum = np.bincount(flat, weights=lum.ravel(),
+                       minlength=GH * GW).reshape(GH, GW)
+    grid = ssum / np.maximum(cnt, 1)
+
+    def wrap_blur(g, r_el, r_az, passes=2):
         for _ in range(passes):
-            for axis in (1, 2):
-                m = img.shape[axis]
-                cs = np.cumsum(img, axis=axis, dtype=np.float64)
-                cs = np.concatenate([np.zeros_like(np.take(cs, [0], axis=axis)), cs],
-                                    axis=axis)
-                idx = np.arange(m)
-                lo = np.clip(idx - radius, 0, m)
-                hi = np.clip(idx + radius + 1, 0, m)
-                shape = [1, 1, 1]
-                shape[axis] = m
-                img = ((np.take(cs, hi, axis=axis) - np.take(cs, lo, axis=axis))
-                       / (hi - lo).reshape(shape))
-        return img
+            if r_az > 0:                               # azimuth wraps
+                gp = np.concatenate([g[:, -r_az:], g, g[:, :r_az]], axis=1)
+                cs = np.cumsum(gp, axis=1, dtype=np.float64)
+                cs = np.concatenate([np.zeros((g.shape[0], 1)), cs], axis=1)
+                g = (cs[:, 2 * r_az + 1:] - cs[:, :-2 * r_az - 1]) / (2 * r_az + 1)
+            if r_el > 0:                               # elevation clamps
+                cs = np.cumsum(g, axis=0, dtype=np.float64)
+                cs = np.concatenate([np.zeros((1, g.shape[1])), cs], axis=0)
+                idx = np.arange(g.shape[0])
+                lo = np.clip(idx - r_el, 0, g.shape[0])
+                hi = np.clip(idx + r_el + 1, 0, g.shape[0])
+                g = (cs[hi] - cs[lo]) / (hi - lo)[:, None]
+        return g
 
-    dev = faces.mean(axis=3) - clear.mean(axis=3)
-    strength = blur(np.abs(dev), 12)
+    # Base smoothing + horizontal wisp streaking that grows as coverage drops.
+    wisp = 1.0 - cov
+    grid = wrap_blur(grid, 3, int(round(4 + 36 * wisp)))
+
+    # Bilinear sample back to texels (az wraps, elevation clamps).
+    axf = (az + np.pi) / (2 * np.pi) * GW - 0.5
+    ax0 = np.floor(axf).astype(np.int32)
+    fx = (axf - ax0).astype(np.float32)
+    ax0 %= GW
+    ax1 = (ax0 + 1) % GW
+    eyf = (elev + 1.0) * 0.5 * GH - 0.5
+    ey0 = np.clip(np.floor(eyf).astype(np.int32), 0, GH - 1)
+    fy = np.clip(eyf - ey0, 0.0, 1.0).astype(np.float32)
+    ey1 = np.minimum(ey0 + 1, GH - 1)
+    S = (grid[ey0, ax0] * (1 - fx) * (1 - fy) + grid[ey0, ax1] * fx * (1 - fy)
+         + grid[ey1, ax0] * (1 - fx) * fy + grid[ey1, ax1] * fx * fy
+         ).astype(np.float32)
+
+    # Coverage: energy quantile of the streaked strength over the sky region.
     region = elev > 0.03
-    vals = np.sort(strength[region])[::-1]
+    vals = np.sort(S[region])[::-1]
     total = vals.sum()
     if total <= 1e-6:
         return faces
-    cut = np.searchsorted(np.cumsum(vals), d * total)
-    t = vals[min(cut, len(vals) - 1)]
-    keep = np.clip((strength - 0.85 * t) / (0.30 * max(t, 1e-6)), 0.0, 1.0)
-    a = 1.0 - keep
-    a *= 1.0 - np.clip((v - 0.78) / 0.14, 0.0, 1.0)    # keep the sun
-    a *= np.clip((v - 0.25) / 0.10, 0.0, 1.0)          # keep dark ground
-    a *= np.clip(elev / 0.05, 0.0, 1.0)                # keep below-horizon
-    a = a[..., None]
-    return np.clip(faces * (1.0 - a) + clear * a, 0, 255)
+    cut = np.searchsorted(np.cumsum(vals), cov * total)
+    t = max(float(vals[min(cut, len(vals) - 1)]), 1e-6)
+    keep = np.clip((S - 0.80 * t) / (0.40 * t), 0.0, 1.0)
+
+    # Darkness: multiplicatively darken kept cloud texels. ABSOLUTE cloudiness
+    # scale (not t — at density 1.0 t is tiny and the whole sky would darken).
+    cloudy = keep * np.clip((S - 8.0) / 16.0, 0.0, 1.0)
+    shade = 1.0 - (0.55 + 0.15 * enh) * k * cloudy
+
+    out = (clear + dev * keep[..., None]) * shade[..., None]
+    p = protect[..., None]
+    return np.clip(faces * p + out * (1.0 - p), 0, 255)
 
 
 def _write_argb_cubemap(dst_path: str, faces, caps2: int) -> None:
@@ -376,6 +465,10 @@ def _write_argb_cubemap(dst_path: str, faces, caps2: int) -> None:
     import numpy as np
     import struct as _struct
 
+    # Dither before 8-bit quantization: the synthesized sky gradient is so
+    # smooth that plain rounding shows visible concentric elevation rings.
+    rng = np.random.default_rng(0)
+    faces = faces + rng.uniform(-0.75, 0.75, faces.shape)
     faces = np.clip(np.rint(faces), 0, 255).astype(np.uint8)
     n, height, width = faces.shape[:3]
     DDSD = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8                   # caps|h|w|pf|pitch
@@ -396,7 +489,8 @@ def _write_argb_cubemap(dst_path: str, faces, caps2: int) -> None:
 
 
 def ensure_sky_media(brightness: float | None,
-                     cloud_density: float | None = None) -> str | None:
+                     cloud_density: float | None = None,
+                     cloud_darkness: float | None = None) -> str | None:
     """Build (and cache) a GZ_RENDERING_RESOURCE_PATH tree with a custom skybox.
 
     Gazebo Harmonic's ogre2 sky is the static cubemap
@@ -415,8 +509,10 @@ def ensure_sky_media(brightness: float | None,
     key = int(round(b * 20)) * 5          # percent, 5% steps
     d = 1.0 if cloud_density is None else min(1.0, max(0.0, float(cloud_density)))
     dkey = int(round(d * 10)) * 10        # percent, 10% steps
-    if key >= 100 and dkey >= 100:
-        return None
+    k = 0.0 if cloud_darkness is None else min(1.0, max(0.0, float(cloud_darkness)))
+    kkey = int(round(k * 10)) * 10        # percent, 10% steps
+    if key >= 100 and dkey == 80 and kkey <= 0:
+        return None                       # exactly the stock look (80% = pivot)
 
     # Source = the stock gz media tree. An inherited GZ_RENDERING_RESOURCE_PATH
     # is honoured as source ONLY if it isn't one of our own override trees —
@@ -438,10 +534,11 @@ def ensure_sky_media(brightness: float | None,
 
     src_skybox = os.path.join(src_root, skybox_rel)
     dst_root = os.path.join(AEROLOOP_HOME, "media_cache",
-                            f"gz_rendering_b{key:03d}_c{dkey:03d}")
+                            f"gz_rendering_b{key:03d}_c{dkey:03d}_k{kkey:03d}")
     dst_skybox = os.path.join(dst_root, skybox_rel)
     src_stat = os.stat(src_skybox)
-    stamp = f"v9 {src_root} {src_stat.st_size} {src_stat.st_mtime_ns} b{key} c{dkey}"
+    stamp = (f"v14 {src_root} {src_stat.st_size} {src_stat.st_mtime_ns} "
+             f"b{key} c{dkey} k{kkey}")
     stamp_file = os.path.join(dst_root, ".skybox_stamp")
     try:
         if os.path.isfile(dst_skybox) and open(stamp_file).read() == stamp:
@@ -459,7 +556,7 @@ def ensure_sky_media(brightness: float | None,
 
     import numpy as np
     faces, caps2 = _dxt1_faces(src_skybox)
-    faces = _thin_clouds(faces, dkey / 100.0)
+    faces = _thin_clouds(faces, dkey / 100.0, kkey / 100.0)
     frac = key / 100.0
     w = 1.0 - frac
     intensity = 0.35 + 0.65 * frac        # match _sky_vars' light floor
@@ -475,8 +572,8 @@ def ensure_sky_media(brightness: float | None,
     _write_argb_cubemap(dst_skybox, faces, caps2)
     with open(stamp_file, "w") as f:
         f.write(stamp)
-    log.info("Sky brightness %d%% / cloud density %d%%: built skybox override %s",
-             key, dkey, dst_root)
+    log.info("Sky brightness %d%% / cloud density %d%% / darkness %d%%: "
+             "built skybox override %s", key, dkey, kkey, dst_root)
     return dst_root
 
 
@@ -809,6 +906,7 @@ def compute_world_vars(
     target_y: float | None = None,
     clouds: bool = True,
     cloud_density: float = 0.7,
+    cloud_darkness: float = 0.0,
     pedestal_radius: float | None = None,
     pedestal_height: float | None = None,
     target_drone: str = DEFAULT_TARGET_DRONE,
@@ -916,6 +1014,7 @@ def compute_world_vars(
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
         "cloud_density": float(cloud_density),
+        "cloud_darkness": float(cloud_darkness),
         "terrain_theme": _theme,
         "ground_color": _ground_color,
         **_sky_vars(sky_brightness),
@@ -955,7 +1054,8 @@ def render_vis_templates(
     # to sun/background dimming only.
     try:
         sky_media = ensure_sky_media(world_vars.get("sky_brightness"),
-                                     world_vars.get("cloud_density"))
+                                     world_vars.get("cloud_density"),
+                                     world_vars.get("cloud_darkness"))
     except Exception as exc:
         log.warning("skybox customisation unavailable (%s) — sky stays stock", exc)
         sky_media = None

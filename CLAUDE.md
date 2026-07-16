@@ -309,3 +309,53 @@ any new motion so Ctrl-C exits cleanly.
   ramp. Guards: sun glow (v>0.78), dark ground (v<0.25), below-horizon
   (elev<0.05). Verified in-engine: density 0.1 = clear blue zenith with a few
   natural clouds; no seams, no ghost patches. Stamp `v9`.
+
+## Session Addendum (2026-07-16d) — cloud wispiness + darkness (skybox v10)
+
+- `_thin_clouds(faces, density, darkness=0)`, stamp/curve **v10**, cache dirs
+  now `gz_rendering_b{b}_c{d}_k{k}` (darkness quantized 10%).
+- **Wispiness:** as density drops, the cloud deviation layer is blended toward
+  an anisotropically streaked copy (`blur(dev, rv=2, ru=36)`, u ≈ world-
+  horizontal on side faces) BEFORE the coverage threshold — stock cirrocumulus
+  decays into thin cirrus wisps instead of chopped cotton blobs. Protected
+  texels (sun/ground/below-horizon, now a combined `protect` field) are
+  excluded from the layer so they never smear.
+- **Darkness** (`--cloud-darkness` 0-1, UI "Cloud darkness" slider next to
+  Cloud density, key `cloud_darkness`, supervisor emits in both builders):
+  kept cloud texels are multiplied by `1 - 0.55*k*cloudy` — cloudy weight uses
+  an ABSOLUTE smoothed-deviation scale (clip((strength-10)/20)), NOT the
+  density threshold t (at density 1.0 t→min and the whole sky would darken).
+- `_write_argb_cubemap` now dithers (±0.75 LSB uniform, seeded rng) before
+  8-bit quantization — the synthetic gradient is smooth enough that plain
+  rounding showed concentric elevation rings in-engine.
+- Verified in-engine: density 30% = sparse wispy whites; density 80% +
+  darkness 80% = grey nimbus with dark shadow patches; density 100% +
+  darkness 0 = byte-stock behaviour (override skipped entirely).
+- **v12 correction (same session):** two more fixes after in-the-loop review.
+  (1) The concentric zenith rings were NOT quantization (dither didn't kill
+  them) but wiggles in the fitted ramp itself — cloud contamination biases a
+  per-bin MEAN at specific elevations, and each wiggle renders as a ring. Ramp
+  is now per-bin **median** + heavy smoothing (3× width-9 box) + evaluated on
+  a 1024-knot fine grid. (2) The coverage/streak field is now rasterised into
+  an **elevation×azimuth grid** (512×256, azimuth wraps) and smoothed/streaked
+  there, then bilinearly sampled back — per-face blurs cut clouds with
+  straight edges at cube-face seams, and grid-space streaking is true
+  world-horizontal. Kept clouds show ORIGINAL texture (only the coverage
+  footprint stretches into wisps as density drops — blurring the layer itself
+  made out-of-focus smudges). (3) Sun protection is now **geometric** (a
+  7°→16° cone around the brightness-weighted sun direction) — the old
+  v>0.78 brightness guard shielded the whole cloud bank around the sun from
+  thinning. Stamp `v12`. Verified in-engine at density 10%: near-clear smooth
+  sky, one textured cloud, no rings/seams/banks.
+- **v13/v14 (same session) — density scale extended beyond stock:** STOCK
+  cloud cover now sits at the **80% pivot** (`_PIVOT = 0.8`; ensure_sky_media
+  skips the override only at b100/d80/k0). Below the pivot = coverage thinning
+  as before; above it the faint inter-cloud veil deviations are amplified
+  (gain 2.4 bright / 0.9 dark, scaled by 20/(|dev|+20) so cores don't blow
+  out) → 100% reads as a denser cirrocumulus deck. Enhancement shaping learned
+  the hard way: no boost near the horizon (the warm haze band amplifies into a
+  salmon stripe), feathered off 30°→60° around the sun (its faint glare rays
+  amplify into a visible fan), negative deviations at reduced gain (full gain
+  turns the blue sky navy). Darkness deepens slightly with enhancement
+  (0.55 + 0.15*enh). Stamp `v14`. In-engine verified: 100% clearly denser
+  than stock, no salmon band / sun fan / navy sky.
