@@ -359,3 +359,41 @@ any new motion so Ctrl-C exits cleanly.
   turns the blue sky navy). Darkness deepens slightly with enhancement
   (0.55 + 0.15*enh). Stamp `v14`. In-engine verified: 100% clearly denser
   than stock, no salmon band / sun fan / navy sky.
+
+## Session Addendum (2026-07-18) — TARGET_REFS: bbox axis order was wrong for 3 of 4 worlds
+
+- **Bug:** `TARGET_REFS[...]["bbox"]` stored ONE half-extent string, but
+  `gz_image_bridge` rotates the drone→target delta by the **inverse of the
+  tracked entity's quaternion** and tests `|lx|<=bx, |ly|<=by, |lz|<=bz`, so the
+  half-extents live in that entity's LOCAL frame — and the mesh sits differently
+  in it per world:
+  * inline-visual worlds (`moving_target`, `windy_target`, `shake_test`) apply
+    `visual_pose` (`1.57079 0 1.5708`) INSIDE the tracked link ⇒ **length on body
+    X, span on body Y**;
+  * `<include>` worlds (`collision_test`) inherit `model.sdf`'s link pose
+    (`-1.5708 0 0`) ⇒ **span on body X, length on body Y**.
+  The stored value used the `<include>` order, so the proximity OBB was **X/Y
+  transposed in the 3 inline worlds** — for both shahed and stingjet (not just
+  stingjet). `moving_target` passes `--target-link geranium_link`, but that link
+  has no `<pose>` in the inline worlds, so `link_rel_q` is identity and the test
+  frame is still the model frame.
+- **Fix:** `TARGET_REFS` now stores `dims` = FULL extents at scale 1.0 on the
+  target's own body axes `(length, span, height)`, measured from the `.glb`
+  (node transforms included); new `target_bbox_extents(target, world, scale)`
+  derives the half-extents and ORDERS them per path, using the new
+  `TARGET_INCLUDE_WORLDS = {"collision_test"}` set. `compute_world_vars` calls it.
+  **A new `<include>`-based world must be added to that set** or its hit box comes
+  out transposed.
+- `base_scale` and `bbox` keys are **gone** (only `compute_world_vars` read them):
+  `dims` is at scale 1.0, so half-extents are just `dims*scale/2` — no
+  measured-at-this-scale bookkeeping. `target_radius` (balloon) now scales by
+  `target_scale` directly (identical result; its base_scale was 1.0).
+- Values are now **exact** — the old shahed entry carried a silent ~10% pad.
+  Margin belongs to the user-facing `--hit-box-scale` (default **6.5**), which
+  multiplies these, so the pad was both redundant and hid the true size.
+- Net effect (defaults): `moving_target`+shahed `0.792,1.047,0.186` →
+  `0.9491,0.7182,0.16865`; `moving_target`+stingjet `0.94,0.54,0.16` →
+  `0.53432,0.93963,0.161305`. `collision_test` ordering unchanged (was correct);
+  balloon unchanged (sphere ⇒ isotropic, order-independent).
+- Verified: all 4 worlds × 3 targets × 2 scales asserted against the measured
+  mesh dims, plus the exact `--target-bbox` string reaching the bridge per world.

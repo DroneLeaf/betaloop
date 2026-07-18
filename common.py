@@ -109,32 +109,34 @@ DRONE_REFS = {
 }
 
 # Selectable target-drone models — swap the tracked target without editing worlds.
-#   mesh_uri    — glb for worlds that inline the visual (park_chase, patrol_park)
+#   mesh_uri    — glb for worlds that inline the visual (moving_target, windy, shake)
 #   model_uri   — full model for worlds that <include> the target (collision_test)
 #   visual_pose — mesh orientation offset (world forward-flight convention)
-#   bbox        — proximity OBB half-extents "X,Y,Z" (m) for the TARGET REACHED OSD
+#   dims        — FULL extents at target scale 1.0 on the target's own BODY axes,
+#                 (length = nose-tail, span = wingspan, height). Measured from the
+#                 .glb with node transforms applied. The `--target-bbox` proximity
+#                 half-extents are derived from these per world, because the axis
+#                 ORDER depends on the world's transform path — see
+#                 `target_bbox_extents()`. Keep these exact: the user-facing
+#                 `--hit-box-scale` (default 6.5) supplies the trigger margin.
 TARGET_REFS = {
     "shahed": {
         "label": "Shahed",
         "mesh_uri": "model://shahed_drone/meshes/shahed.glb",
         "model_uri": "model://shahed_drone",
         "visual_pose": "0 0 0 1.57079 0 1.5708",
-        # base_scale = the uniform scale at which `bbox` was measured;
-        # default_scale = the applied scale (shahed is fixed at 1.0).
-        "base_scale": 1.0,
+        "dims": (1.8982, 1.4364, 0.3373),
         "default_scale": 1.0,
-        "bbox": "0.792,1.047,0.186",
     },
     "stingjet": {
+        # An MQ-9 Reaper-class airframe (span > length). The raw mesh is
+        # full-size (18.8 m span), hence the 0.1x default applied scale.
         "label": "StingJet",
         "mesh_uri": "model://stingjet/stingjet.glb",
         "model_uri": "model://stingjet",
         "visual_pose": "0 0 0 1.57079 0 1.5708",
-        # bbox measured at 0.1x (the raw mesh is fighter-jet sized at 1.0x);
-        # default applied scale 0.1x, UI/CLI-overridable via --target-scale.
-        "base_scale": 0.1,
+        "dims": (10.6864, 18.7926, 3.2261),
         "default_scale": 0.1,
-        "bbox": "0.94,0.54,0.16",
     },
     "balloon": {
         # A primitive (no mesh): worlds that inline the visual draw a <sphere>
@@ -147,12 +149,42 @@ TARGET_REFS = {
         "mesh_uri": "model://balloon/balloon.glb",   # unused (primitive), kept for parity
         "model_uri": "model://balloon",
         "visual_pose": "0 0 0 0 0 0",
-        "base_scale": 1.0,
+        "dims": (1.0, 1.0, 1.0),       # sphere: isotropic, order-independent
         "default_scale": 1.0,
-        "bbox": "0.5,0.5,0.5",
     },
 }
 DEFAULT_TARGET_DRONE = "shahed"
+
+# Worlds that <include> model://<target> instead of inlining the mesh visual.
+# This changes the BODY-AXIS ORDER the proximity bbox must use (see below), so a
+# new world must be listed here if it uses an <include>.
+TARGET_INCLUDE_WORLDS = {"collision_test"}
+
+
+def target_bbox_extents(target_drone: str, world_name: str, scale: float) -> tuple:
+    """Proximity-OBB half-extents (x, y, z) in the frame gz_image_bridge tests.
+
+    The bridge rotates the drone→target delta by the **inverse of the tracked
+    entity's quaternion** and compares against these half-extents, so they live
+    in that entity's local frame — and the mesh sits differently in it depending
+    on how the world places the target:
+
+    * inline-visual worlds (moving_target / windy_target / shake_test) apply
+      `visual_pose` (roll+yaw 90 deg) inside the tracked link, which puts
+      **length on body X, span on body Y**;
+    * `<include>` worlds (collision_test) instead inherit model.sdf's link pose
+      (roll -90 deg), which puts **span on body X, length on body Y**.
+
+    One stored string cannot satisfy both, which is why the order is derived
+    here rather than baked into TARGET_REFS.
+    """
+    ref = TARGET_REFS.get(target_drone, TARGET_REFS[DEFAULT_TARGET_DRONE])
+    length, span, height = (d * float(scale) for d in ref["dims"])
+    if world_name in TARGET_INCLUDE_WORLDS:
+        full = (span, length, height)
+    else:
+        full = (length, span, height)
+    return tuple(v / 2.0 for v in full)
 
 # ── Mesh-target colour override ───────────────────────────────────────────────
 # The shahed/stingjet .glb files carry their own (greyish) PBR material. An SDF
@@ -979,16 +1011,18 @@ def compute_world_vars(
     # target; when unset each target uses its own default (shahed 1.0, stingjet
     # 0.1). The proximity bbox scales with the mesh so TARGET REACHED stays right.
     _tscale = float(target_scale) if target_scale is not None else float(tref["default_scale"])
-    _tscale_factor = _tscale / float(tref["base_scale"])
     _target_scale_str = f"{_tscale:g} {_tscale:g} {_tscale:g}"
-    _target_bbox = ",".join(f"{float(c) * _tscale_factor:g}" for c in tref["bbox"].split(","))
+    # Half-extents in the frame the bridge tests, ordered for THIS world's
+    # transform path (inline visual vs <include>) — see target_bbox_extents.
+    _target_bbox = ",".join(
+        f"{v:g}" for v in target_bbox_extents(target_drone, world_name, _tscale))
     _target_model_name = tref["model_uri"].replace("model://", "")
 
     # Primitive targets (e.g. balloon) are drawn as a <sphere> inline instead of
     # a <mesh>; worlds branch on `target_primitive`. The sphere radius scales with
-    # the same factor as a mesh would.
+    # the target scale, like a mesh would.
     _target_primitive = tref.get("primitive", "")
-    _target_radius = f"{float(tref.get('radius', 0.5)) * _tscale_factor:g}"
+    _target_radius = f"{float(tref.get('radius', 0.5)) * _tscale:g}"
     _target_color = tref.get("color", "0.9 0.1 0.1")
 
     # Pedestal launch-stand dimensions (vis-only cylinder under the drone).
