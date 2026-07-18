@@ -46,9 +46,11 @@ import time
 from common import (
     AEROLOOP_HOME,
     DEFAULT_TARGET_DRONE,
+    DEFAULT_TARGET_MESH_COLOR,
     DRONE_REFS,
     IMAGE_BRIDGE,
     SIMULINK_LIB,
+    TARGET_MESH_COLORS,
     TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
@@ -241,6 +243,7 @@ def _render_all_templates(drone, world_name, args):
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
         target_scale=getattr(args, "target_scale", None),
+        target_mesh_color=getattr(args, "target_mesh_color", None),
         traj_type=getattr(args, "traj_type", None),
         traj_rotation_deg=getattr(args, "traj_rotation_deg", None),
         traj_offset_ew=getattr(args, "traj_offset_ew", None),
@@ -872,6 +875,14 @@ def parse_args():
         default=None,
         help="Uniform scale multiplier for the target mesh (applies to any target; "
              "default per target: shahed 1.0, stingjet 0.1). Also scales the hit-box.",
+    )
+    wld.add_argument(
+        "--target-mesh-color",
+        default=DEFAULT_TARGET_MESH_COLOR,
+        help="Flat colour for MESH targets (shahed/stingjet), overriding the "
+             "model's own greyish material. 'default' keeps the mesh material; "
+             f"presets: {', '.join(TARGET_MESH_COLORS)}; or a literal 'R G B' "
+             "(0-1). No effect on the balloon (a primitive with its own colour).",
     )
     wld.add_argument(
         "--wind-intensity",

@@ -154,6 +154,44 @@ TARGET_REFS = {
 }
 DEFAULT_TARGET_DRONE = "shahed"
 
+# ── Mesh-target colour override ───────────────────────────────────────────────
+# The shahed/stingjet .glb files carry their own (greyish) PBR material. An SDF
+# <material> on the visual FULLY overrides it in gz-sim 8 / ogre2 (verified with
+# headless captures: an override renders as the exact requested colour, while the
+# stock mesh renders ~[110,109,107]). "default" emits no <material> at all, so
+# the mesh keeps its baked-in look; any other preset paints it flat, which makes
+# the target far easier to see (and to track) against terrain or bright sky.
+# Applies to MESH targets only — the balloon is a primitive with its own
+# `target_color` (see TARGET_REFS["balloon"]).
+TARGET_MESH_COLORS = {
+    "default":    "",                 # no override — the mesh's own material
+    "white":      "1 1 1",            # bright white — max contrast vs terrain
+    "light_grey": "0.75 0.75 0.75",
+    "black":      "0.05 0.05 0.05",   # silhouette against bright sky
+    "red":        "0.9 0.1 0.1",
+    "orange":     "1.0 0.45 0.0",     # high-vis
+}
+DEFAULT_TARGET_MESH_COLOR = "default"
+
+
+def resolve_target_mesh_color(value: str | None) -> str:
+    """Preset name (or a literal "R G B" triplet) → the RGB string the templates
+    emit; "" means "no <material> block". Unknown values fall back to the
+    default (no override) rather than producing invalid SDF."""
+    if not value:
+        return ""
+    v = str(value).strip()
+    if v in TARGET_MESH_COLORS:
+        return TARGET_MESH_COLORS[v]
+    parts = v.replace(",", " ").split()
+    if len(parts) == 3:
+        try:
+            return " ".join(f"{max(0.0, min(1.0, float(p))):g}" for p in parts)
+        except ValueError:
+            pass
+    log.warning("unknown --target-mesh-color %r — keeping the mesh's own material", value)
+    return ""
+
 
 # ── Terrain themes ────────────────────────────────────────────────────────────
 # The baylands terrain DAE hardcodes its ground texture filenames (Grass.png,
@@ -911,6 +949,7 @@ def compute_world_vars(
     pedestal_height: float | None = None,
     target_drone: str = DEFAULT_TARGET_DRONE,
     target_scale: float | None = None,
+    target_mesh_color: str | None = None,
     traj_type: str | None = None,
     traj_rotation_deg: float | None = None,
     traj_offset_ew: float | None = None,
@@ -1029,6 +1068,8 @@ def compute_world_vars(
         "target_primitive": _target_primitive,
         "target_radius": _target_radius,
         "target_color": _target_color,
+        # "" = keep the mesh's baked-in material (templates emit no <material>).
+        "target_mesh_color": resolve_target_mesh_color(target_mesh_color),
     }
 
 
