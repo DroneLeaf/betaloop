@@ -397,3 +397,20 @@ any new motion so Ctrl-C exits cleanly.
   balloon unchanged (sphere ⇒ isotropic, order-independent).
 - Verified: all 4 worlds × 3 targets × 2 scales asserted against the measured
   mesh dims, plus the exact `--target-bbox` string reaching the bridge per world.
+
+## Session Addendum (2026-07-19) — ensure_ground_mesh (tiled far ground)
+
+- `common.ensure_ground_mesh(tile_m=GROUND_TILE_M)` writes
+  `aeroloop_gazebo/models/ground_tiled/ground.obj` — a 20 km quad whose UVs
+  repeat every **6 m** (`GROUND_TILE_M`; `GROUND_HALF_SIZE_M = 10000`).
+  Content-compared before writing, so repeat launches don't touch it.
+  Gitignored: the tiling period is baked into the UVs, so it's generated, not
+  committed. Called from `render_vis_templates` — **after**
+  `apply_terrain_theme`, since the material points at the live theme texture.
+- `compute_world_vars` emits `ground_mesh_uri` + `ground_texture_uri`
+  (`GROUND_TEXTURE_REL` = the terrain's own `Grass.png`). Both are absolute
+  `file://` URIs — the mesh lives outside any model dir, so `model://` would
+  not resolve. `ground_color` is still emitted for the template's fallback path.
+- Why the texture is the terrain's own grass: it makes the far ground follow
+  `--terrain-theme` with no extra plumbing AND match the baylands tiles it
+  abuts (desert `Grass.png` is sandy, lush is green).
