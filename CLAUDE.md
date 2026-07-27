@@ -414,3 +414,14 @@ any new motion so Ctrl-C exits cleanly.
 - Why the texture is the terrain's own grass: it makes the far ground follow
   `--terrain-theme` with no extra plumbing AND match the baylands tiles it
   abuts (desert `Grass.png` is sandy, lush is green).
+
+## Session Addendum (2026-07-25) — per-feed RTSP codec (h264/h265)
+
+- `common._append_rtsp` gained a `codec="h264"` param → emits `--stream-codec`
+  to the bridge. `start_tracker_bridges` passes
+  `getattr(args, f"{rp}_rtsp_codec", "h264")` for each feed.
+- Four new `start.py` args: `--tracker-wide-rtsp-codec` / `--tracker-narrow-rtsp-codec`
+  / `--thermal-rtsp-codec` / `--utility-rtsp-codec` (`choices=["h264","h265"]`,
+  default h264). RTSP is BF-only, so **start_px4.py is untouched** (its feeds pass
+  no `*_rtsp` URL → `_append_rtsp` no-ops). Requires the bridge rebuild to take
+  effect (the flag reaches `gz_image_bridge --stream-codec`).

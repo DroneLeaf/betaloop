@@ -517,6 +517,9 @@ def parse_args():
                      help="Wide tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-wide-rtsp-tune", type=str, default="zerolatency",
                      help="Wide tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--tracker-wide-rtsp-codec", type=str, default="h264",
+                     choices=["h264", "h265"],
+                     help="Wide tracker RTSP codec: h264 (libx264) or h265/HEVC (libx265) (default: h264)")
     drn.add_argument("--tracker-wide-rtsp-width", type=int, default=0,
                      help="Explicit wide tracker RTSP output width in px (0=camera width)")
     drn.add_argument("--tracker-wide-rtsp-height", type=int, default=0,
@@ -570,6 +573,9 @@ def parse_args():
                      help="Narrow tracker RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--tracker-narrow-rtsp-tune", type=str, default="zerolatency",
                      help="Narrow tracker RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--tracker-narrow-rtsp-codec", type=str, default="h264",
+                     choices=["h264", "h265"],
+                     help="Narrow tracker RTSP codec: h264 (libx264) or h265/HEVC (libx265) (default: h264)")
     drn.add_argument("--tracker-narrow-rtsp-width", type=int, default=0,
                      help="Explicit narrow tracker RTSP output width in px (0=camera width)")
     drn.add_argument("--tracker-narrow-rtsp-height", type=int, default=0,
@@ -609,6 +615,9 @@ def parse_args():
                      help="Thermal RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--thermal-rtsp-tune", type=str, default="zerolatency",
                      help="Thermal RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--thermal-rtsp-codec", type=str, default="h264",
+                     choices=["h264", "h265"],
+                     help="Thermal RTSP codec: h264 (libx264) or h265/HEVC (libx265) (default: h264)")
     drn.add_argument("--thermal-rtsp-width", type=int, default=0,
                      help="Explicit thermal RTSP output width in px (0=camera width)")
     drn.add_argument("--thermal-rtsp-height", type=int, default=0,
@@ -650,6 +659,9 @@ def parse_args():
                      help="Utility RTSP libx264 preset (default: ultrafast)")
     drn.add_argument("--utility-rtsp-tune", type=str, default="zerolatency",
                      help="Utility RTSP libx264 tune; 'none' omits -tune (default: zerolatency)")
+    drn.add_argument("--utility-rtsp-codec", type=str, default="h264",
+                     choices=["h264", "h265"],
+                     help="Utility RTSP codec: h264 (libx264) or h265/HEVC (libx265) (default: h264)")
     drn.add_argument("--utility-rtsp-width", type=int, default=0,
                      help="Explicit utility RTSP output width in px (0=camera width)")
     drn.add_argument("--utility-rtsp-height", type=int, default=0,
