@@ -717,13 +717,13 @@ def parse_args():
         "--home-lat",
         type=float,
         default=None,
-        help="SITL virtual-GPS home latitude in degrees (bridge default: 24.128861, UAE)",
+        help="SITL virtual-GPS home latitude in degrees (bridge default: 24.1833703, UAE)",
     )
     slk.add_argument(
         "--home-lon",
         type=float,
         default=None,
-        help="SITL virtual-GPS home longitude in degrees (bridge default: 55.785944, UAE)",
+        help="SITL virtual-GPS home longitude in degrees (bridge default: 55.8765762, UAE)",
     )
     slk.add_argument(
         "--home-alt",
