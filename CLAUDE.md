@@ -425,3 +425,21 @@ any new motion so Ctrl-C exits cleanly.
   default h264). RTSP is BF-only, so **start_px4.py is untouched** (its feeds pass
   no `*_rtsp` URL → `_append_rtsp` no-ops). Requires the bridge rebuild to take
   effect (the flag reaches `gz_image_bridge --stream-codec`).
+
+## Session Addendum (2026-08-01) — trajectory sinusoidal perturbation
+
+- `start_trajectory_thread(perturb=, perturb_lat_amp=, perturb_lat_rate=,
+  perturb_vert_amp=, perturb_vert_rate=, perturb_phase_deg=)`: lateral weave +
+  altitude sinusoid about the nominal loop, with a FLOWN attitude (yaw follows
+  velocity, pitch = −atan2(vz,vh), roll = coordinated bank −atan(vh·ψ̇/g) —
+  banks into the weave and the corners). FD attitude + 1-pole smoothing
+  (τ=0.3 s), clamps ±60°/±45°. `trajectory_sample` is untouched (UI mirror
+  stays byte-identical); perturbation rides on top in the thread. Reset (9017)
+  re-zeros the phase and drops the FD state. Perturb off = legacy packets
+  exactly (yaw-only quat, constant z).
+- Sign traps documented on `_euler_zyx_to_quat`: Gazebo ENU/FLU RPY has +pitch
+  = nose DOWN and +roll = left-wing-up (bank right); both attitude formulas
+  carry a minus. Verified against the analytic coordinated bank on a circle.
+- `--traj-perturb*` flags on BOTH `start.py` and `start_px4.py` (parity), passed
+  through to the thread with the same defaults (10 m @ 0.1 Hz lat, 5 m @ 0.1 Hz
+  vert, phase 0°).

@@ -1959,6 +1959,23 @@ def trajectory_start_pose(**params):
     return trajectory_sample(0.0, **params)
 
 
+def _euler_zyx_to_quat(roll, pitch, yaw):
+    """(roll, pitch, yaw) [rad, Gazebo ENU/FLU RPY] → quaternion (w, x, y, z).
+
+    Sign conventions that matter here (right-hand rule, body FLU, world ENU):
+    +pitch tips the nose DOWN (forward vector z = −sin(pitch)), +roll lifts the
+    LEFT wing (= banking right). Callers must negate accordingly — see
+    start_trajectory_thread's attitude block.
+    """
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return (cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy)
+
+
 def start_trajectory_thread(
     stop_event: threading.Event,
     traj_type: str = "oval",
@@ -1972,6 +1989,12 @@ def start_trajectory_thread(
     corner_radius: float | None = None,
     start_pos: float = 0.0,
     reverse: bool = False,
+    perturb: bool = False,
+    perturb_lat_amp: float = 10.0,
+    perturb_lat_rate: float = 0.1,
+    perturb_vert_amp: float = 5.0,
+    perturb_vert_rate: float = 0.1,
+    perturb_phase_deg: float = 0.0,
     udp_port: int = TARGET_UDP_PORT,
     reset_port: int = TARGET_RESET_PORT,
 ) -> threading.Thread:
@@ -1980,11 +2003,30 @@ def start_trajectory_thread(
 
     Sends a 72-byte VisualPosePacket at ~60 Hz to ``udp_port`` (+ mirror) and
     listens on ``reset_port`` (a reset snaps the target back to ``s = 0``).
+
+    ``perturb`` adds sinusoidal perturbations about the nominal path — a lateral
+    weave (``perturb_lat_amp`` metres left/right of the track at
+    ``perturb_lat_rate`` Hz) and an altitude oscillation (``perturb_vert_amp`` /
+    ``perturb_vert_rate``, phase-shifted by ``perturb_phase_deg`` relative to the
+    weave) — and switches the packet from a yaw-only attitude to a full flown
+    one: yaw follows the actual velocity direction, pitch follows the climb
+    (nose up while rising), and roll is the coordinated-turn bank
+    ``-atan(v·ψ̇/g)`` from the turn rate, so the target banks into the weave AND
+    into the loop corners. Attitude is finite-differenced from the perturbed
+    position (one 1-pole filter, ``_BANK_TAU``, softens the curvature step at
+    corner entry) and clamped to ±60° roll / ±45° pitch. A world reset re-zeros
+    the perturbation phase along with ``s``.
     """
     _ew, _ns, _cr = resolve_loop_geom(traj_type, oval_ew_len, oval_ns_len, corner_radius)
     geom = dict(rotation_deg=rotation_deg, offset_ew=offset_ew, offset_ns=offset_ns,
                 oval_ew_len=_ew, oval_ns_len=_ns, corner_radius=_cr,
                 start_pos=start_pos, reverse=reverse)
+
+    _BANK_TAU = 0.3            # s — attitude smoothing (curvature is a step function)
+    _ROLL_MAX = math.radians(60.0)
+    _PITCH_MAX = math.radians(45.0)
+    _G = 9.80665
+    _phase0 = math.radians(perturb_phase_deg)
 
     def _traj_loop():
         interval = 1.0 / 60
@@ -1996,6 +2038,12 @@ def start_trajectory_thread(
         t0 = time.monotonic()
         t_prev = t0
         s = 0.0
+        # Perturbation state: its own clock (re-zeroed on reset, so the weave
+        # phase restarts with the lap) + the previous pose for finite-difference
+        # attitude + the smoothed roll/pitch.
+        pt = 0.0
+        prev = None                # (x, y, z, yaw_eff) of the previous tick
+        roll_f = pitch_f = 0.0
 
         rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2003,14 +2051,20 @@ def start_trajectory_thread(
         rst_sock.setblocking(False)
 
         log.info("Trajectory thread: %s speed=%.1f m/s alt=%.0fm rot=%.1f° "
-                 "offset=(%.0fE,%.0fN) (port %d)", traj_type, speed_ms, target_z,
-                 rotation_deg, offset_ew, offset_ns, udp_port)
+                 "offset=(%.0fE,%.0fN) (port %d)%s", traj_type, speed_ms, target_z,
+                 rotation_deg, offset_ew, offset_ns, udp_port,
+                 (f"  perturb lat={perturb_lat_amp:.1f}m@{perturb_lat_rate:.2f}Hz "
+                  f"vert={perturb_vert_amp:.1f}m@{perturb_vert_rate:.2f}Hz"
+                  if perturb else ""))
 
         while not stop_event.is_set():
             try:
                 while True:
                     rst_sock.recv(64)
                     s = 0.0
+                    pt = 0.0
+                    prev = None          # position jumps — a FD across it would spike
+                    roll_f = pitch_f = 0.0
                     t_prev = time.monotonic()
                     log.info("Trajectory thread: reset to start")
             except BlockingIOError:
@@ -2022,9 +2076,41 @@ def start_trajectory_thread(
             s += speed_ms * dt
 
             x, y, yaw = trajectory_sample(s, **geom)
-            qw = math.cos(yaw / 2.0)
-            qz = math.sin(yaw / 2.0)
-            pkt = packer.pack(seq, t_now - t0, x, y, target_z, qw, 0.0, 0.0, qz)
+            z = target_z
+            if perturb:
+                pt += dt
+                lat = perturb_lat_amp * math.sin(2.0 * math.pi * perturb_lat_rate * pt)
+                vert = perturb_vert_amp * math.sin(
+                    2.0 * math.pi * perturb_vert_rate * pt + _phase0)
+                # lat > 0 = left of travel: left-perpendicular of the track
+                # heading is (−sin ψ, +cos ψ).
+                x += -lat * math.sin(yaw)
+                y += lat * math.cos(yaw)
+                z += vert
+                yaw_eff = yaw
+                if prev is not None and dt > 1e-4:
+                    vx = (x - prev[0]) / dt
+                    vy = (y - prev[1]) / dt
+                    vz = (z - prev[2]) / dt
+                    vh = math.hypot(vx, vy)
+                    if vh > 0.5:
+                        yaw_eff = math.atan2(vy, vx)
+                    dpsi = (yaw_eff - prev[3] + math.pi) % (2.0 * math.pi) - math.pi
+                    # Gazebo RPY signs: +pitch = nose DOWN, +roll = left wing
+                    # up = bank right; a left turn (ψ̇ > 0) banks left → both
+                    # get a minus sign.
+                    roll_raw = -math.atan2(vh * (dpsi / dt), _G)
+                    pitch_raw = -math.atan2(vz, max(vh, 1.0))
+                    k = dt / (_BANK_TAU + dt)
+                    roll_f += k * (max(-_ROLL_MAX, min(_ROLL_MAX, roll_raw)) - roll_f)
+                    pitch_f += k * (max(-_PITCH_MAX, min(_PITCH_MAX, pitch_raw)) - pitch_f)
+                prev = (x, y, z, yaw_eff)
+                qw, qx, qy, qz = _euler_zyx_to_quat(roll_f, pitch_f, yaw_eff)
+            else:
+                qw = math.cos(yaw / 2.0)
+                qx = qy = 0.0
+                qz = math.sin(yaw / 2.0)
+            pkt = packer.pack(seq, t_now - t0, x, y, z, qw, qx, qy, qz)
             for dst in (addr, mirror_addr):
                 try:
                     sock.sendto(pkt, dst)

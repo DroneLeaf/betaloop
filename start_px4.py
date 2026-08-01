@@ -354,6 +354,24 @@ def parse_args():
                      help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
     tgt.add_argument("--traj-reverse", action="store_true",
                      help="Reverse the target's travel direction along the loop")
+    tgt.add_argument("--traj-perturb", action="store_true",
+                     help="Add sinusoidal perturbations about the nominal trajectory: a "
+                          "lateral weave + an altitude oscillation, with a flown attitude "
+                          "(pitch follows the climb, roll banks into the weave and the "
+                          "loop corners)")
+    tgt.add_argument("--traj-perturb-lat-amp", type=float, default=10.0,
+                     help="Perturbation: lateral weave amplitude in metres, left/right of "
+                          "the nominal track (default: 10)")
+    tgt.add_argument("--traj-perturb-lat-rate", type=float, default=0.1,
+                     help="Perturbation: lateral weave rate in Hz (default: 0.1)")
+    tgt.add_argument("--traj-perturb-vert-amp", type=float, default=5.0,
+                     help="Perturbation: altitude oscillation amplitude in metres about "
+                          "the nominal altitude (default: 5)")
+    tgt.add_argument("--traj-perturb-vert-rate", type=float, default=0.1,
+                     help="Perturbation: altitude oscillation rate in Hz (default: 0.1)")
+    tgt.add_argument("--traj-perturb-phase-deg", type=float, default=0.0,
+                     help="Perturbation: altitude phase offset vs the weave in degrees "
+                          "(default: 0)")
     tgt.add_argument("--wind-intensity", type=float, default=2.0,
                      help="Balloon lateral drift amplitude in metres (default: 2.0)")
     tgt.add_argument("--wind-randomness", type=float, default=1.0,
@@ -618,6 +636,12 @@ def main():
             corner_radius=args.corner_radius,
             start_pos=args.traj_start_pos if args.traj_start_pos is not None else 0.0,
             reverse=getattr(args, "traj_reverse", False),
+            perturb=getattr(args, "traj_perturb", False),
+            perturb_lat_amp=getattr(args, "traj_perturb_lat_amp", 10.0),
+            perturb_lat_rate=getattr(args, "traj_perturb_lat_rate", 0.1),
+            perturb_vert_amp=getattr(args, "traj_perturb_vert_amp", 5.0),
+            perturb_vert_rate=getattr(args, "traj_perturb_vert_rate", 0.1),
+            perturb_phase_deg=getattr(args, "traj_perturb_phase_deg", 0.0),
         )
 
     elif world_entry.get("balloon_wind") and world_entry.get("target_model"):
