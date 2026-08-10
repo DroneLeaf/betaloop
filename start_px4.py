@@ -6,7 +6,7 @@ Orchestrates the host-side components of the PX4 simulation stack:
   2. px4_sim_bridge — Simulink dynamics ↔ PX4 MAVLink HIL bridge
   3. Video pipeline — FPV camera + optional chase camera
 
-PX4 and LeafFC run inside the droneleaf-sitl container and connect
+PX4 and LeafFC run inside the droneleaf-sitl-noetic container and connect
 to px4_sim_bridge on the host via TCP port 4560.
 
 Usage:
@@ -696,7 +696,7 @@ def main():
         print(f"  FPV camera   : {width}x{height}")
     print()
     print("  PX4 SITL must connect to this host on TCP port %d." % args.tcp_port)
-    print("  From droneleaf-sitl container, set PX4_SIM_HOSTNAME=<host-ip>")
+    print("  From droneleaf-sitl-noetic container, set PX4_SIM_HOSTNAME=<host-ip>")
     print()
     print("  Press Ctrl-C to stop")
     print("=" * 64)
