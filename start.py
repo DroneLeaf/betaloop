@@ -147,6 +147,18 @@ WORLD_MAP = {
         "force_target":  "balloon",
         "static_target": True,
     },
+    "pilot_controlled_target": {
+        "sim_world":    "rocket_drone_pilot_target_vis.sdf",
+        "gz_name":      "pilot_target",
+        "target_model": "pilot_target",
+        "target_link":  "geranium_link",
+        "target_drone": True,
+        # The target is manually steered by the standalone pilot_target.py tool
+        # (WASD / USB joystick -> UDP 9016, reset 9017, GT mirror 9018). The
+        # launcher starts NO drive thread for it — pilot_drive only documents
+        # that an external process owns the pose.
+        "pilot_drive":  True,
+    },
 }
 
 # Backward-compat world short-name aliases (old name → canonical).
@@ -254,6 +266,7 @@ def _render_all_templates(drone, world_name, args):
         traj_start_pos=getattr(args, "traj_start_pos", None),
         traj_reverse=getattr(args, "traj_reverse", False),
         player_heading_deg=getattr(args, "player_heading_deg", None),
+        pilot_heading_deg=getattr(args, "pilot_heading_deg", None),
         terrain_theme=getattr(args, "terrain_theme", None),
         sky_brightness=getattr(args, "sky_brightness", None),
     )
@@ -863,6 +876,10 @@ def parse_args():
                      help="Loop rounded-corner radius in metres (0 ⇒ sharp; circle ⇒ the radius)")
     wld.add_argument("--player-heading-deg", type=float, default=None,
                      help="Player drone initial heading in degrees from east, CCW (default: 0)")
+    wld.add_argument("--pilot-heading-deg", type=float, default=None,
+                     help="pilot_controlled_target: the target's initial heading in "
+                          "degrees from east, CCW — the world spawn yaw; must match "
+                          "pilot_target.py --initial-heading-deg (default: 0)")
     wld.add_argument("--traj-start-pos", type=float, default=None,
                      help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
     wld.add_argument("--traj-reverse", action="store_true",

@@ -1000,6 +1000,7 @@ DEFAULT_TARGET_ALTITUDE = {
     "patrol_park": 100.0,
     "park_chase": 50.0,
     "moving_target": 50.0,
+    "pilot_controlled_target": 50.0,
 }
 
 
@@ -1038,6 +1039,7 @@ def compute_world_vars(
     traj_start_pos: float | None = None,
     traj_reverse: bool = False,
     player_heading_deg: float | None = None,
+    pilot_heading_deg: float | None = None,
     terrain_theme: str | None = None,
     sky_brightness: float | None = None,
 ) -> dict:
@@ -1129,6 +1131,10 @@ def compute_world_vars(
         "target_spawn_y": _spawn_y,
         "target_spawn_yaw": _spawn_yaw,
         "player_heading_rad": math.radians(_player_heading),
+        # Pilot-controlled target (pilot_controlled_target world): spawn yaw of
+        # the manually steered target — must match pilot_target.py's
+        # --initial-heading-deg so the model faces where it first flies.
+        "pilot_spawn_yaw": math.radians(_def(pilot_heading_deg, 0.0)),
         "patrol_length": _patrol_length,
         "patrol_speed_ms": patrol_speed_ms,
         "clouds": clouds,
