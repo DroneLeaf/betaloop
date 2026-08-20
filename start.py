@@ -921,12 +921,13 @@ def parse_args():
         type=float,
         default=None,
         help="Uniform scale multiplier for the target mesh (applies to any target; "
-             "default per target: shahed 1.0, stingjet 0.1). Also scales the hit-box.",
+             "default per target: shahed 1.0, stingjet 0.1, falcon_trainer 1.0). "
+             "Also scales the hit-box.",
     )
     wld.add_argument(
         "--target-mesh-color",
         default=DEFAULT_TARGET_MESH_COLOR,
-        help="Flat colour for MESH targets (shahed/stingjet), overriding the "
+        help="Flat colour for MESH targets (shahed/stingjet/falcon_trainer), overriding the "
              "model's own greyish material. 'default' keeps the mesh material; "
              f"presets: {', '.join(TARGET_MESH_COLORS)}; or a literal 'R G B' "
              "(0-1). No effect on the balloon (a primitive with its own colour).",

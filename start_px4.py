@@ -414,9 +414,10 @@ def parse_args():
                           f"windy_target/shake_test, else {DEFAULT_TARGET_DRONE})")
     tgt.add_argument("--target-scale", type=float, default=None,
                      help="Uniform scale multiplier for the target mesh (any target; "
-                          "default per target: shahed 1.0, stingjet 0.1). Scales the hit-box too.")
+                          "default per target: shahed 1.0, stingjet 0.1, "
+                          "falcon_trainer 1.0). Scales the hit-box too.")
     tgt.add_argument("--target-mesh-color", default=DEFAULT_TARGET_MESH_COLOR,
-                     help="Flat colour for MESH targets (shahed/stingjet), overriding the "
+                     help="Flat colour for MESH targets (shahed/stingjet/falcon_trainer), overriding the "
                           "model's own greyish material. 'default' keeps it; presets: "
                           f"{', '.join(TARGET_MESH_COLORS)}; or a literal 'R G B' (0-1).")
 

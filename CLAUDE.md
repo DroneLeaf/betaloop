@@ -461,6 +461,19 @@ any new motion so Ctrl-C exits cleanly.
   rendering. Attachment gotcha (bit twice): parts that mated with the OLD
   square fuselage (fin root, tail-gear leg) must reach INTO the tapered boom
   or they float — verified with a tail close-up render.
+- **GT pose = geometric (AABB) centre, verified in-engine:** the generator
+  asserts the mesh AABB centre is exactly the origin, and identity
+  visual/link poses keep the model origin there — so the pose driven over UDP
+  (and mirrored as ground truth on 9018) IS the bounding-box centre at any
+  scale. Measured from a top-down capture: silhouette bbox centre within
+  **2.0 cm / 0.0 cm** (nose/span axes) of the commanded pose. The silhouette
+  pixel CENTROID sits ~9 cm ahead of it (wing mass forward vs thin tail boom)
+  — inherent airframe asymmetry, same class as any aircraft mesh, not an
+  origin error. Measurement gotchas that faked a 19.5 cm offset first: the
+  nose-marker's anti-aliased edge ring passes a colour-diff mask even when
+  pure blue is excluded, and top-down projected size must use the depth of the
+  WING plane, not the model origin — remove the marker and use per-part depth
+  before trusting silhouette centres.
 - **Frame convention differs from the .glb targets — deliberately.** The OBJ is
   modeled DIRECTLY in the Gazebo body frame (+X nose, +Y span, +Z up, AABB
   centred at origin), so `visual_pose` is identity AND
