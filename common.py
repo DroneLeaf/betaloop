@@ -138,6 +138,25 @@ TARGET_REFS = {
         "dims": (10.6864, 18.7926, 3.2261),
         "default_scale": 0.1,
     },
+    "falcon_trainer": {
+        # A red ~1.8 m Falcon trainer RC plane. The mesh is a GENERATED
+        # primitive-box OBJ (models/falcon_trainer/meshes/, committed) modeled
+        # DIRECTLY in the Gazebo body frame: +X = nose, +Y = span, +Z = up,
+        # AABB centred at the origin — so visual_pose is identity and dims map
+        # straight onto body axes with no rotation anywhere. Red/white/black
+        # colours are baked into the OBJ's MTL (the target-mesh-color override
+        # still fully repaints it, like the .glb targets).
+        "label": "Falcon Trainer",
+        "mesh_uri": "model://falcon_trainer/meshes/falcon_trainer.obj",
+        "model_uri": "model://falcon_trainer",
+        "visual_pose": "0 0 0 0 0 0",
+        "dims": (1.550, 1.860, 0.500),   # length (tail-nose), span, height
+        "default_scale": 1.0,
+        # The include-world bbox swap exists because the .glb models' model.sdf
+        # applies a -90 deg X rotation; this model's link pose is identity, so
+        # its include frame equals the inline frame — no swap.
+        "include_swap": False,
+    },
     "balloon": {
         # A primitive (no mesh): worlds that inline the visual draw a <sphere>
         # instead of a <mesh>; worlds that <include> use models/balloon. Used as
@@ -180,7 +199,10 @@ def target_bbox_extents(target_drone: str, world_name: str, scale: float) -> tup
     """
     ref = TARGET_REFS.get(target_drone, TARGET_REFS[DEFAULT_TARGET_DRONE])
     length, span, height = (d * float(scale) for d in ref["dims"])
-    if world_name in TARGET_INCLUDE_WORLDS:
+    # Targets whose model.sdf link pose is IDENTITY (generated meshes modeled
+    # in the body frame, e.g. falcon_trainer) sit the same way on both paths —
+    # they set include_swap: False and skip the transposition.
+    if world_name in TARGET_INCLUDE_WORLDS and ref.get("include_swap", True):
         full = (span, length, height)
     else:
         full = (length, span, height)

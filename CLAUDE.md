@@ -443,3 +443,44 @@ any new motion so Ctrl-C exits cleanly.
 - `--traj-perturb*` flags on BOTH `start.py` and `start_px4.py` (parity), passed
   through to the thread with the same defaults (10 m @ 0.1 Hz lat, 5 m @ 0.1 Hz
   vert, phase 0°).
+
+## Session Addendum (2026-08-20) — falcon_trainer target (red/black-checker RC plane)
+
+- `TARGET_REFS` gained **`falcon_trainer`**: a ~1.8 m HobbyKing Falcon Trainer
+  20cc (real specs: span 1860 mm, length 1550 mm — the user's aircraft) in its
+  red / black-checkerboard scheme. `dims (1.550, 1.860, 0.500)`, default scale
+  1.0. The mesh is a **generated OBJ of lofted convex solids**
+  (`aeroloop_gazebo/models/falcon_trainer/meshes/`, COMMITTED — regenerable via
+  `generate_falcon.py` next to it, an asset like the .glbs): fuselage tapering
+  to the tail boom, wing/elevator tapered toward the tips with ROUNDED leading
+  edges (arc-profile ribs), swept rounded fin; checkered wing/stab as separate
+  red/black solids (no textures → no loader dependencies, and the checkers
+  double as high-contrast tracker features), prop + spinner, aluminum
+  taildragger legs + 12-gon wheels. Face winding is auto-corrected per face
+  against the solid centroid (all solids convex) — safe for single-sided
+  rendering. Attachment gotcha (bit twice): parts that mated with the OLD
+  square fuselage (fin root, tail-gear leg) must reach INTO the tapered boom
+  or they float — verified with a tail close-up render.
+- **Frame convention differs from the .glb targets — deliberately.** The OBJ is
+  modeled DIRECTLY in the Gazebo body frame (+X nose, +Y span, +Z up, AABB
+  centred at origin), so `visual_pose` is identity AND
+  `models/falcon_trainer/model.sdf.j2`'s link pose is identity. Consequence:
+  the include-world bbox transposition does not apply — `target_bbox_extents`
+  now honours a per-target **`include_swap`** key (default True = the .glb
+  behaviour; falcon sets False). A future generated body-frame target should
+  copy that; a future .glb target should NOT.
+- Everything else was already derived: `--target-drone` choices from
+  TARGET_REFS keys, model template rendering from `target_model_name`,
+  `target-mesh-color` override works on the OBJ too (SDF material fully
+  replaces MTL materials — default keeps the baked red/black scheme).
+  leaf-sim-ui `TARGET_DRONES` + `TARGET_DEFAULT_SCALES` gained the entry.
+- The provided `v_max`/`a_max` fields are NOT consumed by this stack (target
+  speed limits are per-world settings, e.g. the pilot world's speed knobs).
+- **Verified in-engine, not assumed:** headless `gz sim -s` + camera-topic
+  captures (top-down + three-quarter) show the checkered planform matching the
+  user's tracker screenshot, MTL colours honoured by ogre2, upright, nose on
+  +X; bbox asserted for both world paths at 2 scales, glb targets' bboxes
+  regression-checked byte-identical. Capture gotcha: camera `<save>` writes
+  nothing headless on this box — subscribe with
+  `gz topic -e -n 1 --json-output -t .../image` and decode base64 instead
+  (with `__EGL_VENDOR_LIBRARY_FILENAMES=.../10_nvidia.json` + DISPLAY set).
