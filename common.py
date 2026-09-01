@@ -826,6 +826,8 @@ def compute_model_vars(
     tracker_wide_cam_enabled: bool = True,
     tracker_wide_cam_pitch: float = -80.0,
     tracker_wide_cam_roll: float = 0.0,
+    tracker_wide_cam_offset_x_mm: float = 0.0,
+    tracker_wide_cam_offset_y_mm: float = 0.0,
     tracker_wide_hfov_deg: float = 114.6,
     tracker_wide_vfov_deg: float = 98.9,
     tracker_wide_cam_width: int = 640,
@@ -834,6 +836,8 @@ def compute_model_vars(
     tracker_narrow_enabled: bool = False,
     tracker_narrow_cam_pitch: float = -80.0,
     tracker_narrow_cam_roll: float = 0.0,
+    tracker_narrow_cam_offset_x_mm: float = 0.0,
+    tracker_narrow_cam_offset_y_mm: float = 0.0,
     tracker_narrow_hfov_deg: float = 45.0,
     tracker_narrow_vfov_deg: float = 34.0,
     tracker_narrow_cam_width: int = 640,
@@ -842,6 +846,8 @@ def compute_model_vars(
     thermal_cam_enabled: bool = False,
     thermal_cam_pitch: float = -80.0,
     thermal_cam_roll: float = 0.0,
+    thermal_cam_offset_x_mm: float = 0.0,
+    thermal_cam_offset_y_mm: float = 0.0,
     thermal_hfov_deg: float = 114.6,
     thermal_vfov_deg: float = 98.9,
     thermal_cam_width: int = 640,
@@ -940,6 +946,13 @@ def compute_model_vars(
         "tracker_wide_cam_enabled": bool(tracker_wide_cam_enabled),
         "tracker_wide_cam_pitch_rad": tracker_wide_cam_pitch_rad,
         "tracker_wide_cam_roll_rad": tracker_wide_cam_roll_rad,
+        # Camera mount offsets: the *_offset_*_mm inputs use the OPERATOR
+        # convention (x forward, y positive to the drone's RIGHT, mm); the SDF
+        # sensor pose is body FLU metres (y positive LEFT), hence /1000 and the
+        # y negation. SDF pose translation is in the PARENT (drone body) frame,
+        # i.e. applied after — unrotated by — the camera tilt/twist.
+        "tracker_wide_cam_x": tracker_wide_cam_offset_x_mm / 1000.0,
+        "tracker_wide_cam_y": -tracker_wide_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "tracker_wide_hfov_rad": tracker_wide_hfov_rad,
         "tracker_wide_img_width": tracker_wide_img_width,
         "tracker_wide_img_height": tracker_wide_img_height,
@@ -949,6 +962,8 @@ def compute_model_vars(
         "tracker_narrow_enabled": bool(tracker_narrow_enabled),
         "tracker_narrow_cam_pitch_rad": tracker_narrow_cam_pitch_rad,
         "tracker_narrow_cam_roll_rad": tracker_narrow_cam_roll_rad,
+        "tracker_narrow_cam_x": tracker_narrow_cam_offset_x_mm / 1000.0,
+        "tracker_narrow_cam_y": -tracker_narrow_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "tracker_narrow_hfov_rad": tracker_narrow_hfov_rad,
         "tracker_narrow_img_width": tracker_narrow_img_width,
         "tracker_narrow_img_height": tracker_narrow_img_height,
@@ -958,6 +973,8 @@ def compute_model_vars(
         "thermal_cam_enabled": bool(thermal_cam_enabled),
         "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
         "thermal_cam_roll_rad": thermal_cam_roll_rad,
+        "thermal_cam_x": thermal_cam_offset_x_mm / 1000.0,
+        "thermal_cam_y": -thermal_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "thermal_hfov_rad": thermal_hfov_rad,
         "thermal_img_width": thermal_img_width,
         "thermal_img_height": thermal_img_height,

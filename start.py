@@ -198,6 +198,8 @@ def _render_all_templates(drone, world_name, args):
         tracker_wide_cam_enabled=getattr(args, "tracker_wide_cam", True),
         tracker_wide_cam_pitch=args.tracker_wide_cam_pitch,
         tracker_wide_cam_roll=args.tracker_wide_cam_roll,
+        tracker_wide_cam_offset_x_mm=getattr(args, "tracker_wide_cam_offset_x", 0.0),
+        tracker_wide_cam_offset_y_mm=getattr(args, "tracker_wide_cam_offset_y", 0.0),
         tracker_wide_hfov_deg=args.tracker_wide_hfov,
         tracker_wide_vfov_deg=args.tracker_wide_vfov,
         tracker_wide_cam_width=args.tracker_wide_cam_width,
@@ -206,6 +208,8 @@ def _render_all_templates(drone, world_name, args):
         tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
         tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
+        tracker_narrow_cam_offset_x_mm=getattr(args, "tracker_narrow_cam_offset_x", 0.0),
+        tracker_narrow_cam_offset_y_mm=getattr(args, "tracker_narrow_cam_offset_y", 0.0),
         tracker_narrow_hfov_deg=args.tracker_narrow_hfov,
         tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
         tracker_narrow_cam_width=args.tracker_narrow_cam_width,
@@ -214,6 +218,8 @@ def _render_all_templates(drone, world_name, args):
         thermal_cam_enabled=getattr(args, "thermal_cam", False),
         thermal_cam_pitch=getattr(args, "thermal_cam_pitch", -80.0),
         thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
+        thermal_cam_offset_x_mm=getattr(args, "thermal_cam_offset_x", 0.0),
+        thermal_cam_offset_y_mm=getattr(args, "thermal_cam_offset_y", 0.0),
         thermal_hfov_deg=getattr(args, "thermal_hfov", 114.6),
         thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),
@@ -495,6 +501,14 @@ def parse_args():
         default=0.0,
         help="Wide tracker camera roll in degrees (default: 0; use 90 for landscape)",
     )
+    drn.add_argument("--tracker-wide-cam-offset-x", type=float, default=0.0,
+                     help="Wide tracker camera mount offset X in mm, drone body frame "
+                          "(x forward); translation only — unrotated by the camera "
+                          "tilt/twist (default: 0)")
+    drn.add_argument("--tracker-wide-cam-offset-y", type=float, default=0.0,
+                     help="Wide tracker camera mount offset Y in mm, drone body frame "
+                          "(y positive to the drone's RIGHT); unrotated by the camera "
+                          "tilt/twist (default: 0)")
     drn.add_argument(
         "--tracker-wide-hfov",
         type=float,
@@ -551,6 +565,14 @@ def parse_args():
         default=0.0,
         help="Narrow tracker camera roll in degrees (default: 0)",
     )
+    drn.add_argument("--tracker-narrow-cam-offset-x", type=float, default=0.0,
+                     help="Narrow tracker camera mount offset X in mm, drone body "
+                          "frame (x forward); unrotated by the camera tilt/twist "
+                          "(default: 0)")
+    drn.add_argument("--tracker-narrow-cam-offset-y", type=float, default=0.0,
+                     help="Narrow tracker camera mount offset Y in mm, drone body "
+                          "frame (y positive to the drone's RIGHT); unrotated by the "
+                          "camera tilt/twist (default: 0)")
     drn.add_argument(
         "--tracker-narrow-hfov",
         type=float,
@@ -602,6 +624,13 @@ def parse_args():
                      help="Thermal camera tilt in degrees (default: -80)")
     drn.add_argument("--thermal-cam-roll", type=float, default=0.0,
                      help="Thermal camera twist in degrees (default: 0)")
+    drn.add_argument("--thermal-cam-offset-x", type=float, default=0.0,
+                     help="Thermal camera mount offset X in mm, drone body frame "
+                          "(x forward); unrotated by the camera tilt/twist (default: 0)")
+    drn.add_argument("--thermal-cam-offset-y", type=float, default=0.0,
+                     help="Thermal camera mount offset Y in mm, drone body frame "
+                          "(y positive to the drone's RIGHT); unrotated by the camera "
+                          "tilt/twist (default: 0)")
     drn.add_argument("--thermal-hfov", type=float, default=114.6,
                      help="Thermal camera horizontal FOV in degrees (default: 114.6)")
     drn.add_argument("--thermal-vfov", type=float, default=98.9,

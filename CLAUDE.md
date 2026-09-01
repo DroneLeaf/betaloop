@@ -497,3 +497,13 @@ any new motion so Ctrl-C exits cleanly.
   nothing headless on this box — subscribe with
   `gz topic -e -n 1 --json-output -t .../image` and decode base64 instead
   (with `__EGL_VENDOR_LIBRARY_FILENAMES=.../10_nvidia.json` + DISPLAY set).
+
+## Session Addendum (2026-09-01) — camera mount offsets
+
+- `compute_model_vars` gained `tracker_wide/tracker_narrow/thermal
+  _cam_offset_x_mm/_y_mm` (operator convention: mm, x forward, y RIGHT) and
+  emits `<cam>_cam_x/_y` in body-FLU metres (y negated; `+ 0.0` kills −0.0) for
+  the model templates. `--<feed>-cam-offset-x/-y` flags on both launchers,
+  passed through both `compute_model_vars` call sites. Offsets ADD to each
+  drone's base mount (iris: 0.15 0 0.03); pose translation is parent-frame so
+  the tilt/twist never rotates it.
