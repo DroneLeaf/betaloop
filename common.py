@@ -778,6 +778,33 @@ def sanitize_lens_fun(v) -> str:
     return v if v in LENS_FUNS else "tan"
 
 
+def _img_height(width, hfov_deg, vfov_deg, fisheye=False,
+                c2=4.0, c3=0.0, fun="tan"):
+    """Sensor source-image height that delivers TRUE ``vfov_deg`` coverage.
+
+    Rectilinear (pinhole): height/width = tan(v/2)/tan(h/2).
+
+    Fisheye (wideanglecamera, custom lens r = c1·f·fun(θ/c2 + c3) with
+    scale_to_hfov): the half-height maps through the SAME lens curve as the
+    half-width, so height/width = fun(v/2/c2 + c3)/fun(h/2/c2 + c3) — c1 and f
+    cancel. For the equidistant preset (c2=1, fun=id) this is simply v/h.
+    Before this helper the tan (pinhole) formula was used regardless, so a
+    fisheye feed's VFOV spin did NOT mean its true vertical coverage.
+    """
+    if fisheye:
+        f = {"tan": math.tan, "sin": math.sin}.get(
+            sanitize_lens_fun(fun), lambda x: x)          # id → identity
+        c2 = float(c2) if float(c2) != 0.0 else 1.0
+        num = f(math.radians(vfov_deg) / 2.0 / c2 + float(c3))
+        den = f(math.radians(hfov_deg) / 2.0 / c2 + float(c3))
+    else:
+        num = math.tan(math.radians(vfov_deg) / 2.0)
+        den = math.tan(math.radians(hfov_deg) / 2.0)
+    if abs(den) < 1e-9:
+        den = 1e-9
+    return max(2, round(width * num / den))
+
+
 # Per-camera fisheye lens intrinsics shared by both launchers (start.py / start_px4.py).
 _LENS_CAMERAS = (
     ("tracker-wide",   "tracker_wide",   "Wide tracker"),
@@ -909,28 +936,37 @@ def compute_model_vars(
     fpv_img_width = max(64, int(fpv_cam_width))
     tracker_wide_img_width = max(64, int(tracker_wide_cam_width))
     tracker_narrow_img_width = max(64, int(tracker_narrow_cam_width))
-    fpv_img_height = round(fpv_img_width * math.tan(math.radians(fpv_vfov_deg) / 2)
-                           / math.tan(fpv_hfov_rad / 2))
-    tracker_wide_img_height = round(tracker_wide_img_width * math.tan(math.radians(tracker_wide_vfov_deg) / 2)
-                                    / math.tan(tracker_wide_hfov_rad / 2))
-    tracker_narrow_img_height = round(tracker_narrow_img_width * math.tan(math.radians(tracker_narrow_vfov_deg) / 2)
-                                      / math.tan(tracker_narrow_hfov_rad / 2))
+    fpv_img_height = _img_height(fpv_img_width, fpv_hfov_deg, fpv_vfov_deg)
+    # Fisheye feeds derive height through the actual lens curve so the VFOV is
+    # the TRUE vertical coverage (the pinhole tan formula under-sizes it).
+    tracker_wide_img_height = _img_height(
+        tracker_wide_img_width, tracker_wide_hfov_deg, tracker_wide_vfov_deg,
+        fisheye=tracker_wide_fisheye, c2=tracker_wide_lens_c2,
+        c3=tracker_wide_lens_c3, fun=tracker_wide_lens_fun)
+    tracker_narrow_img_height = _img_height(
+        tracker_narrow_img_width, tracker_narrow_hfov_deg, tracker_narrow_vfov_deg,
+        fisheye=tracker_narrow_fisheye, c2=tracker_narrow_lens_c2,
+        c3=tracker_narrow_lens_c3, fun=tracker_narrow_lens_fun)
 
     # Thermal: optional sensor (fisheye/rectilinear per thermal_fisheye); white-hot downstream.
     thermal_cam_pitch_rad = math.radians(thermal_cam_pitch)
     thermal_cam_roll_rad = math.radians(thermal_cam_roll)
     thermal_hfov_rad = math.radians(thermal_hfov_deg)
     thermal_img_width = max(64, int(thermal_cam_width))
-    thermal_img_height = round(thermal_img_width * math.tan(math.radians(thermal_vfov_deg) / 2)
-                               / math.tan(thermal_hfov_rad / 2))
+    thermal_img_height = _img_height(
+        thermal_img_width, thermal_hfov_deg, thermal_vfov_deg,
+        fisheye=thermal_fisheye, c2=thermal_lens_c2,
+        c3=thermal_lens_c3, fun=thermal_lens_fun)
 
     # Utility camera: clone of the wide tracker (fisheye/rectilinear per utility_fisheye).
     utility_cam_pitch_rad = math.radians(utility_cam_pitch)
     utility_cam_roll_rad = math.radians(utility_cam_roll)
     utility_hfov_rad = math.radians(utility_hfov_deg)
     utility_img_width = max(64, int(utility_cam_width))
-    utility_img_height = round(utility_img_width * math.tan(math.radians(utility_vfov_deg) / 2)
-                               / math.tan(utility_hfov_rad / 2))
+    utility_img_height = _img_height(
+        utility_img_width, utility_hfov_deg, utility_vfov_deg,
+        fisheye=utility_fisheye, c2=utility_lens_c2,
+        c3=utility_lens_c3, fun=utility_lens_fun)
 
     dd = ref["default_damping"]
     do = damping_overrides or {}

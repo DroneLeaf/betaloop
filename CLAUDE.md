@@ -507,3 +507,26 @@ any new motion so Ctrl-C exits cleanly.
   passed through both `compute_model_vars` call sites. Offsets ADD to each
   drone's base mount (iris: 0.15 0 0.03); pose translation is parent-frame so
   the tilt/twist never rotates it.
+
+## Session Addendum (2026-09-02) — fisheye VFOV is now honest (lens-aware source height)
+
+- `compute_model_vars` derives each camera's SOURCE image height via the new
+  `_img_height(width, hfov, vfov, fisheye, c2, c3, fun)`: pinhole tan-ratio
+  when rectilinear (unchanged), but through the ACTUAL lens curve when that
+  feed's fisheye flag is on — `height/width = fun(v/2/c2+c3)/fun(h/2/c2+c3)`
+  (c1 and the scale_to_hfov f cancel; equidistant ⇒ simply v/h). Previously the
+  tan formula was used regardless, so a fisheye feed's VFOV never meant its
+  true vertical coverage (e.g. equidistant 88×47 @ 854 rendered only ~43° and
+  then got stretched).
+- **Consequence:** fisheye feeds' SHM/source frame sizes change for the same
+  spins (default tan/4 lens 114.6×98.9 @ 640 → height 480 → **549**). SHM
+  consumers read w/h from the header, but anything with hardcoded frame-size
+  expectations (leaf-tracker configs, recordings) should be re-checked.
+- **Registration rule (from the live two-camera debugging):** for a
+  narrow-in-wide slice, both feeds need the same lens model + same relative
+  twist handling (180° flip when rolls are +90/−90), and the same
+  source→output stretch. Equal HFOV:VFOV ratios at equal output aspect give
+  identical stretch on both feeds, which cancels in the slice — e.g. wide
+  88×47 + narrow 42×22.43 (= 42·47/88) at 854×480 out ⇒ uniform ×88/42 slice.
+  Verified by NCC registration on live SHM frames at each step (anisotropy
+  measured 2.5/2.0 → 2.1/1.7 → predicted uniform 2.095).
