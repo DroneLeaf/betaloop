@@ -182,6 +182,10 @@ def parse_args():
                      help="Wide tracker camera mount offset Y in mm, drone body frame "
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
+    sim.add_argument("--tracker-wide-cam-rotation-about-y", type=float, default=0.0,
+                     help="Wide tracker camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+    sim.add_argument("--tracker-wide-cam-rotation-about-x", type=float, default=0.0,
+                     help="Wide tracker camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--tracker-wide-hfov", type=float, default=114.6,
                      help="Wide tracker camera horizontal FOV in degrees (default: 114.6)")
     sim.add_argument("--tracker-wide-vfov", type=float, default=98.9,
@@ -205,6 +209,10 @@ def parse_args():
                      help="Narrow tracker camera mount offset Y in mm, drone body frame "
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
+    sim.add_argument("--tracker-narrow-cam-rotation-about-y", type=float, default=0.0,
+                     help="Narrow tracker camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+    sim.add_argument("--tracker-narrow-cam-rotation-about-x", type=float, default=0.0,
+                     help="Narrow tracker camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--tracker-narrow-cam-roll", type=float, default=0.0,
                      help="Narrow tracker camera roll in degrees (default: 0)")
     sim.add_argument("--tracker-narrow-hfov", type=float, default=45.0,
@@ -230,6 +238,10 @@ def parse_args():
                      help="Thermal camera mount offset Y in mm, drone body frame "
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
+    sim.add_argument("--thermal-cam-rotation-about-y", type=float, default=0.0,
+                     help="Thermal camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+    sim.add_argument("--thermal-cam-rotation-about-x", type=float, default=0.0,
+                     help="Thermal camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--thermal-cam-roll", type=float, default=0.0,
                      help="Thermal camera roll in degrees (default: 0)")
     sim.add_argument("--thermal-hfov", type=float, default=114.6,
@@ -506,6 +518,8 @@ def main():
         tracker_wide_cam_roll=args.tracker_wide_cam_roll,
         tracker_wide_cam_offset_x_mm=getattr(args, "tracker_wide_cam_offset_x", 0.0),
         tracker_wide_cam_offset_y_mm=getattr(args, "tracker_wide_cam_offset_y", 0.0),
+        tracker_wide_cam_rotation_about_y_deg=getattr(args, "tracker_wide_cam_rotation_about_y", 0.0),
+        tracker_wide_cam_rotation_about_x_deg=getattr(args, "tracker_wide_cam_rotation_about_x", 0.0),
         tracker_wide_hfov_deg=args.tracker_wide_hfov,
         tracker_wide_vfov_deg=args.tracker_wide_vfov,
         tracker_wide_cam_width=args.tracker_wide_cam_width,
@@ -516,6 +530,8 @@ def main():
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
         tracker_narrow_cam_offset_x_mm=getattr(args, "tracker_narrow_cam_offset_x", 0.0),
         tracker_narrow_cam_offset_y_mm=getattr(args, "tracker_narrow_cam_offset_y", 0.0),
+        tracker_narrow_cam_rotation_about_y_deg=getattr(args, "tracker_narrow_cam_rotation_about_y", 0.0),
+        tracker_narrow_cam_rotation_about_x_deg=getattr(args, "tracker_narrow_cam_rotation_about_x", 0.0),
         tracker_narrow_hfov_deg=args.tracker_narrow_hfov,
         tracker_narrow_vfov_deg=args.tracker_narrow_vfov,
         tracker_narrow_cam_width=args.tracker_narrow_cam_width,
@@ -526,6 +542,8 @@ def main():
         thermal_cam_roll=getattr(args, "thermal_cam_roll", 0.0),
         thermal_cam_offset_x_mm=getattr(args, "thermal_cam_offset_x", 0.0),
         thermal_cam_offset_y_mm=getattr(args, "thermal_cam_offset_y", 0.0),
+        thermal_cam_rotation_about_y_deg=getattr(args, "thermal_cam_rotation_about_y", 0.0),
+        thermal_cam_rotation_about_x_deg=getattr(args, "thermal_cam_rotation_about_x", 0.0),
         thermal_hfov_deg=getattr(args, "thermal_hfov", 114.6),
         thermal_vfov_deg=getattr(args, "thermal_vfov", 98.9),
         thermal_cam_width=getattr(args, "thermal_cam_width", 640),

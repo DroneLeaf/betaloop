@@ -530,3 +530,24 @@ any new motion so Ctrl-C exits cleanly.
   88×47 + narrow 42×22.43 (= 42·47/88) at 854×480 out ⇒ uniform ×88/42 slice.
   Verified by NCC registration on live SHM frames at each step (anisotropy
   measured 2.5/2.0 → 2.1/1.7 → predicted uniform 2.095).
+
+## Session Addendum (2026-09-03) — sensor-seating misalignment rotations
+
+- `compute_model_vars` gained `<cam>_cam_rotation_about_y_deg` /
+  `_about_x_deg` for wide/narrow/thermal (defaults 0): an improperly-SEATED
+  sensor, i.e. rotations applied AFTER the mount tilt/twist, about the
+  MOUNTED camera's own axes, **y first then x** (the order is the spec):
+  `R = Ry(pitch)·Rx(roll)·Ry(rot_y)·Rx(rot_x)`.
+- A single SDF `<pose>` can't express the composition, so `_cam_mount_rpy`
+  composes the matrix and re-extracts Z-Y-X euler (gimbal-lock branch for the
+  ±90 mounts); the sensor pose's previously-hardcoded yaw slot is now
+  `<cam>_cam_yaw_rad` in the 3 drone vis templates. **Zero deltas bypass
+  composition and return the raw angles — legacy renders byte-identical**
+  (yaw formats as literal `0`).
+- Degenerate cases that LOOK wrong but aren't: with mount roll=0, rot-about-y
+  folds exactly into pitch (yaw stays 0) — e.g. thermal −80° + rot_y 3° →
+  pose pitch −77°. Verified: rebuilt rotation matches the spec product to
+  1e-14 over 556 cases incl. pitch −90/roll ±90 mounts; rendered poses
+  rebuild the spec to 5e-10.
+- Flags `--<feed>-cam-rotation-about-y/-x` on BOTH launchers, passed through
+  both call sites; launch.sh/launch_px4.sh forward via catch-all (headers doc'd).

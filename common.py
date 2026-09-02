@@ -773,6 +773,54 @@ LENS_PRESETS = {
 }
 
 
+def _cam_mount_rpy(pitch_deg, roll_deg, rot_y_deg=0.0, rot_x_deg=0.0):
+    """SDF sensor-pose angles (roll, pitch, yaw — RADIANS) for a camera mount.
+
+    The nominal mount is what the templates always had: the SDF pose rotation
+    ``Rz(0)·Ry(pitch)·Rx(roll)``. The two extra rotations simulate an
+    improperly SEATED sensor: applied AFTER the mount, about the mounted
+    camera's OWN axes, in this order —
+
+        R = Ry(pitch) · Rx(roll) · Ry(rot_about_y) · Rx(rot_about_x)
+
+    (post-multiplication = intrinsic rotations in the already-rotated frame;
+    the order is part of the spec). A single SDF <pose> can't express the
+    composition directly, so R is re-extracted as Z-Y-X euler — any (r,p,y)
+    triple that rebuilds R is equivalent for Gazebo. With both deltas zero the
+    inputs are returned unchanged so existing renders stay byte-identical.
+    """
+    if rot_y_deg == 0.0 and rot_x_deg == 0.0:
+        return math.radians(roll_deg), math.radians(pitch_deg), 0.0
+
+    def _ry(a):
+        c, s = math.cos(a), math.sin(a)
+        return ((c, 0.0, s), (0.0, 1.0, 0.0), (-s, 0.0, c))
+
+    def _rx(a):
+        c, s = math.cos(a), math.sin(a)
+        return ((1.0, 0.0, 0.0), (0.0, c, -s), (0.0, s, c))
+
+    def _mul(A, B):
+        return tuple(tuple(sum(A[i][k] * B[k][j] for k in range(3))
+                           for j in range(3)) for i in range(3))
+
+    R = _mul(_mul(_ry(math.radians(pitch_deg)), _rx(math.radians(roll_deg))),
+             _mul(_ry(math.radians(rot_y_deg)), _rx(math.radians(rot_x_deg))))
+    # Z-Y-X extraction (R = Rz(y)·Ry(p)·Rx(r)), with the gimbal-lock branch:
+    # at |sin p| = 1 roll/yaw are degenerate — pick roll' = 0 and put the
+    # remaining rotation in yaw; the rebuilt matrix is still exactly R.
+    sp = -R[2][0]
+    if abs(sp) < 1.0 - 1e-9:
+        p = math.asin(sp)
+        r = math.atan2(R[2][1], R[2][2])
+        y = math.atan2(R[1][0], R[0][0])
+    else:
+        p = math.copysign(math.pi / 2.0, sp)
+        r = 0.0
+        y = math.atan2(-R[0][1], R[1][1])
+    return r, p, y
+
+
 def sanitize_lens_fun(v) -> str:
     """Clamp a lens mapping-function name to a valid Gazebo value (else 'tan')."""
     return v if v in LENS_FUNS else "tan"
@@ -855,6 +903,8 @@ def compute_model_vars(
     tracker_wide_cam_roll: float = 0.0,
     tracker_wide_cam_offset_x_mm: float = 0.0,
     tracker_wide_cam_offset_y_mm: float = 0.0,
+    tracker_wide_cam_rotation_about_y_deg: float = 0.0,
+    tracker_wide_cam_rotation_about_x_deg: float = 0.0,
     tracker_wide_hfov_deg: float = 114.6,
     tracker_wide_vfov_deg: float = 98.9,
     tracker_wide_cam_width: int = 640,
@@ -865,6 +915,8 @@ def compute_model_vars(
     tracker_narrow_cam_roll: float = 0.0,
     tracker_narrow_cam_offset_x_mm: float = 0.0,
     tracker_narrow_cam_offset_y_mm: float = 0.0,
+    tracker_narrow_cam_rotation_about_y_deg: float = 0.0,
+    tracker_narrow_cam_rotation_about_x_deg: float = 0.0,
     tracker_narrow_hfov_deg: float = 45.0,
     tracker_narrow_vfov_deg: float = 34.0,
     tracker_narrow_cam_width: int = 640,
@@ -875,6 +927,8 @@ def compute_model_vars(
     thermal_cam_roll: float = 0.0,
     thermal_cam_offset_x_mm: float = 0.0,
     thermal_cam_offset_y_mm: float = 0.0,
+    thermal_cam_rotation_about_y_deg: float = 0.0,
+    thermal_cam_rotation_about_x_deg: float = 0.0,
     thermal_hfov_deg: float = 114.6,
     thermal_vfov_deg: float = 98.9,
     thermal_cam_width: int = 640,
@@ -923,10 +977,18 @@ def compute_model_vars(
     leg_z = -(_standoff / 2 + ref["leg_attach_offset"])
 
     fpv_cam_pitch_rad = math.radians(cam_pitch)
-    tracker_wide_cam_pitch_rad = math.radians(tracker_wide_cam_pitch)
-    tracker_wide_cam_roll_rad = math.radians(tracker_wide_cam_roll)
-    tracker_narrow_cam_pitch_rad = math.radians(tracker_narrow_cam_pitch)
-    tracker_narrow_cam_roll_rad = math.radians(tracker_narrow_cam_roll)
+    # Tracker-style cams: the pose rpy is the NOMINAL mount composed with the
+    # sensor-seating misalignment (rot-about-y then rot-about-x, applied after
+    # tilt/twist in the mounted frame — see _cam_mount_rpy). Zero misalignment
+    # returns the raw angles, keeping legacy renders byte-identical.
+    (tracker_wide_cam_roll_rad, tracker_wide_cam_pitch_rad,
+     tracker_wide_cam_yaw_rad) = _cam_mount_rpy(
+        tracker_wide_cam_pitch, tracker_wide_cam_roll,
+        tracker_wide_cam_rotation_about_y_deg, tracker_wide_cam_rotation_about_x_deg)
+    (tracker_narrow_cam_roll_rad, tracker_narrow_cam_pitch_rad,
+     tracker_narrow_cam_yaw_rad) = _cam_mount_rpy(
+        tracker_narrow_cam_pitch, tracker_narrow_cam_roll,
+        tracker_narrow_cam_rotation_about_y_deg, tracker_narrow_cam_rotation_about_x_deg)
 
     # Derive source heights from HFOV/VFOV (stretched to output later).
     # Source heights derive from HFOV/VFOV; fisheye vs rectilinear is per-camera (*_fisheye).
@@ -949,8 +1011,10 @@ def compute_model_vars(
         c3=tracker_narrow_lens_c3, fun=tracker_narrow_lens_fun)
 
     # Thermal: optional sensor (fisheye/rectilinear per thermal_fisheye); white-hot downstream.
-    thermal_cam_pitch_rad = math.radians(thermal_cam_pitch)
-    thermal_cam_roll_rad = math.radians(thermal_cam_roll)
+    (thermal_cam_roll_rad, thermal_cam_pitch_rad,
+     thermal_cam_yaw_rad) = _cam_mount_rpy(
+        thermal_cam_pitch, thermal_cam_roll,
+        thermal_cam_rotation_about_y_deg, thermal_cam_rotation_about_x_deg)
     thermal_hfov_rad = math.radians(thermal_hfov_deg)
     thermal_img_width = max(64, int(thermal_cam_width))
     thermal_img_height = _img_height(
@@ -982,6 +1046,7 @@ def compute_model_vars(
         "tracker_wide_cam_enabled": bool(tracker_wide_cam_enabled),
         "tracker_wide_cam_pitch_rad": tracker_wide_cam_pitch_rad,
         "tracker_wide_cam_roll_rad": tracker_wide_cam_roll_rad,
+        "tracker_wide_cam_yaw_rad": tracker_wide_cam_yaw_rad,
         # Camera mount offsets: the *_offset_*_mm inputs use the OPERATOR
         # convention (x forward, y positive to the drone's RIGHT, mm); the SDF
         # sensor pose is body FLU metres (y positive LEFT), hence /1000 and the
@@ -998,6 +1063,7 @@ def compute_model_vars(
         "tracker_narrow_enabled": bool(tracker_narrow_enabled),
         "tracker_narrow_cam_pitch_rad": tracker_narrow_cam_pitch_rad,
         "tracker_narrow_cam_roll_rad": tracker_narrow_cam_roll_rad,
+        "tracker_narrow_cam_yaw_rad": tracker_narrow_cam_yaw_rad,
         "tracker_narrow_cam_x": tracker_narrow_cam_offset_x_mm / 1000.0,
         "tracker_narrow_cam_y": -tracker_narrow_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "tracker_narrow_hfov_rad": tracker_narrow_hfov_rad,
@@ -1009,6 +1075,7 @@ def compute_model_vars(
         "thermal_cam_enabled": bool(thermal_cam_enabled),
         "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
         "thermal_cam_roll_rad": thermal_cam_roll_rad,
+        "thermal_cam_yaw_rad": thermal_cam_yaw_rad,
         "thermal_cam_x": thermal_cam_offset_x_mm / 1000.0,
         "thermal_cam_y": -thermal_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "thermal_hfov_rad": thermal_hfov_rad,
