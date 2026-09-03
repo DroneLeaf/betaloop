@@ -785,7 +785,7 @@ def _cam_mount_rpy(pitch_deg, roll_deg, rot_y_deg=0.0, rot_x_deg=0.0):
     expectation (2026-09-03, twice-revised): +rot_about_y pitches the camera
     assembly nose-UP, +rot_about_x banks it LEFT —
 
-        R = Rx(−rot_about_x) · Ry(−rot_about_y) · Ry(pitch) · Rx(roll)
+        R = Rx(-rot_about_x) · Ry(-rot_about_y) · Ry(pitch) · Rx(roll)
 
     (pre-multiplication = extrinsic rotations about the fixed body axes; the
     order is part of the spec). A single SDF <pose> can't express the
@@ -892,7 +892,27 @@ def lens_kwargs_from_args(args) -> dict:
     return out
 
 
-def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun):
+def principal_offset_to_sensor(pp_x, pp_y, roll_deg):
+    """Operator principal-point offset -> RAW sensor-frame pixels.
+
+    The operator types the offset in the UPRIGHT (de-twisted) view of the
+    feed, in the GC's aim convention: **+x right, +y UP** (the GC draws
+    AIM +0,-100 BELOW the crosshair — its y is up). The warp applies the
+    offset in the raw sensor frame (image y down, twisted by the camera
+    roll), so the input y is negated and then rotated by R(-roll) —
+    displayed = R(roll)*raw, verified against both +-90 rigs and the live
+    SHM stream (2026-09-03). E.g. narrow (-90 twist) typed (-100,-100) →
+    optical centre bottom-left of the upright view; the same input on the
+    wide (+90) lands the same place. Roll-0 cams get just the y negation.
+    """
+    a = math.radians(roll_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    py = -pp_y                       # operator +y UP -> image +y down
+    return (pp_x * ca + py * sa, -pp_x * sa + py * ca)
+
+
+def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun,
+                        pp_dx=0.0, pp_dy=0.0, out_h=None):
     """Source-camera geometry for the fisheye-from-rectilinear warp.
 
     gz's native wideanglecamera samples a cubemap that sdformat caps at
@@ -905,9 +925,16 @@ def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun):
     directions (2% margin) and its base (supersample=1) size matches the
     fisheye output's centre angular density, so the warp never upsamples.
 
-    Returns dict(src_hfov_deg, src_base_w, src_base_h, virt_h) — virt_h is
-    the UNSTRETCHED fisheye height at the output width (the bridge folds the
-    vertical output stretch into its warp LUT).
+    Returns dict(src_hfov_deg, src_base_w, src_base_h, virt_h, ok) — virt_h
+    is the UNSTRETCHED fisheye height at the output width (the bridge folds
+    the vertical output stretch into its warp LUT).
+
+    pp_dx/pp_dy: principal-point offset — where the lens optical axis sits
+    relative to the frame centre, in OUTPUT pixels (+x right, +y down; out_h
+    converts the vertical one into unstretched units). The source coverage is
+    computed from the SHIFTED centre, since the far corner then subtends a
+    larger angle. A pinhole feed is the same model with lens (1, 1, 0, tan),
+    which is how a rectilinear camera gets an exact principal-point shift.
     """
     fun = sanitize_lens_fun(fun)
     fwd = {"id": lambda a: a, "sin": math.sin, "tan": math.tan}[fun]
@@ -918,11 +945,14 @@ def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun):
                          c2=c2, c3=c3, fun=fun)
     th_e = math.radians(hfov_deg) / 2.0
     f_fish = (width / 2.0) / (c1 * fwd(th_e / c2 + c3))
-    # Tangent-plane extents over the fisheye frame border (worst-case corner).
+    # Tangent-plane extents over the fisheye frame border, measured from the
+    # (possibly shifted) optical centre — worst-case corner grows with |pp|.
+    dy_virt = pp_dy * (virt_h / out_h) if out_h else pp_dy
     X = Y = 0.0
     hw, hh = width / 2.0, virt_h / 2.0
     border = ([(-hw + i * width / 64.0, s * hh) for i in range(65) for s in (-1, 1)]
               + [(s * hw, -hh + i * virt_h / 64.0) for i in range(65) for s in (-1, 1)])
+    border = [(bx - pp_dx, by - dy_virt) for bx, by in border]
     for vx, vy in border:
         r = math.hypot(vx, vy)
         if r < 1e-9:
@@ -1037,6 +1067,26 @@ def compute_model_vars(
     tracker_narrow_supersample: int = 1,
     thermal_supersample: int = 1,
     utility_supersample: int = 1,
+    # Principal-point offset per tracker-style feed: where the lens optical
+    # axis sits relative to the frame centre, in OUTPUT pixels (+x right,
+    # +y down) — a decentred-sensor intrinsic. Exact via the warp path (any
+    # fisheye feed, and rectilinear feeds get routed through the warp with
+    # the pinhole lens (1,1,0,tan) when nonzero); ignored with a warning on
+    # the native cubemap path (FOV too wide to warp).
+    tracker_wide_principal_offset_x: float = 0.0,
+    tracker_wide_principal_offset_y: float = 0.0,
+    tracker_narrow_principal_offset_x: float = 0.0,
+    tracker_narrow_principal_offset_y: float = 0.0,
+    thermal_principal_offset_x: float = 0.0,
+    thermal_principal_offset_y: float = 0.0,
+    utility_principal_offset_x: float = 0.0,
+    utility_principal_offset_y: float = 0.0,
+    # Output frame heights (the bridge --out-height) — needed to convert the
+    # vertical principal offset from output px into unstretched sensor units.
+    tracker_wide_cam_height: int = 480,
+    tracker_narrow_cam_height: int = 480,
+    thermal_cam_height: int = 480,
+    utility_cam_height: int = 480,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -1121,48 +1171,112 @@ def compute_model_vars(
     # passes --warp-fisheye built from the SAME fisheye_warp_params call).
     # Native wideanglecamera supersampling is a no-op — sdformat caps the
     # cubemap at 2048, and the extra sensor pixels just re-sample it.
+    _wp = None
+    _ppx, _ppy = principal_offset_to_sensor(
+        tracker_wide_principal_offset_x, tracker_wide_principal_offset_y, tracker_wide_cam_roll)
     if tracker_wide_fisheye:
         _wp = fisheye_warp_params(max(64, int(tracker_wide_cam_width)),
                                   tracker_wide_hfov_deg, tracker_wide_vfov_deg,
                                   tracker_wide_lens_c1, tracker_wide_lens_c2,
-                                  tracker_wide_lens_c3, tracker_wide_lens_fun)
-    if tracker_wide_fisheye and _wp["ok"]:
+                                  tracker_wide_lens_c3, tracker_wide_lens_fun,
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=tracker_wide_cam_height)
+    elif tracker_wide_principal_offset_x or tracker_wide_principal_offset_y:
+        # rectilinear + principal offset: exact via the warp's pinhole lens
+        _wp = fisheye_warp_params(max(64, int(tracker_wide_cam_width)),
+                                  tracker_wide_hfov_deg, tracker_wide_vfov_deg,
+                                  1.0, 1.0, 0.0, "tan",
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=tracker_wide_cam_height)
+    if _wp is not None and not _wp["ok"] and (
+            tracker_wide_principal_offset_x or tracker_wide_principal_offset_y):
+        log.warning("Wide tracker: principal-point offset IGNORED — FOV too wide "
+                    "for the warp path (native cubemap has no such input)")
+    if _wp is not None and _wp["ok"]:
         tracker_wide_img_width = _wp["src_base_w"] * _ss(tracker_wide_supersample)
         tracker_wide_img_height = _wp["src_base_h"] * _ss(tracker_wide_supersample)
         tracker_wide_hfov_rad = math.radians(_wp["src_hfov_deg"])
         tracker_wide_fisheye = False
         log.info("Wide tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
                  tracker_wide_img_width, tracker_wide_img_height, _wp["src_hfov_deg"])
+    _wp = None
+    _ppx, _ppy = principal_offset_to_sensor(
+        tracker_narrow_principal_offset_x, tracker_narrow_principal_offset_y, tracker_narrow_cam_roll)
     if tracker_narrow_fisheye:
         _wp = fisheye_warp_params(max(64, int(tracker_narrow_cam_width)),
                                   tracker_narrow_hfov_deg, tracker_narrow_vfov_deg,
                                   tracker_narrow_lens_c1, tracker_narrow_lens_c2,
-                                  tracker_narrow_lens_c3, tracker_narrow_lens_fun)
-    if tracker_narrow_fisheye and _wp["ok"]:
+                                  tracker_narrow_lens_c3, tracker_narrow_lens_fun,
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=tracker_narrow_cam_height)
+    elif tracker_narrow_principal_offset_x or tracker_narrow_principal_offset_y:
+        # rectilinear + principal offset: exact via the warp's pinhole lens
+        _wp = fisheye_warp_params(max(64, int(tracker_narrow_cam_width)),
+                                  tracker_narrow_hfov_deg, tracker_narrow_vfov_deg,
+                                  1.0, 1.0, 0.0, "tan",
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=tracker_narrow_cam_height)
+    if _wp is not None and not _wp["ok"] and (
+            tracker_narrow_principal_offset_x or tracker_narrow_principal_offset_y):
+        log.warning("Narrow tracker: principal-point offset IGNORED — FOV too wide "
+                    "for the warp path (native cubemap has no such input)")
+    if _wp is not None and _wp["ok"]:
         tracker_narrow_img_width = _wp["src_base_w"] * _ss(tracker_narrow_supersample)
         tracker_narrow_img_height = _wp["src_base_h"] * _ss(tracker_narrow_supersample)
         tracker_narrow_hfov_rad = math.radians(_wp["src_hfov_deg"])
         tracker_narrow_fisheye = False
         log.info("Narrow tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
                  tracker_narrow_img_width, tracker_narrow_img_height, _wp["src_hfov_deg"])
+    _wp = None
+    _ppx, _ppy = principal_offset_to_sensor(
+        thermal_principal_offset_x, thermal_principal_offset_y, thermal_cam_roll)
     if thermal_fisheye:
         _wp = fisheye_warp_params(max(64, int(thermal_cam_width)),
                                   thermal_hfov_deg, thermal_vfov_deg,
                                   thermal_lens_c1, thermal_lens_c2,
-                                  thermal_lens_c3, thermal_lens_fun)
-    if thermal_fisheye and _wp["ok"]:
+                                  thermal_lens_c3, thermal_lens_fun,
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=thermal_cam_height)
+    elif thermal_principal_offset_x or thermal_principal_offset_y:
+        # rectilinear + principal offset: exact via the warp's pinhole lens
+        _wp = fisheye_warp_params(max(64, int(thermal_cam_width)),
+                                  thermal_hfov_deg, thermal_vfov_deg,
+                                  1.0, 1.0, 0.0, "tan",
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=thermal_cam_height)
+    if _wp is not None and not _wp["ok"] and (
+            thermal_principal_offset_x or thermal_principal_offset_y):
+        log.warning("Thermal: principal-point offset IGNORED — FOV too wide "
+                    "for the warp path (native cubemap has no such input)")
+    if _wp is not None and _wp["ok"]:
         thermal_img_width = _wp["src_base_w"] * _ss(thermal_supersample)
         thermal_img_height = _wp["src_base_h"] * _ss(thermal_supersample)
         thermal_hfov_rad = math.radians(_wp["src_hfov_deg"])
         thermal_fisheye = False
         log.info("Thermal: fisheye WARP mode (src %dx%d @ %.1f°)",
                  thermal_img_width, thermal_img_height, _wp["src_hfov_deg"])
+    _wp = None
+    _ppx, _ppy = principal_offset_to_sensor(
+        utility_principal_offset_x, utility_principal_offset_y, utility_cam_roll)
     if utility_fisheye:
         _wp = fisheye_warp_params(max(64, int(utility_cam_width)),
                                   utility_hfov_deg, utility_vfov_deg,
                                   utility_lens_c1, utility_lens_c2,
-                                  utility_lens_c3, utility_lens_fun)
-    if utility_fisheye and _wp["ok"]:
+                                  utility_lens_c3, utility_lens_fun,
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=utility_cam_height)
+    elif utility_principal_offset_x or utility_principal_offset_y:
+        # rectilinear + principal offset: exact via the warp's pinhole lens
+        _wp = fisheye_warp_params(max(64, int(utility_cam_width)),
+                                  utility_hfov_deg, utility_vfov_deg,
+                                  1.0, 1.0, 0.0, "tan",
+                                  pp_dx=_ppx, pp_dy=_ppy,
+                                  out_h=utility_cam_height)
+    if _wp is not None and not _wp["ok"] and (
+            utility_principal_offset_x or utility_principal_offset_y):
+        log.warning("Utility: principal-point offset IGNORED — FOV too wide "
+                    "for the warp path (native cubemap has no such input)")
+    if _wp is not None and _wp["ok"]:
         utility_img_width = _wp["src_base_w"] * _ss(utility_supersample)
         utility_img_height = _wp["src_base_h"] * _ss(utility_supersample)
         utility_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1950,19 +2064,34 @@ def start_tracker_bridges(args, pm: ProcessManager):
         # rendered rectilinear (see compute_model_vars) and the bridge
         # synthesises the fisheye output. Params MUST come from the same
         # fisheye_warp_params the model vars used.
+        # Operator upright-view px -> raw sensor frame (same conversion as
+        # compute_model_vars — the two MUST stay in lockstep).
+        _ppx, _ppy = principal_offset_to_sensor(
+            float(getattr(args, f"{rp}_principal_offset_x", 0.0)),
+            float(getattr(args, f"{rp}_principal_offset_y", 0.0)),
+            float(getattr(args, f"{rp}_cam_roll", 0.0)))
+        _hfov = float(getattr(args, f"{rp}_hfov", 90.0))
+        _vfov = float(getattr(args, f"{rp}_vfov", 60.0))
+        wp = None
         if getattr(args, f"{rp}_fisheye", False):
             _c1 = float(getattr(args, f"{rp}_lens_c1", 1.05))
             _c2 = float(getattr(args, f"{rp}_lens_c2", 4.0))
             _c3 = float(getattr(args, f"{rp}_lens_c3", 0.0))
             _fun = sanitize_lens_fun(getattr(args, f"{rp}_lens_fun", "tan"))
-            _hfov = float(getattr(args, f"{rp}_hfov", 90.0))
-            _vfov = float(getattr(args, f"{rp}_vfov", 60.0))
-            wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun)
-        if getattr(args, f"{rp}_fisheye", False) and wp["ok"]:
+            wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun,
+                                     pp_dx=_ppx, pp_dy=_ppy, out_h=out_h)
+        elif _ppx or _ppy:
+            # rectilinear + principal offset rides the warp's pinhole lens —
+            # must mirror the compute_model_vars gating exactly.
+            _c1, _c2, _c3, _fun = 1.0, 1.0, 0.0, "tan"
+            wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun,
+                                     pp_dx=_ppx, pp_dy=_ppy, out_h=out_h)
+        if wp is not None and wp["ok"]:
             cmd.extend(["--warp-fisheye",
                         f"{_c1:g},{_c2:g},{_c3:g},{_fun},{_hfov:g},"
                         f"{wp['virt_h']:g},{wp['src_hfov_deg']:.6f},"
-                        f"{wp['src_base_w']},{wp['src_base_h']}"])
+                        f"{wp['src_base_w']},{wp['src_base_h']},"
+                        f"{_ppx:g},{_ppy:g}"])
         _append_rtsp(cmd, getattr(args, f"{rp}_rtsp", None),
                      getattr(args, f"{rp}_cam_fps", 30),
                      getattr(args, f"{rp}_rtsp_bitrate", "4M"),
@@ -2298,7 +2427,7 @@ def _euler_zyx_to_quat(roll, pitch, yaw):
     """(roll, pitch, yaw) [rad, Gazebo ENU/FLU RPY] → quaternion (w, x, y, z).
 
     Sign conventions that matter here (right-hand rule, body FLU, world ENU):
-    +pitch tips the nose DOWN (forward vector z = −sin(pitch)), +roll lifts the
+    +pitch tips the nose DOWN (forward vector z = -sin(pitch)), +roll lifts the
     LEFT wing (= banking right). Callers must negate accordingly — see
     start_trajectory_thread's attitude block.
     """
@@ -2418,7 +2547,7 @@ def start_trajectory_thread(
                 vert = perturb_vert_amp * math.sin(
                     2.0 * math.pi * perturb_vert_rate * pt + _phase0)
                 # lat > 0 = left of travel: left-perpendicular of the track
-                # heading is (−sin ψ, +cos ψ).
+                # heading is (-sin ψ, +cos ψ).
                 x += -lat * math.sin(yaw)
                 y += lat * math.cos(yaw)
                 z += vert

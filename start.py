@@ -211,6 +211,18 @@ def _render_all_templates(drone, world_name, args):
         tracker_narrow_supersample=getattr(args, "tracker_narrow_supersample", 1),
         thermal_supersample=getattr(args, "thermal_supersample", 1),
         utility_supersample=getattr(args, "utility_supersample", 1),
+        tracker_wide_principal_offset_x=getattr(args, "tracker_wide_principal_offset_x", 0.0),
+        tracker_wide_principal_offset_y=getattr(args, "tracker_wide_principal_offset_y", 0.0),
+        tracker_narrow_principal_offset_x=getattr(args, "tracker_narrow_principal_offset_x", 0.0),
+        tracker_narrow_principal_offset_y=getattr(args, "tracker_narrow_principal_offset_y", 0.0),
+        thermal_principal_offset_x=getattr(args, "thermal_principal_offset_x", 0.0),
+        thermal_principal_offset_y=getattr(args, "thermal_principal_offset_y", 0.0),
+        utility_principal_offset_x=getattr(args, "utility_principal_offset_x", 0.0),
+        utility_principal_offset_y=getattr(args, "utility_principal_offset_y", 0.0),
+        tracker_wide_cam_height=getattr(args, "tracker_wide_cam_height", 480),
+        tracker_narrow_cam_height=getattr(args, "tracker_narrow_cam_height", 480),
+        thermal_cam_height=getattr(args, "thermal_cam_height", 480),
+        utility_cam_height=getattr(args, "utility_cam_height", 480),
         tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
         tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,
@@ -544,6 +556,10 @@ def parse_args():
                           "stream framerate (default: 30)")
     drn.add_argument("--tracker-wide-supersample", type=int, default=1, choices=[1, 2, 3, 4],
                      help="Render the tracker_wide camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
+    drn.add_argument("--tracker-wide-principal-offset-x", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +x right. Exact on warp-capable feeds; ignored (warning) on the native cubemap path (default: 0)")
+    drn.add_argument("--tracker-wide-principal-offset-y", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +y down (default: 0)")
     drn.add_argument("--tracker-wide-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the wide tracker as fisheye (wideanglecamera). "
                           "--no-tracker-wide-fisheye makes it rectilinear (default: fisheye)")
@@ -614,6 +630,10 @@ def parse_args():
                           "stream framerate (default: 30)")
     drn.add_argument("--tracker-narrow-supersample", type=int, default=1, choices=[1, 2, 3, 4],
                      help="Render the tracker_narrow camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
+    drn.add_argument("--tracker-narrow-principal-offset-x", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +x right. Exact on warp-capable feeds; ignored (warning) on the native cubemap path (default: 0)")
+    drn.add_argument("--tracker-narrow-principal-offset-y", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +y down (default: 0)")
     drn.add_argument("--tracker-narrow-fisheye", action=argparse.BooleanOptionalAction, default=False,
                      help="Render the narrow tracker as fisheye (wideanglecamera). Default is "
                           "rectilinear; pass --tracker-narrow-fisheye to enable (default: rectilinear)")
@@ -669,6 +689,10 @@ def parse_args():
                      help="Thermal camera Gazebo update rate / RTSP framerate (default: 30)")
     drn.add_argument("--thermal-supersample", type=int, default=1, choices=[1, 2, 3, 4],
                      help="Render the thermal camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
+    drn.add_argument("--thermal-principal-offset-x", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +x right. Exact on warp-capable feeds; ignored (warning) on the native cubemap path (default: 0)")
+    drn.add_argument("--thermal-principal-offset-y", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +y down (default: 0)")
     drn.add_argument("--thermal-fisheye", action=argparse.BooleanOptionalAction, default=False,
                      help="Render the thermal cam as fisheye (wideanglecamera). Default is "
                           "rectilinear; pass --thermal-fisheye to enable (default: rectilinear)")
@@ -713,6 +737,10 @@ def parse_args():
                      help="Utility camera Gazebo update rate / RTSP framerate (default: 30)")
     drn.add_argument("--utility-supersample", type=int, default=1, choices=[1, 2, 3, 4],
                      help="Render the utility camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
+    drn.add_argument("--utility-principal-offset-x", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +x right. Exact on warp-capable feeds; ignored (warning) on the native cubemap path (default: 0)")
+    drn.add_argument("--utility-principal-offset-y", type=float, default=0.0,
+                     help="Principal-point offset: lens optical centre relative to the frame centre, OUTPUT px, +y down (default: 0)")
     drn.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the utility cam as fisheye (wideanglecamera); "
                           "--no-utility-fisheye makes it rectilinear (default: fisheye)")
