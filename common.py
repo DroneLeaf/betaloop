@@ -940,11 +940,17 @@ def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun):
     dcentre = c1 * f_fish * (fwd(c3 + eps) - fwd(c3 - eps)) / (2 * eps) / c2
     src_base_w = int(math.ceil(2.0 * X * dcentre / 2.0)) * 2
     src_base_h = int(math.ceil(src_base_w * Y / X / 2.0)) * 2
+    src_hfov_deg = math.degrees(2.0 * math.atan(X))
     return {
-        "src_hfov_deg": math.degrees(2.0 * math.atan(X)),
+        "src_hfov_deg": src_hfov_deg,
         "src_base_w": src_base_w,
         "src_base_h": src_base_h,
         "virt_h": virt_h,
+        # A pinhole source degenerates as the covered corner angle grows (the
+        # tan blow-up oversamples the edges; >150 deg is impossible). Past
+        # this the native cubemap path is the better trade — the 114.6 deg
+        # wide-FOV cams (utility/thermal defaults) land there.
+        "ok": src_hfov_deg <= 140.0,
     }
 
 
@@ -1115,44 +1121,48 @@ def compute_model_vars(
     # passes --warp-fisheye built from the SAME fisheye_warp_params call).
     # Native wideanglecamera supersampling is a no-op — sdformat caps the
     # cubemap at 2048, and the extra sensor pixels just re-sample it.
-    if tracker_wide_fisheye and _ss(tracker_wide_supersample) >= 2:
+    if tracker_wide_fisheye:
         _wp = fisheye_warp_params(max(64, int(tracker_wide_cam_width)),
                                   tracker_wide_hfov_deg, tracker_wide_vfov_deg,
                                   tracker_wide_lens_c1, tracker_wide_lens_c2,
                                   tracker_wide_lens_c3, tracker_wide_lens_fun)
+    if tracker_wide_fisheye and _wp["ok"]:
         tracker_wide_img_width = _wp["src_base_w"] * _ss(tracker_wide_supersample)
         tracker_wide_img_height = _wp["src_base_h"] * _ss(tracker_wide_supersample)
         tracker_wide_hfov_rad = math.radians(_wp["src_hfov_deg"])
         tracker_wide_fisheye = False
         log.info("Wide tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
                  tracker_wide_img_width, tracker_wide_img_height, _wp["src_hfov_deg"])
-    if tracker_narrow_fisheye and _ss(tracker_narrow_supersample) >= 2:
+    if tracker_narrow_fisheye:
         _wp = fisheye_warp_params(max(64, int(tracker_narrow_cam_width)),
                                   tracker_narrow_hfov_deg, tracker_narrow_vfov_deg,
                                   tracker_narrow_lens_c1, tracker_narrow_lens_c2,
                                   tracker_narrow_lens_c3, tracker_narrow_lens_fun)
+    if tracker_narrow_fisheye and _wp["ok"]:
         tracker_narrow_img_width = _wp["src_base_w"] * _ss(tracker_narrow_supersample)
         tracker_narrow_img_height = _wp["src_base_h"] * _ss(tracker_narrow_supersample)
         tracker_narrow_hfov_rad = math.radians(_wp["src_hfov_deg"])
         tracker_narrow_fisheye = False
         log.info("Narrow tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
                  tracker_narrow_img_width, tracker_narrow_img_height, _wp["src_hfov_deg"])
-    if thermal_fisheye and _ss(thermal_supersample) >= 2:
+    if thermal_fisheye:
         _wp = fisheye_warp_params(max(64, int(thermal_cam_width)),
                                   thermal_hfov_deg, thermal_vfov_deg,
                                   thermal_lens_c1, thermal_lens_c2,
                                   thermal_lens_c3, thermal_lens_fun)
+    if thermal_fisheye and _wp["ok"]:
         thermal_img_width = _wp["src_base_w"] * _ss(thermal_supersample)
         thermal_img_height = _wp["src_base_h"] * _ss(thermal_supersample)
         thermal_hfov_rad = math.radians(_wp["src_hfov_deg"])
         thermal_fisheye = False
         log.info("Thermal: fisheye WARP mode (src %dx%d @ %.1f°)",
                  thermal_img_width, thermal_img_height, _wp["src_hfov_deg"])
-    if utility_fisheye and _ss(utility_supersample) >= 2:
+    if utility_fisheye:
         _wp = fisheye_warp_params(max(64, int(utility_cam_width)),
                                   utility_hfov_deg, utility_vfov_deg,
                                   utility_lens_c1, utility_lens_c2,
                                   utility_lens_c3, utility_lens_fun)
+    if utility_fisheye and _wp["ok"]:
         utility_img_width = _wp["src_base_w"] * _ss(utility_supersample)
         utility_img_height = _wp["src_base_h"] * _ss(utility_supersample)
         utility_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1940,8 +1950,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         # rendered rectilinear (see compute_model_vars) and the bridge
         # synthesises the fisheye output. Params MUST come from the same
         # fisheye_warp_params the model vars used.
-        if (getattr(args, f"{rp}_fisheye", False)
-                and int(getattr(args, f"{rp}_supersample", 1)) >= 2):
+        if getattr(args, f"{rp}_fisheye", False):
             _c1 = float(getattr(args, f"{rp}_lens_c1", 1.05))
             _c2 = float(getattr(args, f"{rp}_lens_c2", 4.0))
             _c3 = float(getattr(args, f"{rp}_lens_c3", 0.0))
@@ -1949,6 +1958,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
             _hfov = float(getattr(args, f"{rp}_hfov", 90.0))
             _vfov = float(getattr(args, f"{rp}_vfov", 60.0))
             wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun)
+        if getattr(args, f"{rp}_fisheye", False) and wp["ok"]:
             cmd.extend(["--warp-fisheye",
                         f"{_c1:g},{_c2:g},{_c3:g},{_fun},{_hfov:g},"
                         f"{wp['virt_h']:g},{wp['src_hfov_deg']:.6f},"
