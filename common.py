@@ -778,13 +778,17 @@ def _cam_mount_rpy(pitch_deg, roll_deg, rot_y_deg=0.0, rot_x_deg=0.0):
 
     The nominal mount is what the templates always had: the SDF pose rotation
     ``Rz(0)·Ry(pitch)·Rx(roll)``. The two extra rotations simulate an
-    improperly SEATED sensor: applied AFTER the mount, about the mounted
-    camera's OWN axes, in this order —
+    improperly SEATED sensor: applied AFTER the mount, about the DRONE BODY
+    axes in the operator convention (x forward, y positive to the drone's
+    RIGHT — the same frame as the camera offset params), rot_about_y first,
+    then rot_about_x. Signs verified empirically against the operator's
+    expectation (2026-09-03, twice-revised): +rot_about_y pitches the camera
+    assembly nose-UP, +rot_about_x banks it LEFT —
 
-        R = Ry(pitch) · Rx(roll) · Ry(rot_about_y) · Rx(rot_about_x)
+        R = Rx(−rot_about_x) · Ry(−rot_about_y) · Ry(pitch) · Rx(roll)
 
-    (post-multiplication = intrinsic rotations in the already-rotated frame;
-    the order is part of the spec). A single SDF <pose> can't express the
+    (pre-multiplication = extrinsic rotations about the fixed body axes; the
+    order is part of the spec). A single SDF <pose> can't express the
     composition directly, so R is re-extracted as Z-Y-X euler — any (r,p,y)
     triple that rebuilds R is equivalent for Gazebo. With both deltas zero the
     inputs are returned unchanged so existing renders stay byte-identical.
@@ -804,8 +808,8 @@ def _cam_mount_rpy(pitch_deg, roll_deg, rot_y_deg=0.0, rot_x_deg=0.0):
         return tuple(tuple(sum(A[i][k] * B[k][j] for k in range(3))
                            for j in range(3)) for i in range(3))
 
-    R = _mul(_mul(_ry(math.radians(pitch_deg)), _rx(math.radians(roll_deg))),
-             _mul(_ry(math.radians(rot_y_deg)), _rx(math.radians(rot_x_deg))))
+    R = _mul(_mul(_rx(-math.radians(rot_x_deg)), _ry(-math.radians(rot_y_deg))),
+             _mul(_ry(math.radians(pitch_deg)), _rx(math.radians(roll_deg))))
     # Z-Y-X extraction (R = Rz(y)·Ry(p)·Rx(r)), with the gimbal-lock branch:
     # at |sin p| = 1 roll/yaw are degenerate — pick roll' = 0 and put the
     # remaining rotation in yaw; the rebuilt matrix is still exactly R.
@@ -1052,7 +1056,7 @@ def compute_model_vars(
         # sensor pose is body FLU metres (y positive LEFT), hence /1000 and the
         # y negation. SDF pose translation is in the PARENT (drone body) frame,
         # i.e. applied after — unrotated by — the camera tilt/twist.
-        "tracker_wide_cam_x": tracker_wide_cam_offset_x_mm / 1000.0,
+        "tracker_wide_cam_x": -tracker_wide_cam_offset_x_mm / 1000.0 + 0.0,  # sign empirical, see _cam_mount_rpy
         "tracker_wide_cam_y": -tracker_wide_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "tracker_wide_hfov_rad": tracker_wide_hfov_rad,
         "tracker_wide_img_width": tracker_wide_img_width,
@@ -1064,7 +1068,7 @@ def compute_model_vars(
         "tracker_narrow_cam_pitch_rad": tracker_narrow_cam_pitch_rad,
         "tracker_narrow_cam_roll_rad": tracker_narrow_cam_roll_rad,
         "tracker_narrow_cam_yaw_rad": tracker_narrow_cam_yaw_rad,
-        "tracker_narrow_cam_x": tracker_narrow_cam_offset_x_mm / 1000.0,
+        "tracker_narrow_cam_x": -tracker_narrow_cam_offset_x_mm / 1000.0 + 0.0,  # sign empirical, see _cam_mount_rpy
         "tracker_narrow_cam_y": -tracker_narrow_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "tracker_narrow_hfov_rad": tracker_narrow_hfov_rad,
         "tracker_narrow_img_width": tracker_narrow_img_width,
@@ -1076,7 +1080,7 @@ def compute_model_vars(
         "thermal_cam_pitch_rad": thermal_cam_pitch_rad,
         "thermal_cam_roll_rad": thermal_cam_roll_rad,
         "thermal_cam_yaw_rad": thermal_cam_yaw_rad,
-        "thermal_cam_x": thermal_cam_offset_x_mm / 1000.0,
+        "thermal_cam_x": -thermal_cam_offset_x_mm / 1000.0 + 0.0,  # sign empirical, see _cam_mount_rpy
         "thermal_cam_y": -thermal_cam_offset_y_mm / 1000.0 + 0.0,  # +0.0 kills -0.0
         "thermal_hfov_rad": thermal_hfov_rad,
         "thermal_img_width": thermal_img_width,

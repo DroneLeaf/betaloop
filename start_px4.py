@@ -183,9 +183,9 @@ def parse_args():
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
     sim.add_argument("--tracker-wide-cam-rotation-about-y", type=float, default=0.0,
-                     help="Wide tracker camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+                     help="Wide tracker camera sensor-seating misalignment: rotation about the DRONE BODY y axis (positive = nose UP) in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
     sim.add_argument("--tracker-wide-cam-rotation-about-x", type=float, default=0.0,
-                     help="Wide tracker camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
+                     help="Wide tracker camera sensor-seating misalignment: rotation about the DRONE BODY x axis (forward, positive banks LEFT) in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--tracker-wide-hfov", type=float, default=114.6,
                      help="Wide tracker camera horizontal FOV in degrees (default: 114.6)")
     sim.add_argument("--tracker-wide-vfov", type=float, default=98.9,
@@ -210,9 +210,9 @@ def parse_args():
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
     sim.add_argument("--tracker-narrow-cam-rotation-about-y", type=float, default=0.0,
-                     help="Narrow tracker camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+                     help="Narrow tracker camera sensor-seating misalignment: rotation about the DRONE BODY y axis (positive = nose UP) in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
     sim.add_argument("--tracker-narrow-cam-rotation-about-x", type=float, default=0.0,
-                     help="Narrow tracker camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
+                     help="Narrow tracker camera sensor-seating misalignment: rotation about the DRONE BODY x axis (forward, positive banks LEFT) in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--tracker-narrow-cam-roll", type=float, default=0.0,
                      help="Narrow tracker camera roll in degrees (default: 0)")
     sim.add_argument("--tracker-narrow-hfov", type=float, default=45.0,
@@ -239,9 +239,9 @@ def parse_args():
                           "(y positive to the drone's RIGHT); unrotated by the camera "
                           "tilt/twist (default: 0)")
     sim.add_argument("--thermal-cam-rotation-about-y", type=float, default=0.0,
-                     help="Thermal camera sensor-seating misalignment: rotation about the mounted camera's Y axis in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
+                     help="Thermal camera sensor-seating misalignment: rotation about the DRONE BODY y axis (positive = nose UP) in deg, applied AFTER tilt/twist (before rot-about-x) (default: 0)")
     sim.add_argument("--thermal-cam-rotation-about-x", type=float, default=0.0,
-                     help="Thermal camera sensor-seating misalignment: rotation about the mounted camera's X axis in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
+                     help="Thermal camera sensor-seating misalignment: rotation about the DRONE BODY x axis (forward, positive banks LEFT) in deg, applied AFTER tilt/twist and rot-about-y (default: 0)")
     sim.add_argument("--thermal-cam-roll", type=float, default=0.0,
                      help="Thermal camera roll in degrees (default: 0)")
     sim.add_argument("--thermal-hfov", type=float, default=114.6,

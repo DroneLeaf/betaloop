@@ -536,8 +536,20 @@ any new motion so Ctrl-C exits cleanly.
 - `compute_model_vars` gained `<cam>_cam_rotation_about_y_deg` /
   `_about_x_deg` for wide/narrow/thermal (defaults 0): an improperly-SEATED
   sensor, i.e. rotations applied AFTER the mount tilt/twist, about the
-  MOUNTED camera's own axes, **y first then x** (the order is the spec):
-  `R = Ry(pitch)·Rx(roll)·Ry(rot_y)·Rx(rot_x)`.
+  **DRONE BODY axes in the operator convention** (x forward, y positive
+  RIGHT — the same frame as the offset params), **y first then x** (the
+  order is the spec): `R = Rx(−rot_x)·Ry(−rot_y)·Ry(pitch)·Rx(roll)`
+  (extrinsic pre-multiplication). Signs verified empirically by the
+  operator (final, after two flips): +rot_y = nose UP, +rot_x = bank LEFT;
+  the emitted SDF x offset is also NEGATED (`-offset_x_mm/1000`, like y) —
+  all four signs are the operator's observed convention, do not "fix" them
+  back to axis-label intuition.
+  **(2026-09-03b — REVISED from the first cut, which post-multiplied about
+  the mounted sensor's own axes. That made rot-about-x a roll around the
+  boresight — near-zero image shift for a centred target — while
+  rot-about-y tilted the boresight at full px/° rate; user spec is body
+  frame, matching the offsets. With body axes both rotations deflect an
+  up-looking camera's boresight 1:1.)**
 - A single SDF `<pose>` can't express the composition, so `_cam_mount_rpy`
   composes the matrix and re-extracts Z-Y-X euler (gimbal-lock branch for the
   ±90 mounts); the sensor pose's previously-hardcoded yaw slot is now
