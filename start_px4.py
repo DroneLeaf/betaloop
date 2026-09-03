@@ -196,6 +196,8 @@ def parse_args():
                      help="Wide tracker camera output height in pixels (default: 480)")
     sim.add_argument("--tracker-wide-cam-fps", type=int, default=30,
                      help="Wide tracker camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--tracker-wide-supersample", type=int, default=1, choices=[1, 2, 3, 4],
+                     help="Render the tracker_wide camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
     sim.add_argument("--tracker-wide-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the wide tracker as fisheye (wideanglecamera); "
                           "--no-tracker-wide-fisheye makes it rectilinear (default: fisheye)")
@@ -225,6 +227,8 @@ def parse_args():
                      help="Narrow tracker camera output height in pixels (default: 480)")
     sim.add_argument("--tracker-narrow-cam-fps", type=int, default=30,
                      help="Narrow tracker camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--tracker-narrow-supersample", type=int, default=1, choices=[1, 2, 3, 4],
+                     help="Render the tracker_narrow camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
     sim.add_argument("--tracker-narrow-fisheye", action=argparse.BooleanOptionalAction, default=False,
                      help="Render the narrow tracker as fisheye (wideanglecamera); default "
                           "rectilinear, pass --tracker-narrow-fisheye to enable (default: rectilinear)")
@@ -254,6 +258,8 @@ def parse_args():
                      help="Thermal camera output height in pixels (default: 480)")
     sim.add_argument("--thermal-cam-fps", type=int, default=30,
                      help="Thermal camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--thermal-supersample", type=int, default=1, choices=[1, 2, 3, 4],
+                     help="Render the thermal camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
     sim.add_argument("--thermal-fisheye", action=argparse.BooleanOptionalAction, default=False,
                      help="Render the thermal cam as fisheye (wideanglecamera); default "
                           "rectilinear, pass --thermal-fisheye to enable (default: rectilinear)")
@@ -275,6 +281,8 @@ def parse_args():
                      help="Utility camera output height in pixels (default: 480)")
     sim.add_argument("--utility-cam-fps", type=int, default=30,
                      help="Utility camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--utility-supersample", type=int, default=1, choices=[1, 2, 3, 4],
+                     help="Render the utility camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
     sim.add_argument("--utility-fisheye", action=argparse.BooleanOptionalAction, default=True,
                      help="Render the utility cam as fisheye (wideanglecamera); "
                           "--no-utility-fisheye makes it rectilinear (default: fisheye)")
@@ -525,6 +533,10 @@ def main():
         tracker_wide_cam_width=args.tracker_wide_cam_width,
         tracker_wide_cam_fps=getattr(args, "tracker_wide_cam_fps", 30),
         tracker_wide_fisheye=getattr(args, "tracker_wide_fisheye", True),
+        tracker_wide_supersample=getattr(args, "tracker_wide_supersample", 1),
+        tracker_narrow_supersample=getattr(args, "tracker_narrow_supersample", 1),
+        thermal_supersample=getattr(args, "thermal_supersample", 1),
+        utility_supersample=getattr(args, "utility_supersample", 1),
         tracker_narrow_enabled=getattr(args, "tracker_narrow_cam", False),
         tracker_narrow_cam_pitch=args.tracker_narrow_cam_pitch,
         tracker_narrow_cam_roll=args.tracker_narrow_cam_roll,

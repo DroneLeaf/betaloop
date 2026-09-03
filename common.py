@@ -892,6 +892,62 @@ def lens_kwargs_from_args(args) -> dict:
     return out
 
 
+def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun):
+    """Source-camera geometry for the fisheye-from-rectilinear warp.
+
+    gz's native wideanglecamera samples a cubemap that sdformat caps at
+    env_texture_size 2048 and renders without AA, so sub-pixel geometry
+    speckles and supersampling never reaches it. In warp mode the sensor is a
+    plain RECTILINEAR camera (renders at any size, supersampling works) and
+    gz_image_bridge produces the fisheye output itself via the same gz lens
+    model r = c1·f·fun(θ/c2 + c3) (scale_to_hfov semantics). This helper
+    picks the pinhole source: its FOV covers the fisheye frame's corner
+    directions (2% margin) and its base (supersample=1) size matches the
+    fisheye output's centre angular density, so the warp never upsamples.
+
+    Returns dict(src_hfov_deg, src_base_w, src_base_h, virt_h) — virt_h is
+    the UNSTRETCHED fisheye height at the output width (the bridge folds the
+    vertical output stretch into its warp LUT).
+    """
+    fun = sanitize_lens_fun(fun)
+    fwd = {"id": lambda a: a, "sin": math.sin, "tan": math.tan}[fun]
+    inv = {"id": lambda r: r,
+           "sin": lambda r: math.asin(max(-1.0, min(1.0, r))),
+           "tan": math.atan}[fun]
+    virt_h = _img_height(width, hfov_deg, vfov_deg, fisheye=True,
+                         c2=c2, c3=c3, fun=fun)
+    th_e = math.radians(hfov_deg) / 2.0
+    f_fish = (width / 2.0) / (c1 * fwd(th_e / c2 + c3))
+    # Tangent-plane extents over the fisheye frame border (worst-case corner).
+    X = Y = 0.0
+    hw, hh = width / 2.0, virt_h / 2.0
+    border = ([(-hw + i * width / 64.0, s * hh) for i in range(65) for s in (-1, 1)]
+              + [(s * hw, -hh + i * virt_h / 64.0) for i in range(65) for s in (-1, 1)])
+    for vx, vy in border:
+        r = math.hypot(vx, vy)
+        if r < 1e-9:
+            continue
+        th = c2 * (inv(r / (c1 * f_fish)) - c3)
+        t = math.tan(max(0.0, th))
+        X = max(X, t * abs(vx) / r)
+        Y = max(Y, t * abs(vy) / r)
+    X *= 1.02
+    Y *= 1.02
+    # Centre angular density of the fisheye output (px/rad), matched at the
+    # pinhole centre (its density only grows off-axis, so source >= output
+    # everywhere).
+    eps = 1e-5
+    dcentre = c1 * f_fish * (fwd(c3 + eps) - fwd(c3 - eps)) / (2 * eps) / c2
+    src_base_w = int(math.ceil(2.0 * X * dcentre / 2.0)) * 2
+    src_base_h = int(math.ceil(src_base_w * Y / X / 2.0)) * 2
+    return {
+        "src_hfov_deg": math.degrees(2.0 * math.atan(X)),
+        "src_base_w": src_base_w,
+        "src_base_h": src_base_h,
+        "virt_h": virt_h,
+    }
+
+
 def compute_model_vars(
     drone: str,
     ctw: float | None = None,
@@ -964,6 +1020,17 @@ def compute_model_vars(
     utility_lens_c2: float = 4.0,
     utility_lens_c3: float = 0.0,
     utility_lens_fun: str = "tan",
+    # Supersampling factor per tracker-style feed: the SENSOR renders at
+    # factor x the configured width/height and gz_image_bridge area-averages
+    # back down to the configured output size (its --out-width/-height are
+    # unchanged), turning the extra samples into anti-aliasing. Sub-pixel
+    # geometry (thin trees/target at range) otherwise speckles — the render
+    # is a point sample per pixel. Downstream consumers see the same frame
+    # size as ever. 1 = off (legacy behaviour, byte-identical).
+    tracker_wide_supersample: int = 1,
+    tracker_narrow_supersample: int = 1,
+    thermal_supersample: int = 1,
+    utility_supersample: int = 1,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -999,9 +1066,14 @@ def compute_model_vars(
     fpv_hfov_rad = math.radians(fpv_hfov_deg)
     tracker_wide_hfov_rad = math.radians(tracker_wide_hfov_deg)
     tracker_narrow_hfov_rad = math.radians(tracker_narrow_hfov_deg)
+    def _ss(f):
+        return max(1, min(4, int(f)))
     fpv_img_width = max(64, int(fpv_cam_width))
-    tracker_wide_img_width = max(64, int(tracker_wide_cam_width))
-    tracker_narrow_img_width = max(64, int(tracker_narrow_cam_width))
+    # Supersampled sensor dims: heights below derive from these widths, so a
+    # factor here scales both axes; the bridge --out dims stay at the
+    # configured size and its area filter folds the extra samples down.
+    tracker_wide_img_width = max(64, int(tracker_wide_cam_width)) * _ss(tracker_wide_supersample)
+    tracker_narrow_img_width = max(64, int(tracker_narrow_cam_width)) * _ss(tracker_narrow_supersample)
     fpv_img_height = _img_height(fpv_img_width, fpv_hfov_deg, fpv_vfov_deg)
     # Fisheye feeds derive height through the actual lens curve so the VFOV is
     # the TRUE vertical coverage (the pinhole tan formula under-sizes it).
@@ -1020,7 +1092,7 @@ def compute_model_vars(
         thermal_cam_pitch, thermal_cam_roll,
         thermal_cam_rotation_about_y_deg, thermal_cam_rotation_about_x_deg)
     thermal_hfov_rad = math.radians(thermal_hfov_deg)
-    thermal_img_width = max(64, int(thermal_cam_width))
+    thermal_img_width = max(64, int(thermal_cam_width)) * _ss(thermal_supersample)
     thermal_img_height = _img_height(
         thermal_img_width, thermal_hfov_deg, thermal_vfov_deg,
         fisheye=thermal_fisheye, c2=thermal_lens_c2,
@@ -1030,11 +1102,86 @@ def compute_model_vars(
     utility_cam_pitch_rad = math.radians(utility_cam_pitch)
     utility_cam_roll_rad = math.radians(utility_cam_roll)
     utility_hfov_rad = math.radians(utility_hfov_deg)
-    utility_img_width = max(64, int(utility_cam_width))
+    utility_img_width = max(64, int(utility_cam_width)) * _ss(utility_supersample)
     utility_img_height = _img_height(
         utility_img_width, utility_hfov_deg, utility_vfov_deg,
         fisheye=utility_fisheye, c2=utility_lens_c2,
         c3=utility_lens_c3, fun=utility_lens_fun)
+
+    # Fisheye + supersample >= 2 → WARP MODE: the sensor becomes a plain
+    # rectilinear camera at the warp-source geometry (gz renders that at any
+    # size, so the supersample actually reaches the scene geometry) and
+    # gz_image_bridge synthesises the fisheye output (start_tracker_bridges
+    # passes --warp-fisheye built from the SAME fisheye_warp_params call).
+    # Native wideanglecamera supersampling is a no-op — sdformat caps the
+    # cubemap at 2048, and the extra sensor pixels just re-sample it.
+    if tracker_wide_fisheye and _ss(tracker_wide_supersample) >= 2:
+        _wp = fisheye_warp_params(max(64, int(tracker_wide_cam_width)),
+                                  tracker_wide_hfov_deg, tracker_wide_vfov_deg,
+                                  tracker_wide_lens_c1, tracker_wide_lens_c2,
+                                  tracker_wide_lens_c3, tracker_wide_lens_fun)
+        tracker_wide_img_width = _wp["src_base_w"] * _ss(tracker_wide_supersample)
+        tracker_wide_img_height = _wp["src_base_h"] * _ss(tracker_wide_supersample)
+        tracker_wide_hfov_rad = math.radians(_wp["src_hfov_deg"])
+        tracker_wide_fisheye = False
+        log.info("Wide tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
+                 tracker_wide_img_width, tracker_wide_img_height, _wp["src_hfov_deg"])
+    if tracker_narrow_fisheye and _ss(tracker_narrow_supersample) >= 2:
+        _wp = fisheye_warp_params(max(64, int(tracker_narrow_cam_width)),
+                                  tracker_narrow_hfov_deg, tracker_narrow_vfov_deg,
+                                  tracker_narrow_lens_c1, tracker_narrow_lens_c2,
+                                  tracker_narrow_lens_c3, tracker_narrow_lens_fun)
+        tracker_narrow_img_width = _wp["src_base_w"] * _ss(tracker_narrow_supersample)
+        tracker_narrow_img_height = _wp["src_base_h"] * _ss(tracker_narrow_supersample)
+        tracker_narrow_hfov_rad = math.radians(_wp["src_hfov_deg"])
+        tracker_narrow_fisheye = False
+        log.info("Narrow tracker: fisheye WARP mode (src %dx%d @ %.1f°)",
+                 tracker_narrow_img_width, tracker_narrow_img_height, _wp["src_hfov_deg"])
+    if thermal_fisheye and _ss(thermal_supersample) >= 2:
+        _wp = fisheye_warp_params(max(64, int(thermal_cam_width)),
+                                  thermal_hfov_deg, thermal_vfov_deg,
+                                  thermal_lens_c1, thermal_lens_c2,
+                                  thermal_lens_c3, thermal_lens_fun)
+        thermal_img_width = _wp["src_base_w"] * _ss(thermal_supersample)
+        thermal_img_height = _wp["src_base_h"] * _ss(thermal_supersample)
+        thermal_hfov_rad = math.radians(_wp["src_hfov_deg"])
+        thermal_fisheye = False
+        log.info("Thermal: fisheye WARP mode (src %dx%d @ %.1f°)",
+                 thermal_img_width, thermal_img_height, _wp["src_hfov_deg"])
+    if utility_fisheye and _ss(utility_supersample) >= 2:
+        _wp = fisheye_warp_params(max(64, int(utility_cam_width)),
+                                  utility_hfov_deg, utility_vfov_deg,
+                                  utility_lens_c1, utility_lens_c2,
+                                  utility_lens_c3, utility_lens_fun)
+        utility_img_width = _wp["src_base_w"] * _ss(utility_supersample)
+        utility_img_height = _wp["src_base_h"] * _ss(utility_supersample)
+        utility_hfov_rad = math.radians(_wp["src_hfov_deg"])
+        utility_fisheye = False
+        log.info("Utility: fisheye WARP mode (src %dx%d @ %.1f°)",
+                 utility_img_width, utility_img_height, _wp["src_hfov_deg"])
+
+    def _env_texture_size(width, hfov_deg):
+        """Cubemap face size for a wideanglecamera (fisheye) feed.
+
+        gz renders the fisheye by resampling a cubemap whose faces each cover
+        90 deg at env_texture_size px. If that source angular density is below
+        the OUTPUT's (width/hfov px/deg), the image is upsampled and looks
+        soft — a narrow-FOV fisheye at the old hardcoded 512 (5.7 px/deg vs
+        the narrow feed's 20.3) was visibly abysmal. Size the face so source
+        density >= output density: 90 * width/hfov, rounded up to a power of
+        two (GPU-friendly), floored at 512 and capped at 2048 — the cap is
+        NOT a perf choice: **sdformat rejects env_texture_size > 2048**
+        (Param.cc "greater than the maximum allowed value of [2048]"), and
+        an over-cap value kills the whole world load. Width here is the
+        (possibly supersampled) SENSOR width; past the cap a supersampled
+        fisheye still anti-aliases (multiple bilinear taps averaged per
+        output pixel) but gains no extra source detail.
+        """
+        need = 90.0 * width / max(1.0, hfov_deg)
+        size = 512
+        while size < need and size < 2048:
+            size *= 2
+        return size
 
     dd = ref["default_damping"]
     do = damping_overrides or {}
@@ -1113,6 +1260,15 @@ def compute_model_vars(
         "utility_lens_c2": float(utility_lens_c2),
         "utility_lens_c3": float(utility_lens_c3),
         "utility_lens_fun": sanitize_lens_fun(utility_lens_fun),
+        # Cubemap face size per fisheye feed (matches each output's px/deg)
+        "tracker_wide_env_texture_size": _env_texture_size(
+            tracker_wide_img_width, tracker_wide_hfov_deg),
+        "tracker_narrow_env_texture_size": _env_texture_size(
+            tracker_narrow_img_width, tracker_narrow_hfov_deg),
+        "thermal_env_texture_size": _env_texture_size(
+            thermal_img_width, thermal_hfov_deg),
+        "utility_env_texture_size": _env_texture_size(
+            utility_img_width, utility_hfov_deg),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
         "standoff_height": _standoff, "leg_z": leg_z,
@@ -1780,6 +1936,23 @@ def start_tracker_bridges(args, pm: ProcessManager):
         out_h = int(getattr(args, f"{enable_attr}_height", 480))
         cmd = [IMAGE_BRIDGE, topic, "--no-osd", *extra_flags,
                "--out-width", str(out_w), "--out-height", str(out_h), disp]
+        # Fisheye WARP mode (fisheye + supersample >= 2): the sensor is
+        # rendered rectilinear (see compute_model_vars) and the bridge
+        # synthesises the fisheye output. Params MUST come from the same
+        # fisheye_warp_params the model vars used.
+        if (getattr(args, f"{rp}_fisheye", False)
+                and int(getattr(args, f"{rp}_supersample", 1)) >= 2):
+            _c1 = float(getattr(args, f"{rp}_lens_c1", 1.05))
+            _c2 = float(getattr(args, f"{rp}_lens_c2", 4.0))
+            _c3 = float(getattr(args, f"{rp}_lens_c3", 0.0))
+            _fun = sanitize_lens_fun(getattr(args, f"{rp}_lens_fun", "tan"))
+            _hfov = float(getattr(args, f"{rp}_hfov", 90.0))
+            _vfov = float(getattr(args, f"{rp}_vfov", 60.0))
+            wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun)
+            cmd.extend(["--warp-fisheye",
+                        f"{_c1:g},{_c2:g},{_c3:g},{_fun},{_hfov:g},"
+                        f"{wp['virt_h']:g},{wp['src_hfov_deg']:.6f},"
+                        f"{wp['src_base_w']},{wp['src_base_h']}"])
         _append_rtsp(cmd, getattr(args, f"{rp}_rtsp", None),
                      getattr(args, f"{rp}_cam_fps", 30),
                      getattr(args, f"{rp}_rtsp_bitrate", "4M"),
