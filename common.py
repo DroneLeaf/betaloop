@@ -895,20 +895,25 @@ def lens_kwargs_from_args(args) -> dict:
 def principal_offset_to_sensor(pp_x, pp_y, roll_deg):
     """Operator principal-point offset -> RAW sensor-frame pixels.
 
+    NOTE roll_deg here is the PHYSICAL sim mount roll — the NEGATION of the
+    operator-facing twist since the 2026-09-03 convention flip (callers
+    negate at the boundary; this function's empirics are physical).
+
     The operator types the offset in the UPRIGHT (de-twisted) view of the
-    feed, in the GC's aim convention: **+x right, +y UP** (the GC draws
-    AIM +0,-100 BELOW the crosshair — its y is up). The warp applies the
-    offset in the raw sensor frame (image y down, twisted by the camera
-    roll), so the input y is negated and then rotated by R(-roll) —
-    displayed = R(roll)*raw, verified against both +-90 rigs and the live
-    SHM stream (2026-09-03). E.g. narrow (-90 twist) typed (-100,-100) →
-    optical centre bottom-left of the upright view; the same input on the
-    wide (+90) lands the same place. Roll-0 cams get just the y negation.
+    feed (operator-confirmed 2026-09-03): **+x UP on screen — which is
+    toward the drone's BACK (aft) in the de-twisted view — and +y RIGHT
+    on screen.**
+    Mapped to screen coords (right+, down+) as (sx, sy) = (pp_y, -pp_x),
+    then into the raw sensor frame (twisted by the camera roll) via
+    R(-roll) — displayed = R(roll)*raw, verified against both +-90 rigs and
+    the live SHM stream. E.g. narrow typed (-100,-100) -> optical centre
+    bottom-left of the upright view (same as the prior x-right/y-up
+    convention on symmetric diagonals; asymmetric inputs differ).
     """
     a = math.radians(roll_deg)
     ca, sa = math.cos(a), math.sin(a)
-    py = -pp_y                       # operator +y UP -> image +y down
-    return (pp_x * ca + py * sa, -pp_x * sa + py * ca)
+    sx, sy = pp_y, -pp_x             # operator (+x up, +y right) -> screen
+    return (sx * ca + sy * sa, -sx * sa + sy * ca)
 
 
 def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun,
@@ -1104,6 +1109,17 @@ def compute_model_vars(
     leg_z = -(_standoff / 2 + ref["leg_attach_offset"])
 
     fpv_cam_pitch_rad = math.radians(cam_pitch)
+    # TWIST CONVENTION (flipped 2026-09-03): the operator-facing camera twist
+    # (UI "Twist", the --<cam>-cam-roll flags, the per-drone stores) now uses
+    # the SAME sign as gc.py / leaf-tracker's de-twist rotation. The physical
+    # sim mount roll is its NEGATION — applied once here (and mirrored in
+    # start_tracker_bridges for the warp spec); everything below operates on
+    # the physical value. `+ 0.0` kills -0.0 so zero-twist renders stay
+    # byte-identical.
+    tracker_wide_cam_roll = -tracker_wide_cam_roll + 0.0
+    tracker_narrow_cam_roll = -tracker_narrow_cam_roll + 0.0
+    thermal_cam_roll = -thermal_cam_roll + 0.0
+    utility_cam_roll = -utility_cam_roll + 0.0
     # Tracker-style cams: the pose rpy is the NOMINAL mount composed with the
     # sensor-seating misalignment (rot-about-y then rot-about-x, applied after
     # tilt/twist in the mounted frame — see _cam_mount_rpy). Zero misalignment
@@ -2069,7 +2085,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         _ppx, _ppy = principal_offset_to_sensor(
             float(getattr(args, f"{rp}_principal_offset_x", 0.0)),
             float(getattr(args, f"{rp}_principal_offset_y", 0.0)),
-            float(getattr(args, f"{rp}_cam_roll", 0.0)))
+            -float(getattr(args, f"{rp}_cam_roll", 0.0)) + 0.0)
         _hfov = float(getattr(args, f"{rp}_hfov", 90.0))
         _vfov = float(getattr(args, f"{rp}_vfov", 60.0))
         wp = None
