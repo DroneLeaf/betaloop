@@ -1683,6 +1683,39 @@ def render_vis_templates(
 
 # ── Process Manager ───────────────────────────────────────────────────────────
 
+def boost_gz_priority(pid: int, nice_level: int = -10) -> None:
+    """Raise the gz server's CPU priority over the rest of the stack.
+
+    The single ogre2 render thread is the camera-fps bottleneck; under a
+    loaded desktop (ground station, LeafFC, tracker) its render-submission
+    time roughly doubles and the two-camera pass overruns the sim step
+    (root CLAUDE.md 2026-09-16b). Delegates to boost_sim_priority.sh via
+    `sudo -n` (NOPASSWD sudoers line, HOST_SETUP §8) because raising
+    priority — and the autogroup write that makes it effective on stock
+    Ubuntu — needs root. Best-effort: without the sudoers line this logs a
+    hint and the sim runs at normal priority as before.
+    """
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "boost_sim_priority.sh")
+    if not os.path.isfile(script):
+        log.warning("boost_sim_priority.sh not found next to betaloop/ — gz runs at normal priority")
+        return
+    try:
+        r = subprocess.run(["sudo", "-n", script, str(pid), str(nice_level)],
+                           capture_output=True, text=True, timeout=10)
+    except Exception as e:  # sudo missing, timeout — never fail the launch
+        log.warning("gz priority boost failed (%s) — gz runs at normal priority", e)
+        return
+    if r.returncode == 0:
+        log.info("%s", (r.stdout or "").strip() or f"gz pid {pid} boosted to nice {nice_level}")
+    else:
+        log.warning(
+            "gz priority boost unavailable (%s). Camera fps may sag under load. "
+            "Enable it with:\n  echo \"$(whoami) ALL=(root) NOPASSWD: %s\" | "
+            "sudo tee -a /etc/sudoers.d/simcontrol-bridges && sudo visudo -c",
+            (r.stderr or r.stdout or "sudo -n refused").strip().splitlines()[-1], script)
+
+
 class ProcessManager:
     """Track child processes for clean shutdown."""
 

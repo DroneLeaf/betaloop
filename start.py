@@ -55,6 +55,7 @@ from common import (
     TARGET_REFS,
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
+    boost_gz_priority,
     cleanup_before_start,
     add_lens_args,
     compute_model_vars,
@@ -1222,7 +1223,8 @@ def main():
         " (GUI)" if args.gazebo else " (headless)",
         os.path.basename(world_path),
     )
-    pm.spawn(gz_args)
+    gz_proc = pm.spawn(gz_args)
+    boost_gz_priority(gz_proc.pid)
     time.sleep(8)
 
     # ── 3. bf_sim_bridge (Simulink dynamics — the only backend) ──

@@ -603,3 +603,20 @@ any new motion so Ctrl-C exits cleanly.
   what pushed a two-camera 90 Hz pass past the 11.1 ms step on a loaded CPU
   (root CLAUDE.md 2026-09-16b). Turning it on costs every enabled camera,
   including the tracker feeds that never see a shadow.
+
+## Session Addendum (2026-09-16c) — `boost_gz_priority` (gz server nice −10)
+
+- `common.boost_gz_priority(pid, nice_level=-10)` runs
+  `sudo -n <repo>/boost_sim_priority.sh <pid> <nice>` right after each
+  launcher's `pm.spawn(gz_args)` (both start.py and start_px4.py; the name
+  is in both from-common import lists). Root is needed twice over: negative
+  renice, and the `/proc/<pid>/autogroup` write that makes nice effective
+  across terminal sessions on stock Ubuntu (sched_autogroup_enabled=1).
+- Best-effort by design: no sudoers line → one log.warning with the exact
+  enable command, launch continues at normal priority. Never raises.
+- The script refuses pids whose cmdline lacks "gz". `gz sim -s` is ONE
+  process (the ruby CLI does not fork a separate server), so boosting
+  `gz_proc.pid` covers it; the render thread spawns later during world
+  load and inherits the boosted nice from the main thread.
+- Sudoers line (HOST_SETUP §8, /etc/sudoers.d/simcontrol-bridges):
+  `<user> ALL=(root) NOPASSWD: $HOME/betaflight-docker/boost_sim_priority.sh`
