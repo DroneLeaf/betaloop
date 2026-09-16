@@ -1092,6 +1092,10 @@ def compute_model_vars(
     tracker_narrow_cam_height: int = 480,
     thermal_cam_height: int = 480,
     utility_cam_height: int = 480,
+    # ShmCameraExportPlugin is emitted into the model only in shm transport mode:
+    # it RENDERS the cameras itself (gz-sensors skips un-subscribed cameras), so
+    # pairing it with topic-mode bridges would render everything twice.
+    camera_shm_export: bool = True,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -1411,6 +1415,7 @@ def compute_model_vars(
             utility_img_width, utility_hfov_deg),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
+        "camera_shm_export": bool(camera_shm_export),
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),
@@ -1466,6 +1471,7 @@ def compute_world_vars(
     clouds: bool = True,
     cloud_density: float = 0.7,
     cloud_darkness: float = 0.0,
+    scene_shadows: bool = False,
     pedestal_radius: float | None = None,
     pedestal_height: float | None = None,
     target_drone: str = DEFAULT_TARGET_DRONE,
@@ -1484,6 +1490,7 @@ def compute_world_vars(
     pilot_heading_deg: float | None = None,
     terrain_theme: str | None = None,
     sky_brightness: float | None = None,
+    sim_step: float | None = None,
 ) -> dict:
     """Compute world template variables from drone and world settings.
 
@@ -1582,6 +1589,9 @@ def compute_world_vars(
         "clouds": clouds,
         "cloud_density": float(cloud_density),
         "cloud_darkness": float(cloud_darkness),
+        # Shadow-map pass costs ~30% of each camera's render time; off keeps a
+        # two-camera 90 fps pass inside the sim step even on a loaded CPU.
+        "scene_shadows": bool(scene_shadows),
         "terrain_theme": _theme,
         "ground_color": _ground_color,
         # Far ground: a UV-tiled quad textured with the terrain's own grass, so
@@ -1597,6 +1607,10 @@ def compute_world_vars(
         "target_model_uri": tref["model_uri"],
         "target_visual_pose": tref["visual_pose"],
         "target_scale": _target_scale_str,
+        # Vis-world physics step: 1/max(camera fps) (launchers compute it); a
+        # render pass with all cameras due must fit in one step or the lock-
+        # stepped sim droops. None -> historical 0.004.
+        "sim_step": float(sim_step) if sim_step else 0.004,
         "target_bbox": _target_bbox,
         "target_model_name": _target_model_name,
         "target_primitive": _target_primitive,
@@ -1948,7 +1962,7 @@ def start_fpv_bridge(args, pm: ProcessManager, osd_args=None):
     # SHM + RTSP are always active; the SDL2 window (--display) is added ONLY
     # when not headless. --no-display runs the bridge truly headless (no SDL2
     # window/overhead, no SDL2 build dependency) — better performance.
-    bridge_cmd = [IMAGE_BRIDGE, topic]
+    bridge_cmd = [IMAGE_BRIDGE, topic, *_shm_source_flags(args)]
     cam_width = int(getattr(args, "fpv_cam_width", getattr(args, "cam_width", 640)))
     cam_height = int(getattr(args, "fpv_cam_height", getattr(args, "cam_height", 480)))
     bridge_cmd.extend(["--out-width", str(cam_width), "--out-height", str(cam_height)])
@@ -2008,7 +2022,7 @@ def start_chase_bridge(args, pm: ProcessManager):
         return None
 
     log.info("Chase topic: %s", chase_topic)
-    chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
+    chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd", *_shm_source_flags(args)]
     # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
     chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
     chase_cmd.append("--no-display" if getattr(args, "no_display", False) else "--display")
@@ -2037,6 +2051,18 @@ def _append_rtsp(cmd, rtsp_url, fps, bitrate, crf, preset, tune, width, height, 
     log.info("%s RTSP stream → %s (%sfps, %s, crf=%s, gop=%s, codec=%s, preset=%s, tune=%s, res=%s)",
              label, rtsp_url, fps, bitrate, crf, gop or "auto", codec, preset, tune,
              f"{w}x{h}" if w > 0 and h > 0 else "camera")
+
+
+def _shm_source_flags(args):
+    """gz_image_bridge input mode. Default 'shm': the drone model carries
+    ShmCameraExportPlugin, which copies every camera's frame straight into
+    /gz_cam_<model>_<sensor>_raw on the render thread, and the bridge reads
+    that with --shm-source instead of subscribing to the image topic. With NO
+    subscriber gz-sensors skips the protobuf/ZMQ publish that otherwise halves
+    the camera rate (measured 2026-09-15: two 854x480 tracker cams 45 -> 90
+    fps). 'topic' is the legacy path (also what a world-level camera such as
+    target_chase_cam.sdf.j2's rig uses — the plugin is a MODEL system)."""
+    return ["--shm-source"] if getattr(args, "camera_transport", "shm") == "shm" else []
 
 
 def start_tracker_bridges(args, pm: ProcessManager):
@@ -2074,7 +2100,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         # Per-feed attrs are uniform: <enable_attr>_width/_height, <rp>_cam_fps, <rp>_rtsp*.
         out_w = int(getattr(args, f"{enable_attr}_width", 640))
         out_h = int(getattr(args, f"{enable_attr}_height", 480))
-        cmd = [IMAGE_BRIDGE, topic, "--no-osd", *extra_flags,
+        cmd = [IMAGE_BRIDGE, topic, "--no-osd", *extra_flags, *_shm_source_flags(args),
                "--out-width", str(out_w), "--out-height", str(out_h), disp]
         # Fisheye WARP mode (fisheye + supersample >= 2): the sensor is
         # rendered rectilinear (see compute_model_vars) and the bridge

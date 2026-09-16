@@ -49,6 +49,7 @@ from common import (
     DEFAULT_TARGET_MESH_COLOR,
     DRONE_REFS,
     IMAGE_BRIDGE,
+    _shm_source_flags,
     SIMULINK_LIB,
     TARGET_MESH_COLORS,
     TARGET_REFS,
@@ -211,6 +212,7 @@ def _render_all_templates(drone, world_name, args):
         tracker_narrow_supersample=getattr(args, "tracker_narrow_supersample", 1),
         thermal_supersample=getattr(args, "thermal_supersample", 1),
         utility_supersample=getattr(args, "utility_supersample", 1),
+        camera_shm_export=(getattr(args, "camera_transport", "shm") == "shm"),
         tracker_wide_principal_offset_x=getattr(args, "tracker_wide_principal_offset_x", 0.0),
         tracker_wide_principal_offset_y=getattr(args, "tracker_wide_principal_offset_y", 0.0),
         tracker_narrow_principal_offset_x=getattr(args, "tracker_narrow_principal_offset_x", 0.0),
@@ -265,6 +267,14 @@ def _render_all_templates(drone, world_name, args):
              model_vars["standoff_height"], args.cam_pitch)
 
     # ── World variables (shared helper) ──
+        # Sim step = 1/max(enabled camera fps): the render pass with every due
+    # camera must fit in one step (lock-stepped sim) — measured 88 -> 90.0 fps
+    # for two 90 Hz trackers. Never coarser than 30 Hz, never finer than 4 ms.
+    _cam_fps = [float(getattr(args, a, 0) or 0) for a, en in (
+        ("fpv_cam_fps", "pilot_cam"), ("tracker_wide_cam_fps", "tracker_wide_cam"),
+        ("tracker_narrow_cam_fps", "tracker_narrow_cam"), ("thermal_cam_fps", "thermal_cam"),
+        ("utility_cam_fps", "utility_cam")) if getattr(args, en, False)]
+    _sim_step = min(max(1.0 / max(_cam_fps), 0.004), 1.0 / 30.0) if _cam_fps and max(_cam_fps) > 0 else 0.004
     world_vars = compute_world_vars(
         drone, world_name,
         target_altitude=args.target_altitude,
@@ -279,6 +289,7 @@ def _render_all_templates(drone, world_name, args):
         clouds=getattr(args, "clouds", True),
         cloud_density=getattr(args, "cloud_density", 0.7),
         cloud_darkness=getattr(args, "cloud_darkness", 0.0),
+        scene_shadows=getattr(args, "scene_shadows", False),
         pedestal_radius=getattr(args, "pedestal_radius", None),
         pedestal_height=getattr(args, "pedestal_height", None),
         target_drone=getattr(args, "target_drone", DEFAULT_TARGET_DRONE),
@@ -297,6 +308,7 @@ def _render_all_templates(drone, world_name, args):
         pilot_heading_deg=getattr(args, "pilot_heading_deg", None),
         terrain_theme=getattr(args, "terrain_theme", None),
         sky_brightness=getattr(args, "sky_brightness", None),
+        sim_step=_sim_step,
     )
 
     # ── Render vis model + vis world (shared helper) ──
@@ -368,6 +380,20 @@ def parse_args():
         action="store_false",
         default=True,
         help="Disable clouds in the world skybox (default: clouds on)",
+    )
+    sim.add_argument(
+        "--scene-shadows",
+        dest="scene_shadows",
+        action="store_true",
+        default=False,
+        help="Render sun shadows (costs ~30%% of each camera's render time; "
+             "default: off)",
+    )
+    sim.add_argument(
+        "--no-scene-shadows",
+        dest="scene_shadows",
+        action="store_false",
+        help="Disable sun shadows (the default)",
     )
     sim.add_argument(
         "--cloud-density",
@@ -735,6 +761,8 @@ def parse_args():
                      help="Utility camera output height in px (default: 480)")
     drn.add_argument("--utility-cam-fps", type=int, default=30,
                      help="Utility camera Gazebo update rate / RTSP framerate (default: 30)")
+    drn.add_argument("--camera-transport", choices=["shm", "topic"], default="shm",
+                     help="How gz_image_bridge receives camera frames: shm = in-process ShmCameraExportPlugin segments (no gz-transport image publish; 2 tracker cams 45 -> 90 fps), topic = legacy gz-transport subscription (default: shm)")
     drn.add_argument("--utility-supersample", type=int, default=1, choices=[1, 2, 3, 4],
                      help="Render the utility camera at Nx the configured size; gz_image_bridge area-averages back down (anti-aliasing for sub-pixel geometry). 1=off (default)")
     drn.add_argument("--utility-principal-offset-x", type=float, default=0.0,
@@ -1330,7 +1358,7 @@ def main():
             # SHM + RTSP are always active; the SDL2 window (--display) is added
             # ONLY when not headless. --no-display runs the bridge truly headless.
             bridge_cmd = [
-                IMAGE_BRIDGE, topic,
+                IMAGE_BRIDGE, topic, *_shm_source_flags(args),
                 "--osd", "--msp-port", str(args.msp_port),
                 "--cam-pitch", str(args.cam_pitch),
                 "--out-width", str(args.fpv_cam_width),
@@ -1406,7 +1434,7 @@ def main():
             # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
             if chase_topic:
                 log.info("Starting chase camera bridge (no OSD)")
-                chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd"]
+                chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd", *_shm_source_flags(args)]
                 chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
                 chase_cmd.append("--no-display" if args.no_display else "--display")
                 chase_bridge_proc = pm.spawn(

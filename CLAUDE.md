@@ -563,3 +563,43 @@ any new motion so Ctrl-C exits cleanly.
   rebuild the spec to 5e-10.
 - Flags `--<feed>-cam-rotation-about-y/-x` on BOTH launchers, passed through
   both call sites; launch.sh/launch_px4.sh forward via catch-all (headers doc'd).
+
+## Session Addendum (2026-09-15) — `--camera-transport {shm,topic}` (default shm)
+
+- Both launchers: `--camera-transport` (default **shm**). `common._shm_source_flags(args)`
+  returns `["--shm-source"]` for shm, `[]` for topic, and is spliced into ALL
+  five `gz_image_bridge` argv builders — `start.py` pilot (BF OSD) bridge +
+  chase, `common.start_fpv_bridge`'s pilot bridge (PX4 path), `common`'s chase
+  helper, and `start_tracker_bridges`. The 3 drone vis templates now carry
+  `ShmCameraExportPlugin`, rendered on every launch, so no other wiring is
+  needed (launch.sh catch-all forwards the flag; supervisor emits nothing —
+  the default is shm). Result: 2 tracker cams at 854×480 go 45 → 90 fps.
+- `topic` = legacy gz-transport subscription; required for a camera that is
+  NOT in a drone model (the standalone `target_chase/` rig world drives its
+  own bridge and is untouched).
+
+## Session Addendum (2026-09-16) — `sim_step` = 1/max(enabled camera fps)
+
+- Both launchers compute `_sim_step = clamp(1/max(fps of ENABLED cameras),
+  4 ms, 1/30 s)` right before `compute_world_vars(..., sim_step=)`, which
+  emits `sim_step` (default 0.004 when None) into the 5 world templates'
+  `<max_step_size>`. Reason: the Sensors system lock-steps the sim to the
+  render thread; with ShmCameraExportPlugin a pass where every camera is due
+  must fit inside one step or RTF droops (88 → 90.0 fps measured). Vis-only
+  worlds — the step paces rendering + external pose application only, never
+  the Simulink dynamics. `camera_shm_export` (True in shm transport) gates the
+  export plugin in the drone templates.
+
+## Session Addendum (2026-09-16b) — `--scene-shadows` (default OFF)
+
+- `compute_world_vars(scene_shadows: bool = False)` emits `scene_shadows`
+  (consumed by the 5 world templates' `<scene><shadows>` + sun
+  `<cast_shadows>`). Both launchers: `--scene-shadows` (store_true, default
+  False) and `--no-scene-shadows` (store_false, same dest — so the supervisor
+  can emit either explicitly); forwarded as
+  `scene_shadows=getattr(args, "scene_shadows", False)` next to the cloud
+  kwargs. `launch.sh`/`launch_px4.sh` forward it via the catch-all.
+- Why off: the shadow-map pass is ~30% of every camera's render time and is
+  what pushed a two-camera 90 Hz pass past the 11.1 ms step on a loaded CPU
+  (root CLAUDE.md 2026-09-16b). Turning it on costs every enabled camera,
+  including the tracker feeds that never see a shadow.
