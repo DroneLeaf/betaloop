@@ -56,6 +56,8 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     boost_gz_priority,
+    DEFAULT_OGRE_WORKERS,
+    gz_spawn_env,
     cleanup_before_start,
     add_lens_args,
     compute_model_vars,
@@ -68,10 +70,15 @@ from common import (
     read_image_meta,
     render_template,
     render_vis_templates,
+    render_fleet_models,
+    start_udp_fanout,
+    fleet_camera_topic,
+    TARGET_MIRROR_PORT,
     setup_gazebo_env,
     start_balloon_thread,
     start_static_target_thread,
     start_trajectory_thread,
+    load_extra_targets,
     TERRAIN_THEMES,
     TRAJ_TYPES,
     start_tracker_bridges,
@@ -113,6 +120,7 @@ DEFAULT_DRONE = "rocket_drone"
 #   trajectory_drive — drive the target along a parametric trajectory (moving_target)
 WORLD_MAP = {
     "moving_target": {
+        "fleet_capable": True,   # drone_stack fleet mode (start.py --fleet-world)
         "sim_world":    "rocket_drone_moving_target_vis.sdf",
         "gz_name":      "fpv_moving_target",
         "target_model": "moving_target",
@@ -150,6 +158,7 @@ WORLD_MAP = {
         "static_target": True,
     },
     "pilot_controlled_target": {
+        "fleet_capable": True,
         "sim_world":    "rocket_drone_pilot_target_vis.sdf",
         "gz_name":      "pilot_target",
         "target_model": "pilot_target",
@@ -214,6 +223,7 @@ def _render_all_templates(drone, world_name, args):
         thermal_supersample=getattr(args, "thermal_supersample", 1),
         utility_supersample=getattr(args, "utility_supersample", 1),
         camera_shm_export=(getattr(args, "camera_transport", "shm") == "shm"),
+        gpu_warp=getattr(args, "gpu_warp", True),
         tracker_wide_principal_offset_x=getattr(args, "tracker_wide_principal_offset_x", 0.0),
         tracker_wide_principal_offset_y=getattr(args, "tracker_wide_principal_offset_y", 0.0),
         tracker_narrow_principal_offset_x=getattr(args, "tracker_narrow_principal_offset_x", 0.0),
@@ -305,12 +315,16 @@ def _render_all_templates(drone, world_name, args):
         corner_radius=getattr(args, "corner_radius", None),
         traj_start_pos=getattr(args, "traj_start_pos", None),
         traj_reverse=getattr(args, "traj_reverse", False),
+        extra_targets=getattr(args, "extra_target_specs", []),
         player_heading_deg=getattr(args, "player_heading_deg", None),
         pilot_heading_deg=getattr(args, "pilot_heading_deg", None),
         terrain_theme=getattr(args, "terrain_theme", None),
         sky_brightness=getattr(args, "sky_brightness", None),
         sim_step=_sim_step,
     )
+
+    if getattr(args, "fleet_spec", None):
+        render_fleet_models(drone, model_vars, world_vars, args.fleet_spec)
 
     # ── Render vis model + vis world (shared helper) ──
     render_vis_templates(drone, world_name, WORLD_MAP, model_vars, world_vars)
@@ -357,6 +371,26 @@ def parse_args():
 
     # ── Simulation Settings ──────────────────────────────────────────────
     sim = parser.add_argument_group("Simulation settings")
+    sim.add_argument(
+        "--fleet-world",
+        default=None,
+        metavar="SPEC.json",
+        help="Multi-drone fleet mode: render the drones/launchers described by "
+             "this world spec (written by drone_stack/drone_ctl.py fleet up) and "
+             "run ONLY the shared world (Gazebo + target). Betaflight, the "
+             "Simulink bridge and the camera bridges run in each drone's "
+             "container instead.",
+    )
+    sim.add_argument(
+        "--fleet-target-mirror",
+        action="append",
+        default=None,
+        metavar="[HOST:]PORT",
+        help="Fleet mode: also relay the target ground truth (normally only "
+             "fanned out to every drone's :9018) to this host-side address — "
+             "e.g. 127.0.0.1:9019 for a host sitl_redis_bridge that emits the "
+             "target as MAVLink for the ground station. Repeatable.",
+    )
     sim.add_argument(
         "--world",
         default=DEFAULT_WORLD,
@@ -762,6 +796,10 @@ def parse_args():
                      help="Utility camera output height in px (default: 480)")
     drn.add_argument("--utility-cam-fps", type=int, default=30,
                      help="Utility camera Gazebo update rate / RTSP framerate (default: 30)")
+    drn.add_argument("--gpu-warp", action=argparse.BooleanOptionalAction, default=True,
+                     help="Fisheye warp on the GPU inside ShmCameraExportPlugin (the bridge only copies) for warp-mode feeds with supersample 1 and shm transport; --no-gpu-warp = the CPU warp in gz_image_bridge (default: on)")
+    drn.add_argument("--ogre-workers", type=int, default=DEFAULT_OGRE_WORKERS,
+                     help="Cap OgreNext's scene-manager worker threads in the gz server (stock = one per logical core; every camera render waits on all of them). 2 measured best on a loaded 6c/12t laptop; 0 = stock (default: %(default)s)")
     drn.add_argument("--camera-transport", choices=["shm", "topic"], default="shm",
                      help="How gz_image_bridge receives camera frames: shm = in-process ShmCameraExportPlugin segments (no gz-transport image publish; 2 tracker cams 45 -> 90 fps), topic = legacy gz-transport subscription (default: shm)")
     drn.add_argument("--utility-supersample", type=int, default=1, choices=[1, 2, 3, 4],
@@ -1000,6 +1038,13 @@ def parse_args():
                      help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
     wld.add_argument("--traj-reverse", action="store_true",
                      help="Reverse the target's travel direction along the loop")
+    wld.add_argument("--extra-targets", default=None, metavar="TARGETS.json",
+                     help="Targets 2..N (moving_target): JSON list of per-target "
+                          "trajectory specs (keys as in leaf-sim-ui's moving_target "
+                          "store: traj_type, traj_rotation_deg, traj_offset_ew/ns, "
+                          "oval_ew_len, oval_ns_len, corner_radius, traj_start_pos, "
+                          "traj_reverse, target_speed [km/h], target_altitude [m], "
+                          "traj_perturb*). Same airframe as target 1.")
     wld.add_argument("--traj-perturb", action="store_true",
                      help="Add sinusoidal perturbations about the nominal trajectory: a "
                           "lateral weave + an altitude oscillation, with a flown attitude "
@@ -1147,6 +1192,11 @@ def parse_args():
         or _entry.get("default_target")
         or DEFAULT_TARGET_DRONE
     )
+    # Targets 2..N (moving_target): flown by the trajectory thread, rendered by
+    # the world template, tracked by the OSD bridge. Ignored in other worlds.
+    args.extra_target_specs = (load_extra_targets(args.extra_targets)
+                               if args.extra_targets and _entry.get("trajectory_drive")
+                               else [])
 
     # shake_test: place the look-at balloon close and near drone height by
     # default (it's just something to look at while the drone shakes).
@@ -1161,6 +1211,26 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.fleet_spec = None
+    if args.fleet_world:
+        import json
+        with open(args.fleet_world) as f:
+            args.fleet_spec = json.load(f)
+        if not WORLD_MAP[args.world].get("fleet_capable"):
+            log.error("--fleet-world: world %r has no fleet support (use %s)", args.world,
+                      ", ".join(k for k, v in WORLD_MAP.items() if v.get("fleet_capable")))
+            sys.exit(1)
+        # Fleet drones carry only the tracker cameras (wide/narrow, as enabled):
+        # no pilot/chase camera is ever rendered — the render thread is the
+        # fleet's bottleneck.
+        if getattr(args, "pilot_cam", False) or getattr(args, "chase_cam", False):
+            log.info("Fleet mode: pilot and chase cameras disabled (tracker cameras only)")
+        args.pilot_cam = False
+        args.chase_cam = False
+        if args.fleet_spec.get("drone_type", args.drone) != args.drone:
+            log.error("--fleet-world: fleet drone type %r != --drone %r",
+                      args.fleet_spec.get("drone_type"), args.drone)
+            sys.exit(1)
 
     if args.cam_width is not None:
         args.fpv_cam_width = args.cam_width
@@ -1223,237 +1293,290 @@ def main():
         " (GUI)" if args.gazebo else " (headless)",
         os.path.basename(world_path),
     )
-    gz_proc = pm.spawn(gz_args)
+    gz_proc = pm.spawn(gz_args, env=gz_spawn_env(args.ogre_workers))
     boost_gz_priority(gz_proc.pid)
     time.sleep(8)
 
-    # ── 3. bf_sim_bridge (Simulink dynamics — the only backend) ──
-    if not os.path.isfile(args.bridge):
-        log.error("bf_sim_bridge not found: %s", args.bridge)
-        pm.shutdown()
-        sys.exit(1)
-    if not os.path.isfile(args.sim_lib):
-        log.error("libinterface_simulink.so not found: %s", args.sim_lib)
-        pm.shutdown()
-        sys.exit(1)
-
-    bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
-    if args.params:
-        bridge_args += ["--params", os.path.abspath(args.params)]
-    if args.telem_port:
-        bridge_args += ["--telem-port", str(args.telem_port)]
-    if args.launcher_port:
-        bridge_args += ["--launcher-port", str(args.launcher_port)]
-    if args.home_lat is not None:
-        bridge_args += ["--home-lat", str(args.home_lat)]
-    if args.home_lon is not None:
-        bridge_args += ["--home-lon", str(args.home_lon)]
-    if args.home_alt is not None:
-        bridge_args += ["--home-alt", str(args.home_alt)]
-    # Kinematic shake-table: on for the shake_test world, or forced via --shake.
-    if world_entry.get("shake") or getattr(args, "shake", False):
-        bridge_args += ["--shake"]
-        if getattr(args, "shake_gated", False):
-            bridge_args += ["--shake-gated"]
-        bridge_args += [
-            "--shake-amp-x", str(args.shake_amp_x),
-            "--shake-amp-y", str(args.shake_amp_y),
-            "--shake-amp-z", str(args.shake_amp_z),
-            "--shake-rate-x", str(args.shake_rate_x),
-            "--shake-rate-y", str(args.shake_rate_y),
-            "--shake-rate-z", str(args.shake_rate_z),
-            "--shake-phase-x-deg", str(args.shake_phase_x_deg),
-            "--shake-phase-y-deg", str(args.shake_phase_y_deg),
-            "--shake-phase-z-deg", str(args.shake_phase_z_deg),
-            "--shake-roll-amp-deg", str(args.shake_roll_amp_deg),
-            "--shake-pitch-amp-deg", str(args.shake_pitch_amp_deg),
-            "--shake-yaw-amp-deg", str(args.shake_yaw_amp_deg),
-            "--shake-rate-roll", str(args.shake_rate_roll),
-            "--shake-rate-pitch", str(args.shake_rate_pitch),
-            "--shake-rate-yaw", str(args.shake_rate_yaw),
-            "--shake-phase-roll-deg", str(args.shake_phase_roll_deg),
-            "--shake-phase-pitch-deg", str(args.shake_phase_pitch_deg),
-            "--shake-phase-yaw-deg", str(args.shake_phase_yaw_deg),
-        ]
-        log.info("Shake-table enabled (transl amp=[%.3g,%.3g,%.3g]m; "
-                 "rot roll/pitch/yaw=[%.3g,%.3g,%.3g]deg)",
-                 args.shake_amp_x, args.shake_amp_y, args.shake_amp_z,
-                 args.shake_roll_amp_deg, args.shake_pitch_amp_deg,
-                 args.shake_yaw_amp_deg)
-    log.info("Starting bf_sim_bridge (Simulink dynamics)")
-    bf_bridge_proc = pm.spawn(bridge_args)
-    time.sleep(2)
-    if bf_bridge_proc.poll() is not None:
-        log.error("bf_sim_bridge exited immediately (code %d)", bf_bridge_proc.returncode)
-        pm.shutdown()
-        sys.exit(1)
-
-    # ── 4. Betaflight SITL ──
-    if not os.path.isfile(args.elf):
-        log.error("Betaflight ELF not found: %s", args.elf)
-        pm.shutdown()
-        sys.exit(1)
-
-    elf_dir = os.path.dirname(args.elf)
-    log.info("Starting Betaflight SITL")
-    pm.spawn([args.elf], cwd=elf_dir)
-
-    log.info("Waiting for Betaflight CLI port (5761) …")
-    if not wait_for_port("127.0.0.1", 5761, timeout=20):
-        log.warning("Betaflight CLI port not ready — continuing anyway")
+    bf_bridge_proc = bridge_proc = chase_bridge_proc = None
+    fanout_stop = threading.Event()
+    if args.fleet_spec:
+        # ── 3F. Fleet mode: the drones (BF SITL, Simulink bridge, LeafFC) run
+        # in their own containers and stream poses straight to their model's
+        # ports. The world side only relays the target ground truth to every
+        # drone's sitl_redis_bridge.
+        mirror = [(d["ip"], TARGET_MIRROR_PORT) for d in args.fleet_spec["drones"]]
+        for hp in args.fleet_target_mirror or []:
+            # Extra copies for host-side consumers (e.g. a host
+            # sitl_redis_bridge emitting the target as MAVLink for the GS):
+            # the fanout itself holds 127.0.0.1:TARGET_MIRROR_PORT.
+            h, _, p = hp.rpartition(":")
+            mirror.append((h or "127.0.0.1", int(p)))
+        start_udp_fanout(fanout_stop, TARGET_MIRROR_PORT, mirror)
+        print("\n  Fleet world %r up — %d drones, %d launchers" % (
+            gz_world_name, len(args.fleet_spec["drones"]), len(args.fleet_spec["launchers"])))
+        for d in args.fleet_spec["drones"]:
+            print("    %-10s %-15s pose:%d rotors:%d  at E=%.2f N=%.2f" % (
+                d["name"], d["ip"], d["pose_port"], d["rotor_port"], d["x"], d["y"]))
+        print()
+        # Cameras: every drone model exports its cameras to its OWN SHM segments
+        # (/gz_cam_drone_<id>_<sensor>_raw — named after the model), and one
+        # bridge per drone per enabled feed turns them into the usual
+        # /gz_cam_drone_<id>_<sensor>(_osd) segments that the drone's
+        # leaf-tracker (shm_path in its own DB) and the ground station read.
+        if not args.no_video:
+            for d in args.fleet_spec["drones"]:
+                if getattr(args, "pilot_cam", True):
+                    cmd = [IMAGE_BRIDGE,
+                           fleet_camera_topic(gz_world_name, d["name"], "fpv_cam"),
+                           *_shm_source_flags(args),
+                           # OSD reads MSP from THIS drone's BF SITL
+                           "--osd", "--msp-host", d["ip"], "--msp-port", str(args.msp_port),
+                           "--cam-pitch", str(args.cam_pitch),
+                           "--out-width", str(args.fpv_cam_width),
+                           "--out-height", str(args.fpv_cam_height), "--no-display"]
+                    if world_entry.get("target_model"):
+                        cmd += ["--target-model", world_entry["target_model"]]
+                        for t in args.extra_target_specs:
+                            cmd += ["--extra-target-model", t["name"]]
+                        if world_entry.get("target_link"):
+                            cmd += ["--target-link", world_entry["target_link"]]
+                        if world_vars.get("target_bbox"):
+                            cmd += ["--target-bbox", world_vars["target_bbox"]]
+                    pm.spawn(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                start_tracker_bridges(args, pm, model=d["name"], gz_world=gz_world_name,
+                                      rtsp_suffix=f"_{d['id']}")
+            log.info("Fleet cameras: bridges started for %d drones (SHM /gz_cam_drone_<id>_*)",
+                     len(args.fleet_spec["drones"]))
     else:
-        # Runtime guard: ensure BOOT_GRACE never blocks arming in SITL.
-        send_bf_cli_commands(["set pwr_on_arm_grace = 0"])
-    time.sleep(3)
-
-    # MSP Virtual Radio
-    if not args.no_transmitter:
-        radio_index = os.path.join(MSP_RADIO_HOME, "index.js")
-        if os.path.isfile(radio_index):
-            log.info("Starting MSP Virtual Radio")
-            pm.spawn(["node", radio_index])
-        else:
-            log.warning("MSP Virtual Radio not found at %s — skipping", radio_index)
-    time.sleep(2)
-
-    # ── 5. Video pipeline ──
-    topic = None
-    chase_topic = None
-    bridge_proc = None
-    chase_bridge_proc = None
-    width = height = 0
-
-    if args.no_video:
-        log.info("Video pipeline disabled (--no-video)")
-    else:
-        if not os.path.isfile(IMAGE_BRIDGE):
-            log.error(
-                "gz_image_bridge not found at %s — run build_plugin.sh",
-                IMAGE_BRIDGE,
-            )
+        # ── 3. bf_sim_bridge (Simulink dynamics — the only backend) ──
+        if not os.path.isfile(args.bridge):
+            log.error("bf_sim_bridge not found: %s", args.bridge)
+            pm.shutdown()
+            sys.exit(1)
+        if not os.path.isfile(args.sim_lib):
+            log.error("libinterface_simulink.so not found: %s", args.sim_lib)
             pm.shutdown()
             sys.exit(1)
 
-        # ── FPV (pilot) camera — rectilinear, OSD always on. Only when enabled. ──
-        if not args.pilot_cam:
-            log.info("Pilot camera disabled (--no-pilot-cam) — skipping FPV/OSD feed")
-        else:
-            if args.fpv_topic:
-                topic = args.fpv_topic
-                log.info("Using explicit FPV topic: %s", topic)
-            else:
-                log.info("Discovering FPV camera image topic …")
-                fpv_candidates = list_camera_topics(name_hint="fpv_cam")
-                if fpv_candidates:
-                    log.info("FPV candidates: %s", ", ".join(fpv_candidates))
-                topic = discover_camera_topic(
-                    name_hint="fpv_cam",
-                    timeout=30,
-                    model_hint=args.topic_model_hint,
-                )
-                if not topic:
-                    log.error("Could not find FPV camera topic")
-                    pm.shutdown()
-                    sys.exit(1)
-                log.info("Found FPV camera topic: %s", topic)
-
-            # SHM + RTSP are always active; the SDL2 window (--display) is added
-            # ONLY when not headless. --no-display runs the bridge truly headless.
-            bridge_cmd = [
-                IMAGE_BRIDGE, topic, *_shm_source_flags(args),
-                "--osd", "--msp-port", str(args.msp_port),
-                "--cam-pitch", str(args.cam_pitch),
-                "--out-width", str(args.fpv_cam_width),
-                "--out-height", str(args.fpv_cam_height),
+        bridge_args = [args.bridge, "--sim-lib", os.path.abspath(args.sim_lib)]
+        if args.params:
+            bridge_args += ["--params", os.path.abspath(args.params)]
+        if args.telem_port:
+            bridge_args += ["--telem-port", str(args.telem_port)]
+        if args.launcher_port:
+            bridge_args += ["--launcher-port", str(args.launcher_port)]
+        if args.home_lat is not None:
+            bridge_args += ["--home-lat", str(args.home_lat)]
+        if args.home_lon is not None:
+            bridge_args += ["--home-lon", str(args.home_lon)]
+        if args.home_alt is not None:
+            bridge_args += ["--home-alt", str(args.home_alt)]
+        # Kinematic shake-table: on for the shake_test world, or forced via --shake.
+        if world_entry.get("shake") or getattr(args, "shake", False):
+            bridge_args += ["--shake"]
+            if getattr(args, "shake_gated", False):
+                bridge_args += ["--shake-gated"]
+            bridge_args += [
+                "--shake-amp-x", str(args.shake_amp_x),
+                "--shake-amp-y", str(args.shake_amp_y),
+                "--shake-amp-z", str(args.shake_amp_z),
+                "--shake-rate-x", str(args.shake_rate_x),
+                "--shake-rate-y", str(args.shake_rate_y),
+                "--shake-rate-z", str(args.shake_rate_z),
+                "--shake-phase-x-deg", str(args.shake_phase_x_deg),
+                "--shake-phase-y-deg", str(args.shake_phase_y_deg),
+                "--shake-phase-z-deg", str(args.shake_phase_z_deg),
+                "--shake-roll-amp-deg", str(args.shake_roll_amp_deg),
+                "--shake-pitch-amp-deg", str(args.shake_pitch_amp_deg),
+                "--shake-yaw-amp-deg", str(args.shake_yaw_amp_deg),
+                "--shake-rate-roll", str(args.shake_rate_roll),
+                "--shake-rate-pitch", str(args.shake_rate_pitch),
+                "--shake-rate-yaw", str(args.shake_rate_yaw),
+                "--shake-phase-roll-deg", str(args.shake_phase_roll_deg),
+                "--shake-phase-pitch-deg", str(args.shake_phase_pitch_deg),
+                "--shake-phase-yaw-deg", str(args.shake_phase_yaw_deg),
             ]
-            bridge_cmd.append("--no-display" if args.no_display else "--display")
+            log.info("Shake-table enabled (transl amp=[%.3g,%.3g,%.3g]m; "
+                     "rot roll/pitch/yaw=[%.3g,%.3g,%.3g]deg)",
+                     args.shake_amp_x, args.shake_amp_y, args.shake_amp_z,
+                     args.shake_roll_amp_deg, args.shake_pitch_amp_deg,
+                     args.shake_yaw_amp_deg)
+        log.info("Starting bf_sim_bridge (Simulink dynamics)")
+        bf_bridge_proc = pm.spawn(bridge_args)
+        time.sleep(2)
+        if bf_bridge_proc.poll() is not None:
+            log.error("bf_sim_bridge exited immediately (code %d)", bf_bridge_proc.returncode)
+            pm.shutdown()
+            sys.exit(1)
 
-            # Per-world target proximity detection
-            target_model = world_entry.get("target_model")
-            target_link  = world_entry.get("target_link")
-            target_bbox  = (world_vars.get("target_bbox")
-                            if world_entry.get("target_drone")
-                            else world_entry.get("target_bbox"))
-            if target_model:
-                bridge_cmd.extend(["--target-model", target_model])
-                if target_link:
-                    bridge_cmd.extend(["--target-link", target_link])
-                if target_bbox:
-                    bridge_cmd.extend(["--target-bbox", target_bbox])
-                if args.hit_box_scale is not None:
-                    bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
-                log.info("Target proximity: model='%s' link=%s bbox=%s scale=%s",
-                         target_model, target_link or "(model root)",
-                         target_bbox or "default",
-                         args.hit_box_scale if args.hit_box_scale is not None else "1.0")
+        # ── 4. Betaflight SITL ──
+        if not os.path.isfile(args.elf):
+            log.error("Betaflight ELF not found: %s", args.elf)
+            pm.shutdown()
+            sys.exit(1)
 
-            log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
+        elf_dir = os.path.dirname(args.elf)
+        log.info("Starting Betaflight SITL")
+        pm.spawn([args.elf], cwd=elf_dir)
 
-            bridge_proc = pm.spawn(
-                bridge_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            flags = fcntl.fcntl(bridge_proc.stderr, fcntl.F_GETFL)
-            fcntl.fcntl(bridge_proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        log.info("Waiting for Betaflight CLI port (5761) …")
+        if not wait_for_port("127.0.0.1", 5761, timeout=20):
+            log.warning("Betaflight CLI port not ready — continuing anyway")
+        else:
+            # Runtime guard: ensure BOOT_GRACE never blocks arming in SITL.
+            send_bf_cli_commands(["set pwr_on_arm_grace = 0"])
+        time.sleep(3)
 
-            log.info("Waiting for first camera frame …")
-            width, height, pix_fmt = read_image_meta(bridge_proc, timeout=30)
-            if width is None:
-                log.error("No image metadata from bridge — camera may not be rendering")
-                try:
-                    remaining_stderr = bridge_proc.stderr.read(2048)
-                    if remaining_stderr:
-                        log.error(
-                            "Bridge stderr: %s",
-                            remaining_stderr.decode("utf-8", errors="replace"),
-                        )
-                except Exception:
-                    pass
+        # MSP Virtual Radio
+        if not args.no_transmitter:
+            radio_index = os.path.join(MSP_RADIO_HOME, "index.js")
+            if os.path.isfile(radio_index):
+                log.info("Starting MSP Virtual Radio")
+                pm.spawn(["node", radio_index])
+            else:
+                log.warning("MSP Virtual Radio not found at %s — skipping", radio_index)
+        time.sleep(2)
+
+        # ── 5. Video pipeline ──
+        topic = None
+        chase_topic = None
+        bridge_proc = None
+        chase_bridge_proc = None
+        width = height = 0
+
+        if args.no_video:
+            log.info("Video pipeline disabled (--no-video)")
+        else:
+            if not os.path.isfile(IMAGE_BRIDGE):
+                log.error(
+                    "gz_image_bridge not found at %s — run build_plugin.sh",
+                    IMAGE_BRIDGE,
+                )
                 pm.shutdown()
                 sys.exit(1)
-            log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-        # ── Chase camera — rectilinear 3rd-person, optional (--chase-cam). ──
-        if args.chase_cam:
-            if args.chase_topic:
-                chase_topic = args.chase_topic
-                log.info("Using explicit chase topic: %s", chase_topic)
+            # ── FPV (pilot) camera — rectilinear, OSD always on. Only when enabled. ──
+            if not args.pilot_cam:
+                log.info("Pilot camera disabled (--no-pilot-cam) — skipping FPV/OSD feed")
             else:
-                log.info("Discovering chase camera topic …")
-                chase_candidates = list_camera_topics(name_hint="chase_cam")
-                if chase_candidates:
-                    log.info("Chase candidates: %s", ", ".join(chase_candidates))
-                chase_topic = discover_camera_topic(
-                    name_hint="chase_cam",
-                    timeout=30,
-                    model_hint=args.topic_model_hint,
-                )
-                if not chase_topic:
-                    log.warning("Chase camera topic not found — skipping")
+                if args.fpv_topic:
+                    topic = args.fpv_topic
+                    log.info("Using explicit FPV topic: %s", topic)
                 else:
-                    log.info("Found chase camera topic: %s", chase_topic)
-            # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
-            if chase_topic:
-                log.info("Starting chase camera bridge (no OSD)")
-                chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd", *_shm_source_flags(args)]
-                chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
-                chase_cmd.append("--no-display" if args.no_display else "--display")
-                chase_bridge_proc = pm.spawn(
-                    chase_cmd,
+                    log.info("Discovering FPV camera image topic …")
+                    fpv_candidates = list_camera_topics(name_hint="fpv_cam")
+                    if fpv_candidates:
+                        log.info("FPV candidates: %s", ", ".join(fpv_candidates))
+                    topic = discover_camera_topic(
+                        name_hint="fpv_cam",
+                        timeout=30,
+                        model_hint=args.topic_model_hint,
+                    )
+                    if not topic:
+                        log.error("Could not find FPV camera topic")
+                        pm.shutdown()
+                        sys.exit(1)
+                    log.info("Found FPV camera topic: %s", topic)
+
+                # SHM + RTSP are always active; the SDL2 window (--display) is added
+                # ONLY when not headless. --no-display runs the bridge truly headless.
+                bridge_cmd = [
+                    IMAGE_BRIDGE, topic, *_shm_source_flags(args),
+                    "--osd", "--msp-port", str(args.msp_port),
+                    "--cam-pitch", str(args.cam_pitch),
+                    "--out-width", str(args.fpv_cam_width),
+                    "--out-height", str(args.fpv_cam_height),
+                ]
+                bridge_cmd.append("--no-display" if args.no_display else "--display")
+
+                # Per-world target proximity detection
+                target_model = world_entry.get("target_model")
+                target_link  = world_entry.get("target_link")
+                target_bbox  = (world_vars.get("target_bbox")
+                                if world_entry.get("target_drone")
+                                else world_entry.get("target_bbox"))
+                if target_model:
+                    bridge_cmd.extend(["--target-model", target_model])
+                    for t in args.extra_target_specs:
+                        bridge_cmd.extend(["--extra-target-model", t["name"]])
+                    if target_link:
+                        bridge_cmd.extend(["--target-link", target_link])
+                    if target_bbox:
+                        bridge_cmd.extend(["--target-bbox", target_bbox])
+                    if args.hit_box_scale is not None:
+                        bridge_cmd.extend(["--hit-box-scale", str(args.hit_box_scale)])
+                    log.info("Target proximity: model='%s' link=%s bbox=%s scale=%s",
+                             target_model, target_link or "(model root)",
+                             target_bbox or "default",
+                             args.hit_box_scale if args.hit_box_scale is not None else "1.0")
+
+                log.info("OSD overlay enabled (MSP port %d)", args.msp_port)
+
+                bridge_proc = pm.spawn(
+                    bridge_cmd,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
+                flags = fcntl.fcntl(bridge_proc.stderr, fcntl.F_GETFL)
+                fcntl.fcntl(bridge_proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        # ── Tracker WIDE / NARROW + thermal feeds (clean, no OSD). ──
-        # Each is gated by its --…-cam toggle inside the shared helper.
-        start_tracker_bridges(args, pm)
+                log.info("Waiting for first camera frame …")
+                width, height, pix_fmt = read_image_meta(bridge_proc, timeout=30)
+                if width is None:
+                    log.error("No image metadata from bridge — camera may not be rendering")
+                    try:
+                        remaining_stderr = bridge_proc.stderr.read(2048)
+                        if remaining_stderr:
+                            log.error(
+                                "Bridge stderr: %s",
+                                remaining_stderr.decode("utf-8", errors="replace"),
+                            )
+                    except Exception:
+                        pass
+                    pm.shutdown()
+                    sys.exit(1)
+                log.info("Camera: %dx%d %s", width, height, pix_fmt)
 
-    # ── 6. Print connection info ──
-    _print_status(
-        args, is_simulink, topic, chase_topic,
-        width, height, bridge_proc, chase_bridge_proc,
-    )
+            # ── Chase camera — rectilinear 3rd-person, optional (--chase-cam). ──
+            if args.chase_cam:
+                if args.chase_topic:
+                    chase_topic = args.chase_topic
+                    log.info("Using explicit chase topic: %s", chase_topic)
+                else:
+                    log.info("Discovering chase camera topic …")
+                    chase_candidates = list_camera_topics(name_hint="chase_cam")
+                    if chase_candidates:
+                        log.info("Chase candidates: %s", ", ".join(chase_candidates))
+                    chase_topic = discover_camera_topic(
+                        name_hint="chase_cam",
+                        timeout=30,
+                        model_hint=args.topic_model_hint,
+                    )
+                    if not chase_topic:
+                        log.warning("Chase camera topic not found — skipping")
+                    else:
+                        log.info("Found chase camera topic: %s", chase_topic)
+                # Hardcoded 4:3 resolution, independent of FPV/tracker cam settings.
+                if chase_topic:
+                    log.info("Starting chase camera bridge (no OSD)")
+                    chase_cmd = [IMAGE_BRIDGE, chase_topic, "--no-osd", *_shm_source_flags(args)]
+                    chase_cmd.extend(["--out-width", "640", "--out-height", "480"])
+                    chase_cmd.append("--no-display" if args.no_display else "--display")
+                    chase_bridge_proc = pm.spawn(
+                        chase_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+            # ── Tracker WIDE / NARROW + thermal feeds (clean, no OSD). ──
+            # Each is gated by its --…-cam toggle inside the shared helper.
+            start_tracker_bridges(args, pm)
+
+        # ── 6. Print connection info ──
+        _print_status(
+            args, is_simulink, topic, chase_topic,
+            width, height, bridge_proc, chase_bridge_proc,
+        )
 
     # ── 6b. Parametric trajectory drive thread (moving_target world) ──
     traj_thread = None
@@ -1479,6 +1602,7 @@ def main():
             perturb_vert_amp=getattr(args, "traj_perturb_vert_amp", 5.0),
             perturb_vert_rate=getattr(args, "traj_perturb_vert_rate", 0.1),
             perturb_phase_deg=getattr(args, "traj_perturb_phase_deg", 0.0),
+            extra_targets=getattr(args, "extra_target_specs", []),
         )
 
     # ── 6c. Wind (drift/harmonic) target thread (windy_target only) ──
@@ -1545,6 +1669,7 @@ def main():
     if static_thread:
         static_stop.set()
         static_thread.join(timeout=2)
+    fanout_stop.set()
 
     pm.shutdown(extra_pkill_patterns=["betaflight_SITL.elf"])
 

@@ -45,6 +45,8 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     boost_gz_priority,
+    DEFAULT_OGRE_WORKERS,
+    gz_spawn_env,
     cleanup_before_start,
     add_lens_args,
     compute_model_vars,
@@ -59,6 +61,7 @@ from common import (
     start_chase_bridge,
     start_fpv_bridge,
     start_trajectory_thread,
+    load_extra_targets,
     TERRAIN_THEMES,
     TRAJ_TYPES,
     start_tracker_bridges,
@@ -294,6 +297,10 @@ def parse_args():
                      help="Utility camera output height in pixels (default: 480)")
     sim.add_argument("--utility-cam-fps", type=int, default=30,
                      help="Utility camera Gazebo update rate in Hz (default: 30)")
+    sim.add_argument("--gpu-warp", action=argparse.BooleanOptionalAction, default=True,
+                     help="Fisheye warp on the GPU inside ShmCameraExportPlugin (the bridge only copies) for warp-mode feeds with supersample 1 and shm transport; --no-gpu-warp = the CPU warp in gz_image_bridge (default: on)")
+    sim.add_argument("--ogre-workers", type=int, default=DEFAULT_OGRE_WORKERS,
+                     help="Cap OgreNext's scene-manager worker threads in the gz server (stock = one per logical core; every camera render waits on all of them). 2 measured best on a loaded 6c/12t laptop; 0 = stock (default: %(default)s)")
     sim.add_argument("--camera-transport", choices=["shm", "topic"], default="shm",
                      help="How gz_image_bridge receives camera frames: shm = in-process ShmCameraExportPlugin segments (no gz-transport image publish; 2 tracker cams 45 -> 90 fps), topic = legacy gz-transport subscription (default: shm)")
     sim.add_argument("--utility-supersample", type=int, default=1, choices=[1, 2, 3, 4],
@@ -434,6 +441,13 @@ def parse_args():
                      help="Target start position along the loop, 0..1 of the perimeter (default: 0)")
     tgt.add_argument("--traj-reverse", action="store_true",
                      help="Reverse the target's travel direction along the loop")
+    tgt.add_argument("--extra-targets", default=None, metavar="TARGETS.json",
+                     help="Targets 2..N (moving_target): JSON list of per-target "
+                          "trajectory specs (keys as in leaf-sim-ui's moving_target "
+                          "store: traj_type, traj_rotation_deg, traj_offset_ew/ns, "
+                          "oval_ew_len, oval_ns_len, corner_radius, traj_start_pos, "
+                          "traj_reverse, target_speed [km/h], target_altitude [m], "
+                          "traj_perturb*). Same airframe as target 1.")
     tgt.add_argument("--traj-perturb", action="store_true",
                      help="Add sinusoidal perturbations about the nominal trajectory: a "
                           "lateral weave + an altitude oscillation, with a flown attitude "
@@ -499,6 +513,11 @@ def parse_args():
         or _entry.get("default_target")
         or DEFAULT_TARGET_DRONE
     )
+    # Targets 2..N (moving_target): flown by the trajectory thread, rendered by
+    # the world template, tracked by the OSD bridge. Ignored in other worlds.
+    args.extra_target_specs = (load_extra_targets(args.extra_targets)
+                               if args.extra_targets and _entry.get("trajectory_drive")
+                               else [])
 
     # shake_test: place the look-at balloon close and near drone height.
     if args.world == "shake_test":
@@ -562,6 +581,7 @@ def main():
         thermal_supersample=getattr(args, "thermal_supersample", 1),
         utility_supersample=getattr(args, "utility_supersample", 1),
         camera_shm_export=(getattr(args, "camera_transport", "shm") == "shm"),
+        gpu_warp=getattr(args, "gpu_warp", True),
         tracker_wide_principal_offset_x=getattr(args, "tracker_wide_principal_offset_x", 0.0),
         tracker_wide_principal_offset_y=getattr(args, "tracker_wide_principal_offset_y", 0.0),
         tracker_narrow_principal_offset_x=getattr(args, "tracker_narrow_principal_offset_x", 0.0),
@@ -646,6 +666,7 @@ def main():
         corner_radius=getattr(args, "corner_radius", None),
         traj_start_pos=getattr(args, "traj_start_pos", None),
         traj_reverse=getattr(args, "traj_reverse", False),
+        extra_targets=getattr(args, "extra_target_specs", []),
         player_heading_deg=getattr(args, "player_heading_deg", None),
         pilot_heading_deg=getattr(args, "pilot_heading_deg", None),
         terrain_theme=getattr(args, "terrain_theme", None),
@@ -674,7 +695,7 @@ def main():
     log.info("Starting Gazebo%s: %s (vis-only)",
              " (GUI)" if args.gazebo else " (headless)",
              os.path.basename(world_path))
-    gz_proc = pm.spawn(gz_args)
+    gz_proc = pm.spawn(gz_args, env=gz_spawn_env(args.ogre_workers))
     boost_gz_priority(gz_proc.pid)
     time.sleep(8)
 
@@ -726,6 +747,8 @@ def main():
                     else world_entry.get("target_bbox"))
     if target_model:
         osd_args.extend(["--target-model", target_model])
+        for t in args.extra_target_specs:
+            osd_args.extend(["--extra-target-model", t["name"]])
         if target_link:
             osd_args.extend(["--target-link", target_link])
         if target_bbox:
@@ -764,6 +787,7 @@ def main():
             perturb_vert_amp=getattr(args, "traj_perturb_vert_amp", 5.0),
             perturb_vert_rate=getattr(args, "traj_perturb_vert_rate", 0.1),
             perturb_phase_deg=getattr(args, "traj_perturb_phase_deg", 0.0),
+            extra_targets=getattr(args, "extra_target_specs", []),
         )
 
     elif world_entry.get("balloon_wind") and world_entry.get("target_model"):

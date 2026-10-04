@@ -989,6 +989,29 @@ def fisheye_warp_params(width, hfov_deg, vfov_deg, c1, c2, c3, fun,
     }
 
 
+def warp_spec_string(c1, c2, c3, fun, hfov_deg, wp, pp_dx, pp_dy) -> str:
+    """The `--warp-fisheye` spec string — ALSO what ShmCameraExportPlugin's
+    <warp> element carries for the GPU warp. One formatter so the CPU (bridge)
+    and GPU (plugin) paths can never be fed different numbers."""
+    return (f"{c1:g},{c2:g},{c3:g},{fun},{hfov_deg:g},"
+            f"{wp['virt_h']:g},{wp['src_hfov_deg']:.6f},"
+            f"{wp['src_base_w']},{wp['src_base_h']},"
+            f"{pp_dx:g},{pp_dy:g}")
+
+
+def gpu_warp_applies(gpu_warp: bool, shm_export: bool, supersample) -> bool:
+    """The fisheye warp runs on the GPU inside ShmCameraExportPlugin (the
+    bridge then only copies) when enabled, the cameras export over SHM (the
+    plugin path), and the feed is not supersampled (the CPU path's area
+    downscale is the anti-aliasing; the GPU warp samples the sensor 1:1).
+    compute_model_vars and start_tracker_bridges BOTH gate on this."""
+    try:
+        ss = int(supersample or 1)
+    except (TypeError, ValueError):
+        ss = 1
+    return bool(gpu_warp) and bool(shm_export) and ss <= 1
+
+
 def compute_model_vars(
     drone: str,
     ctw: float | None = None,
@@ -1096,6 +1119,7 @@ def compute_model_vars(
     # it RENDERS the cameras itself (gz-sensors skips un-subscribed cameras), so
     # pairing it with topic-mode bridges would render everything twice.
     camera_shm_export: bool = True,
+    gpu_warp: bool = False,
     chase_cam_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
@@ -1191,6 +1215,7 @@ def compute_model_vars(
     # passes --warp-fisheye built from the SAME fisheye_warp_params call).
     # Native wideanglecamera supersampling is a no-op — sdformat caps the
     # cubemap at 2048, and the extra sensor pixels just re-sample it.
+    _shm_warp = []      # GPU warp specs (gpu_warp_applies), per sensor
     _wp = None
     _ppx, _ppy = principal_offset_to_sensor(
         tracker_wide_principal_offset_x, tracker_wide_principal_offset_y, tracker_wide_cam_roll)
@@ -1213,6 +1238,12 @@ def compute_model_vars(
         log.warning("Wide tracker: principal-point offset IGNORED — FOV too wide "
                     "for the warp path (native cubemap has no such input)")
     if _wp is not None and _wp["ok"]:
+        if gpu_warp_applies(gpu_warp, camera_shm_export, tracker_wide_supersample):
+            _lens = ((tracker_wide_lens_c1, tracker_wide_lens_c2, tracker_wide_lens_c3, sanitize_lens_fun(tracker_wide_lens_fun))
+                     if tracker_wide_fisheye else (1.0, 1.0, 0.0, "tan"))
+            _shm_warp.append({"sensor": "fpv_tracker_wide_cam",
+                               "out_w": max(64, int(tracker_wide_cam_width)), "out_h": int(tracker_wide_cam_height),
+                               "spec": warp_spec_string(*_lens, tracker_wide_hfov_deg, _wp, _ppx, _ppy)})
         tracker_wide_img_width = _wp["src_base_w"] * _ss(tracker_wide_supersample)
         tracker_wide_img_height = _wp["src_base_h"] * _ss(tracker_wide_supersample)
         tracker_wide_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1241,6 +1272,12 @@ def compute_model_vars(
         log.warning("Narrow tracker: principal-point offset IGNORED — FOV too wide "
                     "for the warp path (native cubemap has no such input)")
     if _wp is not None and _wp["ok"]:
+        if gpu_warp_applies(gpu_warp, camera_shm_export, tracker_narrow_supersample):
+            _lens = ((tracker_narrow_lens_c1, tracker_narrow_lens_c2, tracker_narrow_lens_c3, sanitize_lens_fun(tracker_narrow_lens_fun))
+                     if tracker_narrow_fisheye else (1.0, 1.0, 0.0, "tan"))
+            _shm_warp.append({"sensor": "fpv_tracker_narrow_cam",
+                               "out_w": max(64, int(tracker_narrow_cam_width)), "out_h": int(tracker_narrow_cam_height),
+                               "spec": warp_spec_string(*_lens, tracker_narrow_hfov_deg, _wp, _ppx, _ppy)})
         tracker_narrow_img_width = _wp["src_base_w"] * _ss(tracker_narrow_supersample)
         tracker_narrow_img_height = _wp["src_base_h"] * _ss(tracker_narrow_supersample)
         tracker_narrow_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1269,6 +1306,12 @@ def compute_model_vars(
         log.warning("Thermal: principal-point offset IGNORED — FOV too wide "
                     "for the warp path (native cubemap has no such input)")
     if _wp is not None and _wp["ok"]:
+        if gpu_warp_applies(gpu_warp, camera_shm_export, thermal_supersample):
+            _lens = ((thermal_lens_c1, thermal_lens_c2, thermal_lens_c3, sanitize_lens_fun(thermal_lens_fun))
+                     if thermal_fisheye else (1.0, 1.0, 0.0, "tan"))
+            _shm_warp.append({"sensor": "fpv_thermal_cam",
+                               "out_w": max(64, int(thermal_cam_width)), "out_h": int(thermal_cam_height),
+                               "spec": warp_spec_string(*_lens, thermal_hfov_deg, _wp, _ppx, _ppy)})
         thermal_img_width = _wp["src_base_w"] * _ss(thermal_supersample)
         thermal_img_height = _wp["src_base_h"] * _ss(thermal_supersample)
         thermal_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1297,6 +1340,12 @@ def compute_model_vars(
         log.warning("Utility: principal-point offset IGNORED — FOV too wide "
                     "for the warp path (native cubemap has no such input)")
     if _wp is not None and _wp["ok"]:
+        if gpu_warp_applies(gpu_warp, camera_shm_export, utility_supersample):
+            _lens = ((utility_lens_c1, utility_lens_c2, utility_lens_c3, sanitize_lens_fun(utility_lens_fun))
+                     if utility_fisheye else (1.0, 1.0, 0.0, "tan"))
+            _shm_warp.append({"sensor": "fpv_utility_cam",
+                               "out_w": max(64, int(utility_cam_width)), "out_h": int(utility_cam_height),
+                               "spec": warp_spec_string(*_lens, utility_hfov_deg, _wp, _ppx, _ppy)})
         utility_img_width = _wp["src_base_w"] * _ss(utility_supersample)
         utility_img_height = _wp["src_base_h"] * _ss(utility_supersample)
         utility_hfov_rad = math.radians(_wp["src_hfov_deg"])
@@ -1416,6 +1465,8 @@ def compute_model_vars(
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
         "camera_shm_export": bool(camera_shm_export),
+        # GPU fisheye warp specs for ShmCameraExportPlugin (<warp> elements).
+        "shm_warp": _shm_warp,
         "standoff_height": _standoff, "leg_z": leg_z,
         "linear_damping_x": do.get("linear_x", dd["linear_x"]),
         "linear_damping_y": do.get("linear_y", dd["linear_y"]),
@@ -1486,6 +1537,7 @@ def compute_world_vars(
     corner_radius: float | None = None,
     traj_start_pos: float | None = None,
     traj_reverse: bool = False,
+    extra_targets: list | None = None,
     player_heading_deg: float | None = None,
     pilot_heading_deg: float | None = None,
     terrain_theme: str | None = None,
@@ -1579,6 +1631,12 @@ def compute_world_vars(
         "target_spawn_x": _spawn_x,
         "target_spawn_y": _spawn_y,
         "target_spawn_yaw": _spawn_yaw,
+        # Targets 2..N (moving_target): name, pose port and s=0 spawn pose.
+        "extra_targets": [
+            dict(zip(("x", "y", "yaw"), trajectory_start_pose(**_spec_geom(t))),
+                 name=t["name"], port=t["udp_port"], z=t["target_z"])
+            for t in (extra_targets or [])
+        ],
         "player_heading_rad": math.radians(_player_heading),
         # Pilot-controlled target (pilot_controlled_target world): spawn yaw of
         # the manually steered target — must match pilot_target.py's
@@ -1681,6 +1739,85 @@ def render_vis_templates(
             render_template(tgt_j2, world_vars)
 
 
+
+# ── Fleet (multi-drone) world ─────────────────────────────────────────────────
+
+FLEET_MODELS_DIR = os.path.join(AEROLOOP_HOME, "models_fleet")   # gitignored
+
+
+def render_fleet_models(drone: str, model_vars: dict, world_vars: dict, spec: dict) -> None:
+    """Fleet mode (drone_stack): render one copy of the drone vis model per drone
+    and put the fleet into world_vars for the world template.
+
+    `spec` is the world spec drone_stack/drone_ctl.py writes: drones with their
+    world placement + Gazebo pose/rotor ports, launchers with their pivot and
+    bay span. Every drone needs its OWN model copy because the pose/rotor UDP
+    ports live inside the model (all ExternalPosePlugins share one gz process).
+    Meshes are referenced as model://..., so a copy outside models/ is fine.
+    """
+    ref = DRONE_REFS[drone]
+    vis_j2 = os.path.join(AEROLOOP_HOME, "models", ref["model_vis_sdf"] + ".j2")
+    vis_dir = os.path.dirname(vis_j2)
+    from jinja2 import Environment, FileSystemLoader
+    tmpl = Environment(loader=FileSystemLoader(vis_dir),
+                       keep_trailing_newline=True).get_template(os.path.basename(vis_j2))
+    os.makedirs(FLEET_MODELS_DIR, exist_ok=True)
+
+    drones = []
+    for d in spec["drones"]:
+        out_dir = os.path.join(FLEET_MODELS_DIR, d["name"])
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "model.sdf"), "w") as f:
+            f.write(tmpl.render(**model_vars, pose_port=d["pose_port"],
+                                rotor_port=d["rotor_port"]))
+        shutil.copyfile(os.path.join(vis_dir, "model.config"),
+                        os.path.join(out_dir, "model.config"))
+        drones.append({"name": d["name"], "uri": "file://" + out_dir,
+                       "x": d["x"], "y": d["y"], "yaw": d["yaw"]})
+
+    ped_r = float(world_vars.get("pedestal_radius") or 0.5)
+    ped_h = float(world_vars.get("pedestal_height") or 0.30)
+    pedestals = [{"name": f"launcher_{l['id']}", "x": l["x"], "y": l["y"],
+                  # wide enough to carry every bay at any pan
+                  "radius": max(ped_r, l.get("bay_reach", 0.0) + ped_r),
+                  "height": ped_h} for l in spec["launchers"]]
+    world_vars["fleet_drones"] = drones
+    world_vars["fleet_pedestals"] = pedestals
+    log.info("Fleet: %d drones on %d launchers -> %s", len(drones), len(pedestals),
+             os.path.relpath(FLEET_MODELS_DIR, AEROLOOP_HOME))
+
+
+def start_udp_fanout(stop: threading.Event, listen_port: int, dests: list,
+                     listen_host: str = "127.0.0.1") -> threading.Thread:
+    """Relay every datagram arriving on listen_host:listen_port to each of
+    `dests` [(ip, port), ...]. Fleet mode uses it for the target ground-truth
+    mirror (TARGET_MIRROR_PORT): the target threads / pilot_target.py send to
+    127.0.0.1, while each drone's sitl_redis_bridge listens on <drone IP>:9018.
+    """
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind((listen_host, listen_port))   # no SO_REUSEADDR: a second listener must fail
+    rx.settimeout(0.5)
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def run():
+        while not stop.is_set():
+            try:
+                data = rx.recv(2048)
+            except socket.timeout:
+                continue
+            for dest in dests:
+                try:
+                    tx.sendto(data, dest)
+                except OSError:
+                    pass
+        rx.close()
+
+    t = threading.Thread(target=run, name=f"fanout-{listen_port}", daemon=True)
+    t.start()
+    log.info("Fan-out %s:%d -> %s", listen_host, listen_port,
+             ", ".join(f"{h}:{p}" for h, p in dests))
+    return t
+
 # ── Process Manager ───────────────────────────────────────────────────────────
 
 def boost_gz_priority(pid: int, nice_level: int = -10) -> None:
@@ -1714,6 +1851,40 @@ def boost_gz_priority(pid: int, nice_level: int = -10) -> None:
             "Enable it with:\n  echo \"$(whoami) ALL=(root) NOPASSWD: %s\" | "
             "sudo tee -a /etc/sudoers.d/simcontrol-bridges && sudo visudo -c",
             (r.stderr or r.stdout or "sudo -n refused").strip().splitlines()[-1], script)
+
+
+DEFAULT_OGRE_WORKERS = 2
+OGRE_WORKERS_SHIM = os.path.join(AEROLOOP_HOME, "plugins", "build", "libOgreWorkerThreads.so")
+
+
+def gz_spawn_env(ogre_workers: int):
+    """Environment for the gz server process: OgreNext worker-pool cap.
+
+    gz-rendering8 sizes OgreNext's scene-manager worker pool to one thread
+    per LOGICAL core; every camera render then waits at a barrier for all of
+    them, which on a busy, thermally throttled laptop costs more than the
+    parallel culling saves (live 2-drone fleet, 4 x 854x480 @ 90 Hz, full
+    stack: 12 workers 67 fps / 200% gz CPU, 2 workers 85-88 fps / 142%,
+    1 worker 69). The LD_PRELOAD shim OgreWorkerThreads.cc interposes
+    Ogre::PlatformInformation::getNumLogicalCores() for the gz process only.
+
+    Returns None (= inherit the launcher env, stock behaviour) when
+    ogre_workers <= 0 or the shim is not built.
+    """
+    if ogre_workers is None or ogre_workers <= 0:
+        return None
+    if not os.path.isfile(OGRE_WORKERS_SHIM):
+        log.warning("Ogre worker shim not built (%s) — gz keeps one Ogre worker per logical core. "
+                    "Build it: cmake --build %s --target OgreWorkerThreads",
+                    OGRE_WORKERS_SHIM, os.path.join(AEROLOOP_HOME, "plugins", "build"))
+        return None
+    env = os.environ.copy()
+    pre = env.get("LD_PRELOAD", "")
+    env["LD_PRELOAD"] = OGRE_WORKERS_SHIM + (" " + pre if pre else "")
+    env["GZ_OGRE_WORKER_THREADS"] = str(int(ogre_workers))
+    log.info("gz: OgreNext scene-manager workers capped at %d (stock: %d logical cores)",
+             ogre_workers, os.cpu_count() or 0)
+    return env
 
 
 class ProcessManager:
@@ -2098,12 +2269,25 @@ def _shm_source_flags(args):
     return ["--shm-source"] if getattr(args, "camera_transport", "shm") == "shm" else []
 
 
-def start_tracker_bridges(args, pm: ProcessManager):
+def fleet_camera_topic(gz_world: str, model: str, sensor: str) -> str:
+    """Explicit camera topic of a fleet drone (drone_<id>). Fleet mode never
+    substring-discovers: "drone_15" would match drone_151's topics. In SHM
+    mode the bridge only derives the segment name from it:
+    /gz_cam_<model>_<sensor> (raw input: the same + "_raw")."""
+    return f"/world/{gz_world}/model/{model}/link/base_link/sensor/{sensor}/image"
+
+
+def start_tracker_bridges(args, pm: ProcessManager, model=None, gz_world=None,
+                          rtsp_suffix=""):
     """Spawn the optional clean (no-OSD) tracker feeds — shared by BF + PX4 stacks.
 
     Spawns a gz_image_bridge per enabled sensor: the wide and narrow tracker
     cameras and the white-hot thermal camera (each fisheye or rectilinear).
     Each is gated by its ``--…-cam`` toggle; missing topics are skipped, not fatal.
+
+    Fleet mode passes ``model`` (drone_<id>) + ``gz_world``: topics are built
+    explicitly, bridges run headless, and RTSP URLs get ``rtsp_suffix``
+    appended so every drone's feed has its own path.
     """
     if getattr(args, "no_video", False):
         return
@@ -2112,7 +2296,7 @@ def start_tracker_bridges(args, pm: ProcessManager):
         return
 
     model_hint = getattr(args, "topic_model_hint", TOPIC_MODEL_HINT_DEFAULT)
-    disp = "--no-display" if getattr(args, "no_display", False) else "--display"
+    disp = "--no-display" if (model or getattr(args, "no_display", False)) else "--display"
 
     # (attr-name, sensor name_hint, extra bridge flags, rtsp prefix, label)
     feeds = [
@@ -2124,8 +2308,11 @@ def start_tracker_bridges(args, pm: ProcessManager):
     for enable_attr, name_hint, extra_flags, rp, label in feeds:
         if not getattr(args, enable_attr, False):
             continue
-        log.info("Discovering %s camera topic …", label.lower())
-        topic = discover_camera_topic(name_hint=name_hint, timeout=30, model_hint=model_hint)
+        if model:
+            topic = fleet_camera_topic(gz_world, model, name_hint)
+        else:
+            log.info("Discovering %s camera topic …", label.lower())
+            topic = discover_camera_topic(name_hint=name_hint, timeout=30, model_hint=model_hint)
         if not topic:
             log.warning("%s camera topic not found — skipping (is the sensor in the model?)", label)
             continue
@@ -2162,12 +2349,17 @@ def start_tracker_bridges(args, pm: ProcessManager):
             wp = fisheye_warp_params(out_w, _hfov, _vfov, _c1, _c2, _c3, _fun,
                                      pp_dx=_ppx, pp_dy=_ppy, out_h=out_h)
         if wp is not None and wp["ok"]:
-            cmd.extend(["--warp-fisheye",
-                        f"{_c1:g},{_c2:g},{_c3:g},{_fun},{_hfov:g},"
-                        f"{wp['virt_h']:g},{wp['src_hfov_deg']:.6f},"
-                        f"{wp['src_base_w']},{wp['src_base_h']},"
-                        f"{_ppx:g},{_ppy:g}"])
-        _append_rtsp(cmd, getattr(args, f"{rp}_rtsp", None),
+            if gpu_warp_applies(getattr(args, "gpu_warp", False),
+                                getattr(args, "camera_transport", "shm") == "shm",
+                                getattr(args, f"{rp}_supersample", 1)):
+                # ShmCameraExportPlugin already wrote the WARPED frame (the
+                # model's <warp> element, same spec) — the bridge just copies.
+                log.info("%s: fisheye warp on the GPU (in-plugin)", label)
+            else:
+                cmd.extend(["--warp-fisheye",
+                            warp_spec_string(_c1, _c2, _c3, _fun, _hfov, wp, _ppx, _ppy)])
+        _rtsp = getattr(args, f"{rp}_rtsp", None)
+        _append_rtsp(cmd, (_rtsp + rtsp_suffix) if _rtsp else None,
                      getattr(args, f"{rp}_cam_fps", 30),
                      getattr(args, f"{rp}_rtsp_bitrate", "4M"),
                      getattr(args, f"{rp}_rtsp_crf", 23),
@@ -2190,6 +2382,75 @@ TARGET_RESET_PORT = 9017
 # and any other observers can read ground-truth target pose without colliding
 # with Gazebo on 9016.
 TARGET_MIRROR_PORT = 9018
+
+# ── Multiple targets (moving_target) ─────────────────────────────────────────
+# Target 1 is the classic one: model `moving_target`, pose UDP 9016, and a
+# 72-byte packet on the GT mirror 9018 — every existing consumer keeps working
+# untouched. Target k ≥ 2: model `moving_target_<k>`, pose UDP
+# EXTRA_TARGET_PORT_BASE + k, and on the SAME mirror port a 76-byte INDEXED
+# packet (the 72-byte VisualPosePacket + u32 target index k), which consumers
+# that only accept 72 bytes ignore. One trajectory thread flies them all, so
+# the one reset port (9017) re-homes every target together.
+EXTRA_TARGET_PORT_BASE = 9050
+MAX_TARGETS = 8
+TARGET_INDEXED_STRUCT = struct.Struct("<Qd3d4dI")   # 76 bytes
+
+
+def extra_target_name(k: int) -> str:
+    return f"moving_target_{int(k)}"
+
+
+def load_extra_targets(path) -> list:
+    """Read the extra-targets JSON (a list of per-target dicts, keyed like the
+    moving_target store: traj_type, traj_rotation_deg, traj_offset_ew/ns,
+    oval_ew_len, oval_ns_len, corner_radius, traj_start_pos, traj_reverse,
+    target_speed [km/h], target_altitude [m], traj_perturb*). Entry i becomes
+    target k = i + 2. Missing keys take the single-target defaults."""
+    if not path:
+        return []
+    import json
+    with open(path, encoding="utf-8") as f:
+        specs = json.load(f)
+    if not isinstance(specs, list):
+        raise ValueError(f"{path}: expected a JSON list of target specs")
+    if len(specs) > MAX_TARGETS - 1:
+        raise ValueError(f"{path}: at most {MAX_TARGETS - 1} extra targets "
+                         f"({MAX_TARGETS} in total)")
+    out = []
+    for i, sp in enumerate(specs):
+        k = i + 2
+        g = lambda key, d: sp.get(key) if sp.get(key) is not None else d
+        out.append({
+            "index": k, "name": extra_target_name(k),
+            "udp_port": EXTRA_TARGET_PORT_BASE + k,
+            "traj_type": g("traj_type", "oval"),
+            "rotation_deg": float(g("traj_rotation_deg", 0.0)),
+            "offset_ew": float(g("traj_offset_ew", 0.0)),
+            "offset_ns": float(g("traj_offset_ns", 0.0)),
+            "oval_ew_len": sp.get("oval_ew_len"),
+            "oval_ns_len": sp.get("oval_ns_len"),
+            "corner_radius": sp.get("corner_radius"),
+            "start_pos": float(g("traj_start_pos", 0.0)),
+            "reverse": bool(g("traj_reverse", False)),
+            "speed_ms": float(g("target_speed", 18.0)) / 3.6,
+            "target_z": float(g("target_altitude", 50.0)),
+            "perturb": bool(g("traj_perturb", False)),
+            "perturb_lat_amp": float(g("traj_perturb_lat_amp", 10.0)),
+            "perturb_lat_rate": float(g("traj_perturb_lat_rate", 0.1)),
+            "perturb_vert_amp": float(g("traj_perturb_vert_amp", 5.0)),
+            "perturb_vert_rate": float(g("traj_perturb_vert_rate", 0.1)),
+            "perturb_phase_deg": float(g("traj_perturb_phase_deg", 0.0)),
+        })
+    return out
+
+
+def _spec_geom(spec: dict) -> dict:
+    """trajectory_sample kwargs for one target spec (load_extra_targets)."""
+    ew, ns, cr = resolve_loop_geom(spec["traj_type"], spec.get("oval_ew_len"),
+                                   spec.get("oval_ns_len"), spec.get("corner_radius"))
+    return dict(rotation_deg=spec["rotation_deg"], offset_ew=spec["offset_ew"],
+                offset_ns=spec["offset_ns"], oval_ew_len=ew, oval_ns_len=ns,
+                corner_radius=cr, start_pos=spec["start_pos"], reverse=spec["reverse"])
 
 
 def start_orbit_thread(
@@ -2536,6 +2797,7 @@ def start_trajectory_thread(
     perturb_phase_deg: float = 0.0,
     udp_port: int = TARGET_UDP_PORT,
     reset_port: int = TARGET_RESET_PORT,
+    extra_targets: list = (),
 ) -> threading.Thread:
     """Drive the target along a parametric loop via UDP (unified world). The three
     loop params fall back to the ``traj_type`` preset when None.
@@ -2555,6 +2817,11 @@ def start_trajectory_thread(
     position (one 1-pole filter, ``_BANK_TAU``, softens the curvature step at
     corner entry) and clamped to ±60° roll / ±45° pitch. A world reset re-zeros
     the perturbation phase along with ``s``.
+
+    ``extra_targets`` (from :func:`load_extra_targets`) are flown by the SAME
+    thread, each with its own loop/speed/altitude/perturbation, to its own
+    pose port, and mirrored as indexed 76-byte packets — one reset port then
+    re-homes every target at once.
     """
     _ew, _ns, _cr = resolve_loop_geom(traj_type, oval_ew_len, oval_ns_len, corner_radius)
     geom = dict(rotation_deg=rotation_deg, offset_ew=offset_ew, offset_ns=offset_ns,
@@ -2565,24 +2832,83 @@ def start_trajectory_thread(
     _ROLL_MAX = math.radians(60.0)
     _PITCH_MAX = math.radians(45.0)
     _G = 9.80665
-    _phase0 = math.radians(perturb_phase_deg)
+
+    class _Flyer:
+        """One target's state along its loop (arc length, perturbation clock,
+        finite-difference attitude)."""
+
+        def __init__(self, geom, speed_ms, target_z, perturb, lat_amp, lat_rate,
+                     vert_amp, vert_rate, phase_deg):
+            self.geom, self.speed_ms, self.target_z = geom, speed_ms, target_z
+            self.perturb = perturb
+            self.lat_amp, self.lat_rate = lat_amp, lat_rate
+            self.vert_amp, self.vert_rate = vert_amp, vert_rate
+            self.phase0 = math.radians(phase_deg)
+            self.reset()
+
+        def reset(self):
+            self.s = 0.0
+            # Perturbation state: its own clock (re-zeroed on reset, so the
+            # weave phase restarts with the lap) + the previous pose for
+            # finite-difference attitude + the smoothed roll/pitch.
+            self.pt = 0.0
+            self.prev = None        # position jumps — a FD across it would spike
+            self.roll_f = self.pitch_f = 0.0
+
+        def step(self, dt):
+            self.s += self.speed_ms * dt
+            x, y, yaw = trajectory_sample(self.s, **self.geom)
+            z = self.target_z
+            if not self.perturb:
+                return x, y, z, (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
+            self.pt += dt
+            lat = self.lat_amp * math.sin(2.0 * math.pi * self.lat_rate * self.pt)
+            vert = self.vert_amp * math.sin(
+                2.0 * math.pi * self.vert_rate * self.pt + self.phase0)
+            # lat > 0 = left of travel: left-perpendicular of the track
+            # heading is (-sin ψ, +cos ψ).
+            x += -lat * math.sin(yaw)
+            y += lat * math.cos(yaw)
+            z += vert
+            yaw_eff = yaw
+            if self.prev is not None and dt > 1e-4:
+                vx = (x - self.prev[0]) / dt
+                vy = (y - self.prev[1]) / dt
+                vz = (z - self.prev[2]) / dt
+                vh = math.hypot(vx, vy)
+                if vh > 0.5:
+                    yaw_eff = math.atan2(vy, vx)
+                dpsi = (yaw_eff - self.prev[3] + math.pi) % (2.0 * math.pi) - math.pi
+                # Gazebo RPY signs: +pitch = nose DOWN, +roll = left wing
+                # up = bank right; a left turn (ψ̇ > 0) banks left → both
+                # get a minus sign.
+                roll_raw = -math.atan2(vh * (dpsi / dt), _G)
+                pitch_raw = -math.atan2(vz, max(vh, 1.0))
+                k = dt / (_BANK_TAU + dt)
+                self.roll_f += k * (max(-_ROLL_MAX, min(_ROLL_MAX, roll_raw)) - self.roll_f)
+                self.pitch_f += k * (max(-_PITCH_MAX, min(_PITCH_MAX, pitch_raw))
+                                     - self.pitch_f)
+            self.prev = (x, y, z, yaw_eff)
+            return x, y, z, _euler_zyx_to_quat(self.roll_f, self.pitch_f, yaw_eff)
 
     def _traj_loop():
         interval = 1.0 / 60
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        addr = ("127.0.0.1", udp_port)
         mirror_addr = ("127.0.0.1", TARGET_MIRROR_PORT)
         packer = struct.Struct("<Qd3d4d")
         seq = 0
         t0 = time.monotonic()
         t_prev = t0
-        s = 0.0
-        # Perturbation state: its own clock (re-zeroed on reset, so the weave
-        # phase restarts with the lap) + the previous pose for finite-difference
-        # attitude + the smoothed roll/pitch.
-        pt = 0.0
-        prev = None                # (x, y, z, yaw_eff) of the previous tick
-        roll_f = pitch_f = 0.0
+        # (flyer, own pose address, target index); index 1 = the classic target.
+        flyers = [(_Flyer(geom, speed_ms, target_z, perturb, perturb_lat_amp,
+                          perturb_lat_rate, perturb_vert_amp, perturb_vert_rate,
+                          perturb_phase_deg), ("127.0.0.1", udp_port), 1)]
+        for t in extra_targets:
+            flyers.append((_Flyer(_spec_geom(t), t["speed_ms"], t["target_z"], t["perturb"],
+                                  t["perturb_lat_amp"], t["perturb_lat_rate"],
+                                  t["perturb_vert_amp"], t["perturb_vert_rate"],
+                                  t["perturb_phase_deg"]),
+                           ("127.0.0.1", t["udp_port"]), t["index"]))
 
         rst_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rst_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2595,15 +2921,18 @@ def start_trajectory_thread(
                  (f"  perturb lat={perturb_lat_amp:.1f}m@{perturb_lat_rate:.2f}Hz "
                   f"vert={perturb_vert_amp:.1f}m@{perturb_vert_rate:.2f}Hz"
                   if perturb else ""))
+        for t in extra_targets:
+            log.info("Trajectory thread: target %d %s speed=%.1f m/s alt=%.0fm rot=%.1f° "
+                     "centre=(%.0fE,%.0fN) (port %d)%s", t["index"], t["traj_type"],
+                     t["speed_ms"], t["target_z"], t["rotation_deg"], t["offset_ew"],
+                     t["offset_ns"], t["udp_port"], "  perturb" if t["perturb"] else "")
 
         while not stop_event.is_set():
             try:
                 while True:
                     rst_sock.recv(64)
-                    s = 0.0
-                    pt = 0.0
-                    prev = None          # position jumps — a FD across it would spike
-                    roll_f = pitch_f = 0.0
+                    for f, _, _ in flyers:
+                        f.reset()
                     t_prev = time.monotonic()
                     log.info("Trajectory thread: reset to start")
             except BlockingIOError:
@@ -2612,49 +2941,18 @@ def start_trajectory_thread(
             t_now = time.monotonic()
             dt = t_now - t_prev
             t_prev = t_now
-            s += speed_ms * dt
-
-            x, y, yaw = trajectory_sample(s, **geom)
-            z = target_z
-            if perturb:
-                pt += dt
-                lat = perturb_lat_amp * math.sin(2.0 * math.pi * perturb_lat_rate * pt)
-                vert = perturb_vert_amp * math.sin(
-                    2.0 * math.pi * perturb_vert_rate * pt + _phase0)
-                # lat > 0 = left of travel: left-perpendicular of the track
-                # heading is (-sin ψ, +cos ψ).
-                x += -lat * math.sin(yaw)
-                y += lat * math.cos(yaw)
-                z += vert
-                yaw_eff = yaw
-                if prev is not None and dt > 1e-4:
-                    vx = (x - prev[0]) / dt
-                    vy = (y - prev[1]) / dt
-                    vz = (z - prev[2]) / dt
-                    vh = math.hypot(vx, vy)
-                    if vh > 0.5:
-                        yaw_eff = math.atan2(vy, vx)
-                    dpsi = (yaw_eff - prev[3] + math.pi) % (2.0 * math.pi) - math.pi
-                    # Gazebo RPY signs: +pitch = nose DOWN, +roll = left wing
-                    # up = bank right; a left turn (ψ̇ > 0) banks left → both
-                    # get a minus sign.
-                    roll_raw = -math.atan2(vh * (dpsi / dt), _G)
-                    pitch_raw = -math.atan2(vz, max(vh, 1.0))
-                    k = dt / (_BANK_TAU + dt)
-                    roll_f += k * (max(-_ROLL_MAX, min(_ROLL_MAX, roll_raw)) - roll_f)
-                    pitch_f += k * (max(-_PITCH_MAX, min(_PITCH_MAX, pitch_raw)) - pitch_f)
-                prev = (x, y, z, yaw_eff)
-                qw, qx, qy, qz = _euler_zyx_to_quat(roll_f, pitch_f, yaw_eff)
-            else:
-                qw = math.cos(yaw / 2.0)
-                qx = qy = 0.0
-                qz = math.sin(yaw / 2.0)
-            pkt = packer.pack(seq, t_now - t0, x, y, z, qw, qx, qy, qz)
-            for dst in (addr, mirror_addr):
-                try:
-                    sock.sendto(pkt, dst)
-                except OSError:
-                    pass
+            for f, addr, index in flyers:
+                x, y, z, (qw, qx, qy, qz) = f.step(dt)
+                pkt = packer.pack(seq, t_now - t0, x, y, z, qw, qx, qy, qz)
+                # Target 1 keeps the plain 72-byte mirror packet (every
+                # existing consumer); targets 2.. are tagged with their index.
+                mpkt = pkt if index == 1 else TARGET_INDEXED_STRUCT.pack(
+                    seq, t_now - t0, x, y, z, qw, qx, qy, qz, index)
+                for dst, data in ((addr, pkt), (mirror_addr, mpkt)):
+                    try:
+                        sock.sendto(data, dst)
+                    except OSError:
+                        pass
             seq += 1
             stop_event.wait(timeout=interval)
 
