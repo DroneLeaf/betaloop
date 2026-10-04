@@ -663,3 +663,12 @@ any new motion so Ctrl-C exits cleanly.
   (`pm.spawn(gz_args, env=…)`). Returns None (inherit, stock) at N ≤ 0 or
   when the shim isn't built (logs the build command). Both names are in both
   from-common import lists.
+
+## Session Addendum (2026-10-04b) — `build_check.py` + `warn_stale_builds`
+
+- New stdlib module `build_check.py` (`stale_builds(root)`, `rebuild_commands`,
+  `CHECKS` = artifact → source globs → rebuild command). `common.
+  warn_stale_builds()` logs the stale list + commands; called first thing in
+  both launchers' `main()` (name in both from-common import lists). leaf-sim-ui
+  imports the same module by path for its Initialize dialog. Add a new
+  compiled artifact to `CHECKS` when you add one.

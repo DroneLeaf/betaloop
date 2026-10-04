@@ -1853,6 +1853,26 @@ def boost_gz_priority(pid: int, nice_level: int = -10) -> None:
             (r.stderr or r.stdout or "sudo -n refused").strip().splitlines()[-1], script)
 
 
+def warn_stale_builds() -> list:
+    """Log every compiled sim piece that is missing or older than its source
+    (build_check.py) — after a `git pull` the launch would otherwise run the
+    old binaries silently (2026-10-04: a stale ShmCameraExportPlugin ignored
+    the GPU warp and the missing Ogre shim cost ~30 fps). Never raises."""
+    try:
+        import build_check
+        stale = build_check.stale_builds()
+    except Exception as e:  # a broken check must never block a launch
+        log.debug("build check skipped: %s", e)
+        return []
+    if stale:
+        log.warning("STALE BUILDS — the sim will run OLD binaries:")
+        for s in stale:
+            log.warning("  %s: %s", s["artifact"], s["reason"])
+        for c in build_check.rebuild_commands(stale):
+            log.warning("  rebuild: (cd %s && %s)", build_check.REPO_ROOT, c)
+    return stale
+
+
 DEFAULT_OGRE_WORKERS = 2
 OGRE_WORKERS_SHIM = os.path.join(AEROLOOP_HOME, "plugins", "build", "libOgreWorkerThreads.so")
 

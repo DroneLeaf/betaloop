@@ -56,6 +56,7 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     boost_gz_priority,
+    warn_stale_builds,
     DEFAULT_OGRE_WORKERS,
     gz_spawn_env,
     cleanup_before_start,
@@ -1211,6 +1212,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    warn_stale_builds()
     args.fleet_spec = None
     if args.fleet_world:
         import json
