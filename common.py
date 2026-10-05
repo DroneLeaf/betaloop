@@ -126,7 +126,9 @@ TARGET_REFS = {
         "model_uri": "model://shahed_drone",
         "visual_pose": "0 0 0 1.57079 0 1.5708",
         "dims": (1.8982, 1.4364, 0.3373),
-        "default_scale": 1.0,
+        # 1.8 ≈ a real Shahed-136 (3.5 m long, 2.5 m span, 0.55 m thick):
+        # the raw mesh is ~54% scale (1.9 × 1.44 × 0.34 m at 1.0).
+        "default_scale": 1.8,
     },
     "stingjet": {
         # An MQ-9 Reaper-class airframe (span > length). The raw mesh is
