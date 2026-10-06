@@ -33,11 +33,17 @@ DASHBOARD_DIR = Path(os.environ.get("LEAF_DASHBOARD_WWW", "~/Controller-Dashboar
                      ).expanduser().parent
 _DASHBOARD_BUILD = ('[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"; '
                     f'cd "{DASHBOARD_DIR}" && npm run build')
+# The fleet LAUNCHERS' dashboard: the workspace's second Angular app
+# (projects/leaf-launcher-controller-dashboard → www-launcher). It also
+# compiles the shared src/ (racer pages + services), so both trees are sources.
+_LAUNCHER_DASHBOARD_BUILD = ('[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"; '
+                             f'cd "{DASHBOARD_DIR}" && npx ng build leaf-launcher-controller-dashboard')
+_LAUNCHER_APP = "projects/leaf-launcher-controller-dashboard/src"
 
 # (artifact, source globs, rebuild command[, base dir, tag]) — paths relative to
 # REPO_ROOT unless a base dir is given. Tagged checks only run when asked for
-# (stale_builds(include=…)): the dashboard matters only to a fleet with
-# per-drone dashboards.
+# (stale_builds(include=…)): "dashboard" matters only to a fleet with
+# per-drone dashboards, "launcher-dashboard" to one with per-launcher ones.
 CHECKS = (
     (f"{_PLUGINS}/build/libShmCameraExportPlugin.so",
      (f"{_PLUGINS}/ShmCameraExportPlugin.cc",), _PLUGINS_BUILD),
@@ -55,6 +61,10 @@ CHECKS = (
      ("betaflight/src/main/**/*.c", "betaflight/src/main/**/*.h"), _BF_BUILD),
     ("www/index.html", ("src/**/*.ts", "src/**/*.html", "src/**/*.scss", "src/**/*.json"),
      _DASHBOARD_BUILD, DASHBOARD_DIR, "dashboard"),
+    ("www-launcher/index.html",
+     tuple(f"{root}/**/*.{ext}" for root in (_LAUNCHER_APP, "src")
+           for ext in ("ts", "html", "scss", "json")),
+     _LAUNCHER_DASHBOARD_BUILD, DASHBOARD_DIR, "launcher-dashboard"),
 )
 
 
@@ -76,7 +86,7 @@ def stale_builds(root: Path | str = REPO_ROOT, include=()) -> list[dict]:
     `root`, or absolute for an external project). Empty list = everything is
     built and current. Artifacts whose sources are absent (a checkout without
     that submodule/project) are skipped, and so are tagged checks not in
-    `include` (e.g. "dashboard")."""
+    `include` (e.g. "dashboard", "launcher-dashboard")."""
     root = Path(root)
     out = []
     for check in CHECKS:
