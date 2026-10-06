@@ -26,7 +26,18 @@ _BRIDGE_BUILD = ("cmake -S bf_sim_bridge -B bf_sim_bridge/build && "
                  "cmake --build bf_sim_bridge/build -j4")
 _BF_BUILD = "make -C betaflight TARGET=SITL -j4"
 
-# (artifact, source globs, rebuild command) — paths relative to REPO_ROOT.
+# The Controller Dashboard frontend the fleet drones serve (drone_stack
+# dashboard-ui): its build lives outside this repo. nvm is sourced explicitly —
+# SimControl may be started from the desktop launcher without it on PATH.
+DASHBOARD_DIR = Path(os.environ.get("LEAF_DASHBOARD_WWW", "~/Controller-Dashboard/www")
+                     ).expanduser().parent
+_DASHBOARD_BUILD = ('[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"; '
+                    f'cd "{DASHBOARD_DIR}" && npm run build')
+
+# (artifact, source globs, rebuild command[, base dir, tag]) — paths relative to
+# REPO_ROOT unless a base dir is given. Tagged checks only run when asked for
+# (stale_builds(include=…)): the dashboard matters only to a fleet with
+# per-drone dashboards.
 CHECKS = (
     (f"{_PLUGINS}/build/libShmCameraExportPlugin.so",
      (f"{_PLUGINS}/ShmCameraExportPlugin.cc",), _PLUGINS_BUILD),
@@ -42,6 +53,8 @@ CHECKS = (
      ("bf_sim_bridge/*.cpp", "bf_sim_bridge/*.h"), _BRIDGE_BUILD),
     ("betaflight/obj/main/betaflight_SITL.elf",
      ("betaflight/src/main/**/*.c", "betaflight/src/main/**/*.h"), _BF_BUILD),
+    ("www/index.html", ("src/**/*.ts", "src/**/*.html", "src/**/*.scss", "src/**/*.json"),
+     _DASHBOARD_BUILD, DASHBOARD_DIR, "dashboard"),
 )
 
 
@@ -58,23 +71,31 @@ def _newest(root: Path, patterns) -> tuple[float, Path | None]:
     return best, best_path
 
 
-def stale_builds(root: Path | str = REPO_ROOT) -> list[dict]:
+def stale_builds(root: Path | str = REPO_ROOT, include=()) -> list[dict]:
     """Every stale artifact: {artifact, reason, command} (paths relative to
-    `root`). Empty list = everything is built and current. Artifacts whose
-    sources are absent (a checkout without that submodule) are skipped."""
+    `root`, or absolute for an external project). Empty list = everything is
+    built and current. Artifacts whose sources are absent (a checkout without
+    that submodule/project) are skipped, and so are tagged checks not in
+    `include` (e.g. "dashboard")."""
     root = Path(root)
     out = []
-    for artifact, sources, command in CHECKS:
-        src_m, src_p = _newest(root, sources)
+    for check in CHECKS:
+        artifact, sources, command = check[:3]
+        base = Path(check[3]) if len(check) > 3 and check[3] else root
+        tag = check[4] if len(check) > 4 else None
+        if tag and tag not in include:
+            continue
+        src_m, src_p = _newest(base, sources)
         if src_p is None:
             continue
-        art = root / artifact
+        art = base / artifact
+        shown = artifact if base == root else str(art)
         if not art.exists():
-            out.append({"artifact": artifact, "reason": "not built", "command": command})
+            out.append({"artifact": shown, "reason": "not built", "command": command})
             continue
         if art.stat().st_mtime + 1.0 < src_m:
-            out.append({"artifact": artifact,
-                        "reason": f"older than {src_p.relative_to(root)}",
+            out.append({"artifact": shown,
+                        "reason": f"older than {src_p.relative_to(base)}",
                         "command": command})
     return out
 
