@@ -1779,10 +1779,19 @@ def render_fleet_models(drone: str, model_vars: dict, world_vars: dict, spec: di
 
     ped_r = float(world_vars.get("pedestal_radius") or 0.5)
     ped_h = float(world_vars.get("pedestal_height") or 0.30)
-    pedestals = [{"name": f"launcher_{l['id']}", "x": l["x"], "y": l["y"],
-                  # wide enough to carry every bay at any pan
-                  "radius": max(ped_r, l.get("bay_reach", 0.0) + ped_r),
-                  "height": ped_h} for l in spec["launchers"]]
+    pedestals = []
+    for l in spec["launchers"]:
+        ped = {"name": f"launcher_{l['id']}", "x": l["x"], "y": l["y"], "yaw": 0.0,
+               # wide enough to carry every bay at any pan
+               "radius": max(ped_r, l.get("bay_reach", 0.0) + ped_r),
+               "height": ped_h, "port": None}
+        course = launcher_course(l.get("course"), l.get("mount_heading_deg"))
+        if course is not None:
+            # A moving / rocking rig: its pedestal is driven over UDP by the
+            # course thread and spawns where that thread first puts it.
+            ped["x"], ped["y"], ped["yaw"] = launcher_course_pose(course, l["x"], l["y"])
+            ped["port"] = launcher_pedestal_port(l["id"])
+        pedestals.append(ped)
     world_vars["fleet_drones"] = drones
     world_vars["fleet_pedestals"] = pedestals
     log.info("Fleet: %d drones on %d launchers -> %s", len(drones), len(pedestals),
@@ -2982,6 +2991,307 @@ def start_trajectory_thread(
         rst_sock.close()
 
     t = threading.Thread(target=_traj_loop, daemon=True, name="trajectory")
+    t.start()
+    return t
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  MOVING LAUNCHER RIGS (fleet mode) — a launcher is FIXED unless its course is
+#  switched on (`moving`, opt-in per launcher); then it follows a loop exactly
+#  like a moving target, charted with the same generator (trajectory_sample)
+#  and the same editor. The loop's geometric centre is the launcher's own
+#  East/North; the rig FACES ITS VELOCITY (the travel heading replaces its
+#  fixed mount heading). Moving or fixed (a boat at anchor), its `sea_state`
+#  (opt-in) can WEAVE (lateral sinusoid of the pivot), HEAVE (altitude
+#  sinusoid) and ROCK (deck roll about its forward axis, deck pitch about its
+#  left axis); every amplitude defaults to 0. One
+#  thread flies every such rig at 60 Hz and tells everyone who rides or draws it:
+#    * Gazebo     — its pedestal model's pose (ExternalPosePlugin, UDP
+#                   LAUNCHER_PEDESTAL_PORT_BASE + (id − 230), on the host);
+#    * each drone — RIG_POSE_STRUCT to <drone IP>:RIG_POSE_PORT: bf_sim_bridge
+#                   places the drone on the moving, heaving pivot, tilts the
+#                   pedestal attitude by the deck, and adds the rig's velocity
+#                   (GPS), acceleration (accelerometer) and angular rate (gyro)
+#                   while it rides it, then keeps the release velocity
+#                   (slow-rig approximation);
+#    * the rig    — its compass heading to <rig IP>:RIG_HEADING_PORT, which
+#                   fake_launcher uses instead of --mount-heading-deg to turn
+#                   rig-frame pan into the pedestal's world yaw;
+#    * observers  — LAUNCHER_GT_STRUCT (the launcher's ground truth, like the
+#                   target's on 9018) to every --launcher-gt-mirror address:
+#                   the host sitl_redis_bridge re-emits it as MAVLink on
+#                   /tmp/mavlink_launcher, one vehicle per launcher. With a
+#                   mirror set, FIXED launchers are flown too (GT only — their
+#                   pedestal, drones and rig need nothing), so the ground
+#                   station gets every launcher's position from one source.
+#  A world reset (RC CH14 / SPACE → reset_world --launcher-reset-port) sends
+#  every rig back to its course start and restarts its sinusoids.
+# ─────────────────────────────────────────────────────────────────────────────
+LAUNCHER_COURSE_PRESETS = ("oval", "circle", "line")   # labels of the generic loop
+# Sea-state keys of a course (amplitude, rate pairs; a missing key = 0):
+# weave = metres left (+) of the direction of travel / the mount heading;
+# alt = metres up (+); roll = deg, + lifts the rig's LEFT side; pitch = deg,
+# + tips its FRONT down (Gazebo / FLU right-hand signs). All start at 0 phase.
+LAUNCHER_PERTURB_KEYS = ("weave_amp_m", "weave_rate_hz", "alt_amp_m", "alt_rate_hz",
+                         "roll_amp_deg", "roll_rate_hz", "pitch_amp_deg", "pitch_rate_hz")
+_LAUNCHER_PERTURB_PAIRS = (("weave_amp_m", "weave_rate_hz"), ("alt_amp_m", "alt_rate_hz"),
+                           ("roll_amp_deg", "roll_rate_hz"), ("pitch_amp_deg", "pitch_rate_hz"))
+LAUNCHER_PERTURB_MAX_RATE_HZ = 5.0      # the thread samples at 60 Hz
+LAUNCHER_DECK_MAX_DEG = 45.0
+LAUNCHER_PEDESTAL_PORT_BASE = 9060       # + (launcher id − 230): 9061..9070
+RIG_POSE_PORT = 9026                     # bf_sim_bridge --rig-pose-port (drone netns)
+RIG_HEADING_PORT = 9027                  # fake_launcher --heading-port (rig netns)
+LAUNCHER_COURSE_RESET_PORT = 9028        # the course thread (host); reset_world pokes it
+# magic, seq, pivot E/N + heave U [m], velocity E/N/U [m/s], acceleration
+# E/N/U [m/s²], heading [rad, ENU math yaw of the rig's forward axis], deck
+# roll / pitch [rad, applied after the heading], deck angular velocity E/N/U
+# [rad/s, world] — 128 bytes. bf_sim_bridge's poll_rig_pose mirrors it.
+RIG_POSE_STRUCT = struct.Struct("<4sI15d")
+RIG_POSE_MAGIC = b"RIGP"
+# magic, compass heading [deg] — fake_launcher's live mount heading.
+RIG_HEADING_STRUCT = struct.Struct("<4sd")
+RIG_HEADING_MAGIC = b"RHDG"
+# Launcher ground truth for observers (host UDP LAUNCHER_GT_PORT → the host
+# sitl_redis_bridge --mavlink-launchers): the RIGP fields + the launcher id,
+# 132 bytes. Differences from RIGP: U is the RAIL height above the ground
+# (pedestal height + heave — the point the drones sit on, the roster's Home
+# altitude), and every launcher is sent, fixed ones included.
+LAUNCHER_GT_PORT = 9029
+LAUNCHER_GT_STRUCT = struct.Struct("<4sI15dI")
+LAUNCHER_GT_MAGIC = b"LGTP"
+_RIG_ACCEL_TAU = 0.3     # s — filter on the course's own acceleration (curvature)
+_RIG_ACCEL_MAX = 15.0    # m/s² — clamp (a corner entry is a curvature step)
+
+
+def launcher_pedestal_port(launcher_id: int) -> int:
+    return LAUNCHER_PEDESTAL_PORT_BASE + (int(launcher_id) - 230)
+
+
+def _launcher_perturb(c: dict) -> dict:
+    """The perturbation fields of a course spec, validated (missing = 0)."""
+    out = {}
+    for amp_k, rate_k in _LAUNCHER_PERTURB_PAIRS:
+        amp, rate = float(c.get(amp_k, 0.0)), float(c.get(rate_k, 0.0))
+        if amp < 0 or rate < 0:
+            raise ValueError(f"{amp_k} / {rate_k} must be >= 0")
+        if amp > 0 and not 0 < rate <= LAUNCHER_PERTURB_MAX_RATE_HZ:
+            raise ValueError(f"{rate_k} must be in (0, {LAUNCHER_PERTURB_MAX_RATE_HZ:g}] "
+                             f"Hz when {amp_k} > 0")
+        if amp_k.endswith("_deg") and amp > LAUNCHER_DECK_MAX_DEG:
+            raise ValueError(f"{amp_k} must be <= {LAUNCHER_DECK_MAX_DEG:g}")
+        out[amp_k], out[rate_k] = amp, rate
+    return out
+
+
+def launcher_perturbed(course) -> bool:
+    """True when a course spec's sea state is ON with any amplitude > 0."""
+    c = dict(course or {})
+    return bool(c.get("sea_state")) and any(
+        float(c.get(a, 0.0) or 0.0) > 0 for a, _ in _LAUNCHER_PERTURB_PAIRS)
+
+
+def launcher_course(course, mount_heading_deg: float | None = None) -> dict | None:
+    """Normalise a launcher's course spec; None = a plain FIXED rig (nothing to
+    fly — not moving, no sea state).
+
+    The spec mirrors a target's trajectory (the same generator, the same
+    editor): ``moving`` (opt-in; default false = fixed at east/north facing
+    its mount heading), ``preset`` (oval | circle | line — only the label the
+    form shows; the geometry below is what flies), ``speed_kmh``,
+    ``ew_len`` / ``ns_len`` (the E-W / N-S straights) and ``corner_radius``
+    (one loop shape: circle = 0/0/r, line = L/0/r with an r-radius U-turn at
+    each end — a vehicle cannot reverse on the spot, so r must be > 0),
+    ``rotation_deg`` (about the loop centre = the launcher's east/north),
+    ``start_pos`` (0..1 of the loop), ``reverse``; and ``sea_state`` (opt-in)
+    with the LAUNCHER_PERTURB_KEYS. A fixed rig with its sea state on stays at
+    east/north and needs ``mount_heading_deg`` (compass) for its axes."""
+    c = dict(course or {})
+    moving = bool(c.get("moving", False))
+    sea = bool(c.get("sea_state", False))
+    pert = _launcher_perturb(c) if sea else {k: 0.0 for k in LAUNCHER_PERTURB_KEYS}
+    if not moving:
+        if not launcher_perturbed(c):
+            return None
+        if mount_heading_deg is None:
+            raise ValueError("a fixed launcher with a sea state needs its mount heading")
+        return {**launcher_fixed_course(mount_heading_deg), **pert}
+    ew, ns, r = float(c["ew_len"]), float(c["ns_len"]), float(c["corner_radius"])
+    if min(ew, ns) < 0:
+        raise ValueError("launcher course: the straights must be >= 0 m")
+    if r <= 0:
+        raise ValueError("launcher course: corner_radius must be > 0 m (the rig turns, "
+                         "it cannot reverse on the spot)")
+    speed = float(c["speed_kmh"])
+    if speed <= 0:
+        raise ValueError("launcher course: speed_kmh must be > 0 (untick Moving to fix it in place)")
+    return {"moving": True, "speed_ms": speed / 3.6, "oval_ew_len": ew, "oval_ns_len": ns,
+            "corner_radius": r, "rotation_deg": float(c.get("rotation_deg", 0.0)),
+            "start_pos": float(c.get("start_pos", 0.0)), "reverse": bool(c.get("reverse", False)),
+            **pert}
+
+
+def launcher_fixed_course(mount_heading_deg: float) -> dict:
+    """The course of a FIXED launcher (no motion, no sea state) — what the
+    course thread flies for it when only its ground truth is wanted."""
+    return {"moving": False, "speed_ms": 0.0, "oval_ew_len": 0.0, "oval_ns_len": 0.0,
+            "corner_radius": 1.0, "rotation_deg": 0.0, "start_pos": 0.0, "reverse": False,
+            "static_yaw": math.radians(90.0 - float(mount_heading_deg)),
+            **{k: 0.0 for k in LAUNCHER_PERTURB_KEYS}}
+
+
+def launcher_course_pose(course: dict, center_e: float, center_n: float, s: float = 0.0):
+    """(east, north, yaw_enu) of a rig at arc length ``s`` along its course
+    (from :func:`launcher_course`), the loop centred on its launcher's
+    East/North; yaw = the direction of travel (a fixed rig: its pivot and
+    mount heading). Perturbations are NOT included (they start at 0)."""
+    if not course["moving"]:
+        return center_e, center_n, course["static_yaw"]
+    return trajectory_sample(s, rotation_deg=course["rotation_deg"], offset_ew=center_e,
+                             offset_ns=center_n, oval_ew_len=course["oval_ew_len"],
+                             oval_ns_len=course["oval_ns_len"],
+                             corner_radius=course["corner_radius"],
+                             start_pos=course["start_pos"], reverse=course["reverse"])
+
+
+def _sinusoid(amp: float, rate_hz: float, t: float):
+    """amp·sin(2π·rate·t) and its first two time derivatives."""
+    if amp == 0.0:
+        return 0.0, 0.0, 0.0
+    w = 2.0 * math.pi * rate_hz
+    sn, cs = math.sin(w * t), math.cos(w * t)
+    return amp * sn, amp * w * cs, -amp * w * w * sn
+
+
+def start_launcher_course_thread(stop_event: threading.Event, rigs: list,
+                                 reset_port: int = LAUNCHER_COURSE_RESET_PORT,
+                                 pedestal_z: float = 0.15, gt_addrs=(),
+                                 rail_height: float = 0.30) -> threading.Thread:
+    """Fly every moving / weaving / rocking launcher rig (see the block comment
+    above). ``rigs``: [{id, course (launcher_course), center_e, center_n,
+    pedestal_port, rig_heading_addr (ip, port), drone_addrs [(ip, port)],
+    drive}] — ``drive`` False = ground truth only (a fixed launcher: no
+    pedestal / rig / drone packets). ``pedestal_z`` = the pedestal model's
+    origin height (half its length); ``gt_addrs`` = observers of
+    LAUNCHER_GT_STRUCT, whose U is ``rail_height`` + heave."""
+    packer = struct.Struct("<Qd3d4d")
+
+    class _Rig:
+        def __init__(self, spec):
+            self.spec = spec
+            self.reset()
+
+        def reset(self):
+            self.s = 0.0
+            self.t = 0.0
+            self.v_prev = None
+            self.yaw_prev = None
+            self.acc = [0.0, 0.0]
+
+        def step(self, dt):
+            """→ (e, n, u, vel E/N/U, acc E/N/U, yaw, deck roll, deck pitch,
+            deck angular velocity E/N/U)."""
+            c = self.spec["course"]
+            self.s += c["speed_ms"] * dt
+            self.t += dt
+            e, n, yaw = launcher_course_pose(c, self.spec["center_e"], self.spec["center_n"], self.s)
+            vb = (c["speed_ms"] * math.cos(yaw), c["speed_ms"] * math.sin(yaw))
+            # Turn rate of the course: yaw is a function of s, which advances
+            # by exactly speed·dt, so this difference is exact (0 on straights).
+            yaw_rate = 0.0
+            if self.yaw_prev is not None and dt > 1e-4:
+                d = yaw - self.yaw_prev
+                yaw_rate = math.atan2(math.sin(d), math.cos(d)) / dt
+            self.yaw_prev = yaw
+            if self.v_prev is not None and dt > 1e-4:
+                k = dt / (_RIG_ACCEL_TAU + dt)
+                for i in (0, 1):
+                    raw = max(-_RIG_ACCEL_MAX, min(_RIG_ACCEL_MAX, (vb[i] - self.v_prev[i]) / dt))
+                    self.acc[i] += k * (raw - self.acc[i])
+            self.v_prev = vb
+            # Perturbations, analytic (exact — no filter lag on a fast sea).
+            w, wd, wdd = _sinusoid(c["weave_amp_m"], c["weave_rate_hz"], self.t)
+            u, ud, udd = _sinusoid(c["alt_amp_m"], c["alt_rate_hz"], self.t)
+            roll, roll_d, _ = _sinusoid(math.radians(c["roll_amp_deg"]), c["roll_rate_hz"], self.t)
+            pitch, pitch_d, _ = _sinusoid(math.radians(c["pitch_amp_deg"]), c["pitch_rate_hz"],
+                                          self.t)
+            tx, ty = math.cos(yaw), math.sin(yaw)        # forward
+            lx, ly = -ty, tx                             # left
+            # weave w along the (turning) left axis: d(left)/dt = −ψ̇·forward
+            a_left, a_fwd = wdd - w * yaw_rate * yaw_rate, -2.0 * wd * yaw_rate
+            vel = (vb[0] + wd * lx - w * yaw_rate * tx, vb[1] + wd * ly - w * yaw_rate * ty, ud)
+            acc = tuple(max(-_RIG_ACCEL_MAX, min(_RIG_ACCEL_MAX, a)) for a in
+                        (self.acc[0] + a_left * lx + a_fwd * tx,
+                         self.acc[1] + a_left * ly + a_fwd * ty, udd))
+            # deck = Rz(yaw)·Ry(pitch)·Rx(roll): ω = ψ̇·ẑ + θ̇·Rz ŷ + φ̇·Rz Ry x̂
+            cp = math.cos(pitch)
+            omega = (-pitch_d * ty + roll_d * cp * tx,
+                     pitch_d * tx + roll_d * cp * ty,
+                     yaw_rate - roll_d * math.sin(pitch))
+            return (e + w * lx, n + w * ly, u, vel, acc, yaw, roll, pitch, omega)
+
+    def _loop():
+        interval = 1.0 / 60
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rst = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rst.bind(("0.0.0.0", reset_port))
+        rst.setblocking(False)
+        flyers = [_Rig(r) for r in rigs]
+        for r in rigs:
+            c = r["course"]
+            if not r.get("drive", True):
+                log.info("Launcher %d: fixed — ground truth only", r["id"])
+                continue
+            pert = ", ".join(f"{a} {c[a]:g}@{c[b]:g}Hz" for a, b in _LAUNCHER_PERTURB_PAIRS if c[a])
+            log.info("Launcher %d course: %s %.1f km/h, centre (%.0fE, %.0fN), rot %.0f°%s "
+                     "(pedestal UDP %d, %d drone(s))", r["id"],
+                     "moving" if c["moving"] else "fixed", c["speed_ms"] * 3.6,
+                     r["center_e"], r["center_n"], c["rotation_deg"],
+                     f", {pert}" if pert else "", r["pedestal_port"], len(r["drone_addrs"]))
+        seq, t0 = 0, time.monotonic()
+        t_prev = t0
+        while not stop_event.is_set():
+            try:
+                while True:
+                    rst.recv(64)
+                    for f in flyers:
+                        f.reset()
+                    t_prev = time.monotonic()
+                    log.info("Launcher courses: reset to start")
+            except BlockingIOError:
+                pass
+            t_now = time.monotonic()
+            dt, t_prev = t_now - t_prev, t_now
+            for f in flyers:
+                r = f.spec
+                e, n, u, vel, acc, yaw, roll, pitch, omega = f.step(dt)
+                out = []
+                if r.get("drive", True):
+                    q = _euler_zyx_to_quat(roll, pitch, yaw)
+                    out = [(("127.0.0.1", r["pedestal_port"]),
+                            packer.pack(seq, t_now - t0, e, n, pedestal_z + u, *q)),
+                           (r["rig_heading_addr"],
+                            RIG_HEADING_STRUCT.pack(RIG_HEADING_MAGIC,
+                                                    (90.0 - math.degrees(yaw)) % 360.0))]
+                    pose = RIG_POSE_STRUCT.pack(RIG_POSE_MAGIC, seq & 0xFFFFFFFF, e, n, u,
+                                                *vel, *acc, yaw, roll, pitch, *omega)
+                    out += [(a, pose) for a in r["drone_addrs"]]
+                if gt_addrs:
+                    gt = LAUNCHER_GT_STRUCT.pack(LAUNCHER_GT_MAGIC, seq & 0xFFFFFFFF, e, n,
+                                                 rail_height + u, *vel, *acc, yaw, roll, pitch,
+                                                 *omega, int(r["id"]))
+                    out += [(a, gt) for a in gt_addrs]
+                for dst, data in out:
+                    try:
+                        sock.sendto(data, dst)
+                    except OSError:
+                        pass
+            seq += 1
+            stop_event.wait(timeout=interval)
+        sock.close()
+        rst.close()
+
+    t = threading.Thread(target=_loop, daemon=True, name="launcher-courses")
     t.start()
     return t
 

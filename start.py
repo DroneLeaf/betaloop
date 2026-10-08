@@ -79,6 +79,12 @@ from common import (
     start_balloon_thread,
     start_static_target_thread,
     start_trajectory_thread,
+    start_launcher_course_thread,
+    launcher_course,
+    launcher_fixed_course,
+    launcher_pedestal_port,
+    RIG_POSE_PORT,
+    RIG_HEADING_PORT,
     load_extra_targets,
     TERRAIN_THEMES,
     TRAJ_TYPES,
@@ -381,6 +387,17 @@ def parse_args():
              "run ONLY the shared world (Gazebo + target). Betaflight, the "
              "Simulink bridge and the camera bridges run in each drone's "
              "container instead.",
+    )
+    sim.add_argument(
+        "--launcher-gt-mirror",
+        action="append",
+        default=None,
+        metavar="[HOST:]PORT",
+        help="Fleet mode: send every launcher's ground truth (position, velocity, "
+             "heading, deck attitude — fixed launchers included) to this address, "
+             "e.g. 127.0.0.1:9029 for a host sitl_redis_bridge --mavlink-launchers "
+             "that emits each launcher as its own MAVLink vehicle for the ground "
+             "station. Repeatable.",
     )
     sim.add_argument(
         "--fleet-target-mirror",
@@ -1301,6 +1318,7 @@ def main():
 
     bf_bridge_proc = bridge_proc = chase_bridge_proc = None
     fanout_stop = threading.Event()
+    rig_thread, rig_stop = None, threading.Event()
     if args.fleet_spec:
         # ── 3F. Fleet mode: the drones (BF SITL, Simulink bridge, LeafFC) run
         # in their own containers and stream poses straight to their model's
@@ -1314,6 +1332,34 @@ def main():
             h, _, p = hp.rpartition(":")
             mirror.append((h or "127.0.0.1", int(p)))
         start_udp_fanout(fanout_stop, TARGET_MIRROR_PORT, mirror)
+        # Moving / weaving / rocking launcher rigs (a `course` in the fleet
+        # file): one thread flies them all — pedestal pose → Gazebo, rig pose →
+        # each carried drone's bf_sim_bridge, live heading → the rig's
+        # fake_launcher. Plain fixed rigs need nothing (their bridges keep
+        # --origin-e/-n on a level deck) — unless --launcher-gt-mirror asks for
+        # every launcher's ground truth, which the same thread then sends for
+        # the fixed ones too (ground truth only).
+        gt_addrs = []
+        for hp in args.launcher_gt_mirror or []:
+            h, _, p = hp.rpartition(":")
+            gt_addrs.append((h or "127.0.0.1", int(p)))
+        rigs = []
+        for L in args.fleet_spec["launchers"]:
+            course = launcher_course(L.get("course"), L.get("mount_heading_deg"))
+            if course is not None:
+                rigs.append({"id": L["id"], "course": course,
+                             "center_e": L["x"], "center_n": L["y"],
+                             "pedestal_port": launcher_pedestal_port(L["id"]),
+                             "rig_heading_addr": (L["ip"], RIG_HEADING_PORT),
+                             "drone_addrs": [(ip, RIG_POSE_PORT) for ip in L.get("drones", [])]})
+            elif gt_addrs:
+                rigs.append({"id": L["id"], "drive": False, "center_e": L["x"],
+                             "center_n": L["y"], "drone_addrs": [],
+                             "course": launcher_fixed_course(L.get("mount_heading_deg", 90.0))})
+        if rigs:
+            ped_h = float(world_vars.get("pedestal_height") or 0.30)
+            rig_thread = start_launcher_course_thread(
+                rig_stop, rigs, pedestal_z=ped_h / 2.0, gt_addrs=gt_addrs, rail_height=ped_h)
         print("\n  Fleet world %r up — %d drones, %d launchers" % (
             gz_world_name, len(args.fleet_spec["drones"]), len(args.fleet_spec["launchers"])))
         for d in args.fleet_spec["drones"]:
@@ -1671,6 +1717,9 @@ def main():
     if static_thread:
         static_stop.set()
         static_thread.join(timeout=2)
+    if rig_thread:
+        rig_stop.set()
+        rig_thread.join(timeout=2)
     fanout_stop.set()
 
     pm.shutdown(extra_pkill_patterns=["betaflight_SITL.elf"])
