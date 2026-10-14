@@ -620,3 +620,64 @@ any new motion so Ctrl-C exits cleanly.
   load and inherits the boosted nice from the main thread.
 - Sudoers line (HOST_SETUP §8, /etc/sudoers.d/simcontrol-bridges):
   `<user> ALL=(root) NOPASSWD: $HOME/betaflight-docker/boost_sim_priority.sh`
+
+## Session Addendum (2026-10-03) — `--fleet-target-mirror`
+
+- `start.py --fleet-target-mirror [HOST:]PORT` (repeatable, fleet mode only):
+  extra destinations for the target ground-truth fanout, which otherwise
+  only reaches each drone's `<ip>:9018` (the fanout itself holds
+  127.0.0.1:9018). SimControl passes `127.0.0.1:9019` for its host
+  sitl_redis_bridge that emits the target as MAVLink for the ground station.
+
+## Session Addendum (2026-10-03b) — multiple targets (`--extra-targets`)
+
+- Both launchers: `--extra-targets FILE.json` (list of per-target dicts, keys
+  as in leaf-sim-ui's moving_target store) → `common.load_extra_targets()` in
+  parse_args (`args.extra_target_specs`, moving_target only) → passed to
+  `compute_world_vars(extra_targets=)` (emits `extra_targets` spawn poses),
+  `start_trajectory_thread(extra_targets=)` and the OSD bridge
+  (`--extra-target-model`). Ports: target k pose `EXTRA_TARGET_PORT_BASE + k`
+  (9050+k); GT mirror shares 9018 with the indexed 76-byte
+  `TARGET_INDEXED_STRUCT` packet. `load_extra_targets` is in BOTH from-common
+  import lists (py_compile does not catch a missing one).
+- `start_trajectory_thread` refactor: per-target `_Flyer` (arc length,
+  perturbation clock, FD attitude); target 1's packets are byte-identical to
+  before (fake-clock regression, 3 configs).
+
+## Session Addendum (2026-10-04) — `--gpu-warp`, `--ogre-workers`
+
+- **`--gpu-warp/--no-gpu-warp`** (both launchers, default ON):
+  `compute_model_vars(gpu_warp=)` builds the `shm_warp` list (sensor, out_w,
+  out_h, spec) inside each of the four warp blocks (wide/narrow/thermal/
+  utility) and emits it for the drone templates' `<warp>` children;
+  `start_tracker_bridges` omits the bridge's `--warp-fisheye` for exactly
+  those feeds. Both decisions go through ONE predicate,
+  `gpu_warp_applies(gpu_warp, shm_export, supersample)` (= on + shm
+  transport + supersample ≤ 1), and ONE spec builder, `warp_spec_string(…)`,
+  so plugin and bridge can never disagree about who warps. Supersample > 1
+  and `--camera-transport topic` keep the bridge's CPU warp.
+- **`--ogre-workers N`** (both launchers, default `DEFAULT_OGRE_WORKERS` = 2;
+  0 = stock one-per-logical-core): `common.gz_spawn_env(N)` returns a copy of
+  the environment with `libOgreWorkerThreads.so` prepended to `LD_PRELOAD`
+  and `GZ_OGRE_WORKER_THREADS=N`, passed ONLY to the gz spawn
+  (`pm.spawn(gz_args, env=…)`). Returns None (inherit, stock) at N ≤ 0 or
+  when the shim isn't built (logs the build command). Both names are in both
+  from-common import lists.
+
+## Session Addendum (2026-10-04b) — `build_check.py` + `warn_stale_builds`
+
+- New stdlib module `build_check.py` (`stale_builds(root)`, `rebuild_commands`,
+  `CHECKS` = artifact → source globs → rebuild command). `common.
+  warn_stale_builds()` logs the stale list + commands; called first thing in
+  both launchers' `main()` (name in both from-common import lists). leaf-sim-ui
+  imports the same module by path for its Initialize dialog. Add a new
+  compiled artifact to `CHECKS` when you add one.
+
+## Session Addendum (2026-10-05) — Shahed default scale 1.0 → 1.8
+
+- `TARGET_REFS["shahed"]["default_scale"]` = **1.8** (mirrored in leaf-sim-ui
+  `TARGET_DEFAULT_SCALES` + `_COMMON_WORLD_DEFAULTS`): the raw mesh is ~54% of
+  a real Shahed-136 (1.90 × 1.44 × 0.34 m at 1.0 vs 3.5 × 2.5 × 0.55 m); 1.8
+  gives 3.42 × 2.59 × 0.61 m. Defaults only — a world's SAVED target_scale
+  still wins. StingJet stays 0.1 (≈0.18 matches a 2.3 × 2.9 m airframe's
+  planform; its MQ-9 proportions can't match all three dims at once).
