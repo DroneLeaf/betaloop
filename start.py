@@ -83,6 +83,7 @@ from common import (
     launcher_course,
     launcher_fixed_course,
     launcher_pedestal_port,
+    single_launcher_layout,
     RIG_POSE_PORT,
     RIG_HEADING_PORT,
     load_extra_targets,
@@ -332,11 +333,53 @@ def _render_all_templates(drone, world_name, args):
 
     if getattr(args, "fleet_spec", None):
         render_fleet_models(drone, model_vars, world_vars, args.fleet_spec)
+    L = getattr(args, "single_spec", None)
+    if L:
+        # The drone rides its launcher: pedestal at the pivot (a driven rig's
+        # pedestal is flown over UDP like a fleet one), drone on top of it.
+        world_vars["single_pedestal"] = {"x": L["x"], "y": L["y"],
+                                         "yaw": L["yaw"] if L["course"] else 0.0,
+                                         "port": L["pedestal_port"]}
+        world_vars["single_drone"] = {"x": L["x"], "y": L["y"], "yaw": L["yaw"]}
 
     # ── Render vis model + vis world (shared helper) ──
     render_vis_templates(drone, world_name, WORLD_MAP, model_vars, world_vars)
 
     return world_vars
+
+
+def _start_launcher_rigs(args, world_vars, rig_stop, launchers):
+    """Start the launcher-course thread for these launchers, or return None
+    when it has nothing to fly. A DRIVEN rig (moving, or a sea state: its
+    ``course`` from launcher_course is not None) gets its pedestal pose (to
+    Gazebo), its rig pose (to every carried drone's bf_sim_bridge) and its
+    live heading (to its fake_launcher). A plain FIXED rig needs nothing (the
+    bridges keep --origin-e/-n on a level deck) — unless --launcher-gt-mirror
+    asks for every launcher's ground truth, which the same thread then sends
+    for it too (ground truth only). ``launchers``: [{id, center_e, center_n,
+    mount_heading_deg, course, rig_ip, drone_ips}] — fleet mode's world spec
+    launchers, or single-drone mode's one launcher riding the host bridge."""
+    gt_addrs = []
+    for hp in args.launcher_gt_mirror or []:
+        h, _, p = hp.rpartition(":")
+        gt_addrs.append((h or "127.0.0.1", int(p)))
+    rigs = []
+    for L in launchers:
+        if L["course"] is not None:
+            rigs.append({"id": L["id"], "course": L["course"],
+                         "center_e": L["center_e"], "center_n": L["center_n"],
+                         "pedestal_port": launcher_pedestal_port(L["id"]),
+                         "rig_heading_addr": (L["rig_ip"], RIG_HEADING_PORT),
+                         "drone_addrs": [(ip, RIG_POSE_PORT) for ip in L["drone_ips"]]})
+        elif gt_addrs:
+            rigs.append({"id": L["id"], "drive": False, "center_e": L["center_e"],
+                         "center_n": L["center_n"], "drone_addrs": [],
+                         "course": launcher_fixed_course(L["mount_heading_deg"])})
+    if not rigs:
+        return None
+    ped_h = float(world_vars.get("pedestal_height") or 0.30)
+    return start_launcher_course_thread(
+        rig_stop, rigs, pedestal_z=ped_h / 2.0, gt_addrs=gt_addrs, rail_height=ped_h)
 
 
 def send_bf_cli_commands(commands, host="127.0.0.1", port=5761, timeout=2.0):
@@ -389,11 +432,23 @@ def parse_args():
              "container instead.",
     )
     sim.add_argument(
+        "--single-launcher",
+        default=None,
+        metavar="SPEC.json",
+        help="Single-drone mode: the launcher the drone rides — {id, east_m, "
+             "north_m, mount_heading_deg, course, rig_ip} (written by SimControl). "
+             "Its pedestal and the drone spawn on it, the bridge places the drone "
+             "at its pivot, and a moving / rocking rig is flown by the "
+             "launcher-course thread (pedestal pose, rig pose to this bridge, live "
+             "heading to the rig). Without it the drone sits at the world origin.",
+    )
+    sim.add_argument(
         "--launcher-gt-mirror",
         action="append",
         default=None,
         metavar="[HOST:]PORT",
-        help="Fleet mode: send every launcher's ground truth (position, velocity, "
+        help="Fleet or --single-launcher mode: send every launcher's ground truth "
+             "(position, velocity, "
              "heading, deck attitude — fixed launchers included) to this address, "
              "e.g. 127.0.0.1:9029 for a host sitl_redis_bridge --mavlink-launchers "
              "that emits each launcher as its own MAVLink vehicle for the ground "
@@ -1231,6 +1286,19 @@ def main():
     args = parse_args()
     warn_stale_builds()
     args.fleet_spec = None
+    args.single_spec = None
+    if args.single_launcher:
+        import json
+        if args.fleet_world:
+            log.error("--single-launcher and --fleet-world are exclusive (a fleet's "
+                      "drones ride the fleet file's launchers)")
+            sys.exit(1)
+        with open(args.single_launcher) as f:
+            try:
+                args.single_spec = single_launcher_layout(json.load(f))
+            except (ValueError, KeyError, TypeError) as ex:
+                log.error("--single-launcher: %s", ex)
+                sys.exit(1)
     if args.fleet_world:
         import json
         with open(args.fleet_world) as f:
@@ -1339,27 +1407,12 @@ def main():
         # --origin-e/-n on a level deck) — unless --launcher-gt-mirror asks for
         # every launcher's ground truth, which the same thread then sends for
         # the fixed ones too (ground truth only).
-        gt_addrs = []
-        for hp in args.launcher_gt_mirror or []:
-            h, _, p = hp.rpartition(":")
-            gt_addrs.append((h or "127.0.0.1", int(p)))
-        rigs = []
-        for L in args.fleet_spec["launchers"]:
-            course = launcher_course(L.get("course"), L.get("mount_heading_deg"))
-            if course is not None:
-                rigs.append({"id": L["id"], "course": course,
-                             "center_e": L["x"], "center_n": L["y"],
-                             "pedestal_port": launcher_pedestal_port(L["id"]),
-                             "rig_heading_addr": (L["ip"], RIG_HEADING_PORT),
-                             "drone_addrs": [(ip, RIG_POSE_PORT) for ip in L.get("drones", [])]})
-            elif gt_addrs:
-                rigs.append({"id": L["id"], "drive": False, "center_e": L["x"],
-                             "center_n": L["y"], "drone_addrs": [],
-                             "course": launcher_fixed_course(L.get("mount_heading_deg", 90.0))})
-        if rigs:
-            ped_h = float(world_vars.get("pedestal_height") or 0.30)
-            rig_thread = start_launcher_course_thread(
-                rig_stop, rigs, pedestal_z=ped_h / 2.0, gt_addrs=gt_addrs, rail_height=ped_h)
+        rig_thread = _start_launcher_rigs(args, world_vars, rig_stop, [
+            {"id": L["id"], "center_e": L["x"], "center_n": L["y"],
+             "mount_heading_deg": L.get("mount_heading_deg", 90.0),
+             "course": launcher_course(L.get("course"), L.get("mount_heading_deg")),
+             "rig_ip": L["ip"], "drone_ips": list(L.get("drones", []))}
+            for L in args.fleet_spec["launchers"]])
         print("\n  Fleet world %r up — %d drones, %d launchers" % (
             gz_world_name, len(args.fleet_spec["drones"]), len(args.fleet_spec["launchers"])))
         for d in args.fleet_spec["drones"]:
@@ -1419,6 +1472,14 @@ def main():
             bridge_args += ["--home-lon", str(args.home_lon)]
         if args.home_alt is not None:
             bridge_args += ["--home-alt", str(args.home_alt)]
+        L = args.single_spec
+        if L:
+            # The drone rides its launcher: placed at the pivot (the only bay,
+            # offset 0), and a driven rig streams its live pose to this bridge.
+            bridge_args += ["--origin-e", f"{L['x']:.4f}", "--origin-n", f"{L['y']:.4f}",
+                            "--bay-offset", "0"]
+            if L["course"] is not None:
+                bridge_args += ["--rig-pose-port", str(RIG_POSE_PORT)]
         # Kinematic shake-table: on for the shake_test world, or forced via --shake.
         if world_entry.get("shake") or getattr(args, "shake", False):
             bridge_args += ["--shake"]
@@ -1456,6 +1517,14 @@ def main():
             log.error("bf_sim_bridge exited immediately (code %d)", bf_bridge_proc.returncode)
             pm.shutdown()
             sys.exit(1)
+        if L:
+            log.info("Launcher %d: drone on its pivot E=%.2f N=%.2f, %s", L["id"], L["x"], L["y"],
+                     "fixed" if L["course"] is None else
+                     ("moving" if L["course"]["moving"] else "fixed, sea state"))
+            rig_thread = _start_launcher_rigs(args, world_vars, rig_stop, [
+                {"id": L["id"], "center_e": L["center_e"], "center_n": L["center_n"],
+                 "mount_heading_deg": L["mount_heading_deg"], "course": L["course"],
+                 "rig_ip": L["rig_ip"], "drone_ips": ["127.0.0.1"]}])
 
         # ── 4. Betaflight SITL ──
         if not os.path.isfile(args.elf):

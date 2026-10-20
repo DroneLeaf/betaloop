@@ -681,3 +681,22 @@ any new motion so Ctrl-C exits cleanly.
   gives 3.42 × 2.59 × 0.61 m. Defaults only — a world's SAVED target_scale
   still wins. StingJet stays 0.1 (≈0.18 matches a 2.3 × 2.9 m airframe's
   planform; its MQ-9 proportions can't match all three dims at once).
+
+## Session Addendum (2026-10-20) — `--single-launcher` (single drone rides its launcher)
+
+- `start.py --single-launcher SPEC.json` ({id, east_m, north_m,
+  mount_heading_deg, course, rig_ip}; written by SimControl; exclusive with
+  `--fleet-world`): `common.single_launcher_layout(spec)` = drone_ctl.load_fleet's
+  rule for a one-drone launcher (fixed → its E/N facing its mount heading;
+  driven → its course start facing along the course). world vars
+  `single_pedestal` {x, y, yaw, port} + `single_drone` {x, y, yaw} (the 5 world
+  templates branch on them; absent = byte-identical renders, verified),
+  bf_sim_bridge `--origin-e/-n --bay-offset 0` (+ `--rig-pose-port 9026` for a
+  driven rig), and the launcher-course thread for a driven rig (RIGP →
+  127.0.0.1:9026, RHDG → its rig :9027, pedestal → 9060+(id−230)) or, with
+  `--launcher-gt-mirror`, a fixed rig's ground truth.
+- The fleet branch's rig building moved into `_start_launcher_rigs()` (shared
+  by both modes); verified it hands the course thread identical rigs to the old
+  inline code (3 launchers incl. moving + sea state, mirror on and off).
+- start_px4.py is untouched: px4_sim_bridge has no placement / rig-pose
+  support, so SimControl pins a PX4 single launcher at the origin.

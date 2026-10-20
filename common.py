@@ -3153,6 +3153,30 @@ def launcher_course_pose(course: dict, center_e: float, center_n: float, s: floa
                              start_pos=course["start_pos"], reverse=course["reverse"])
 
 
+def single_launcher_layout(spec: dict | None) -> dict | None:
+    """Single-drone mode's launcher (start.py --single-launcher): where its
+    pedestal and the drone riding it spawn, and the course the launcher-course
+    thread flies for it. drone_ctl.load_fleet's rule for a one-drone launcher
+    (bay offset 0): a fixed rig sits at its East/North facing its mount
+    heading; a driven one (moving, or a sea state on) starts at its course
+    start facing along the course. ``spec``: {id, east_m, north_m,
+    mount_heading_deg, course (the UI's), rig_ip}. None = no launcher."""
+    if not spec:
+        return None
+    lid = int(spec.get("id", 231))
+    e, n = float(spec.get("east_m", 0.0)), float(spec.get("north_m", 0.0))
+    heading = float(spec.get("mount_heading_deg", 90.0))
+    course = launcher_course(spec.get("course"), heading)
+    if course is not None:
+        x, y, yaw = launcher_course_pose(course, e, n)
+    else:
+        x, y, yaw = e, n, math.radians(90.0 - heading)
+    return {"id": lid, "center_e": e, "center_n": n, "mount_heading_deg": heading,
+            "x": x, "y": y, "yaw": yaw, "course": course,
+            "pedestal_port": launcher_pedestal_port(lid) if course is not None else None,
+            "rig_ip": spec.get("rig_ip")}
+
+
 def _sinusoid(amp: float, rate_hz: float, t: float):
     """amp·sin(2π·rate·t) and its first two time derivatives."""
     if amp == 0.0:
