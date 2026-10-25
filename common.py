@@ -1504,6 +1504,19 @@ DEFAULT_TARGET_ALTITUDE = {
 }
 
 
+def camera_visualization_step(args) -> float:
+    """Pace the visual-only world from enabled camera rates (30–2000 Hz).
+
+    This does not change the independent 250 Hz Simulink dynamics clock.
+    """
+    rates = [float(getattr(args, key, 0) or 0) for key, enabled in (
+        ("fpv_cam_fps", "pilot_cam"), ("tracker_wide_cam_fps", "tracker_wide_cam"),
+        ("tracker_narrow_cam_fps", "tracker_narrow_cam"), ("thermal_cam_fps", "thermal_cam"),
+        ("utility_cam_fps", "utility_cam")) if getattr(args, enabled, False)]
+    rates = [rate for rate in rates if math.isfinite(rate) and rate > 0]
+    return min(max(1.0 / max(rates), 1.0 / 2000), 1.0 / 30) if rates else 0.004
+
+
 def default_target_altitude(world_name: str) -> float:
     """Per-world default target spawn altitude in metres (default 10)."""
     return DEFAULT_TARGET_ALTITUDE.get(world_name, 10.0)

@@ -1,5 +1,25 @@
 # CLAUDE.md — Agent Handover (`betaloop/`)
 
+## Session Addendum (2026-10-25) — camera FPS controls the normal pipeline
+
+- `common.camera_visualization_step(args)` is shared by BF and PX4 launchers:
+  1/max(enabled camera FPS), clamped to [0.5 ms, 1/30 s], fallback 4 ms when
+  no enabled positive rate exists. The old 4 ms minimum capped render at 250 Hz.
+  Only visualizer pacing changes; independent Simulink dynamics stay 250 Hz.
+- Shake Lab no longer overrides rates or sends set_physics on Apply. Its native
+  presenter reads the existing bridge's clean RGB. The existing camera update
+  flags / template rate propagation remain the original path; no new feed or
+  world-map entry. Set normal camera FPS before Initialize.
+- Regression `tracker-shake-lab/test_integration.py` checks shared BF/PX4 helper,
+  disabled-camera exclusion, 30/90/120/240/360/480 rates and default fallback.
+
+## Session Addendum (2026-10-23) — Shake Lab build dependencies
+
+- `build_check.py` tracks the exporter's new `Recovery*.hh` headers, plus a
+  tagged `shake-lab` check for `tracker-shake-lab/build/shake_presenter`.
+  No flight launcher / WORLD_MAP changes: the lab's optional owned Gazebo scene
+  is a standalone visual-only tool; normal BF / PX4 worlds use attachment mode.
+
 Python launchers for the drone SITL stacks. Two entry points share one utility
 module so BF and PX4 stay in feature parity.
 

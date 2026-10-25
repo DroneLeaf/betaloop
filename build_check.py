@@ -46,7 +46,10 @@ _LAUNCHER_APP = "projects/leaf-launcher-controller-dashboard/src"
 # per-drone dashboards, "launcher-dashboard" to one with per-launcher ones.
 CHECKS = (
     (f"{_PLUGINS}/build/libShmCameraExportPlugin.so",
-     (f"{_PLUGINS}/ShmCameraExportPlugin.cc",), _PLUGINS_BUILD),
+     (f"{_PLUGINS}/ShmCameraExportPlugin.cc", f"{_PLUGINS}/Recovery*.hh"), _PLUGINS_BUILD),
+    ("tracker-shake-lab/build/shake_presenter",
+     ("tracker-shake-lab/presenter.cc", f"{_PLUGINS}/RecoveryMotion.hh"),
+     "bash tracker-shake-lab/build.sh", None, "shake-lab"),
     (f"{_PLUGINS}/build/libOgreWorkerThreads.so",
      (f"{_PLUGINS}/OgreWorkerThreads.cc",), _PLUGINS_BUILD),
     (f"{_PLUGINS}/build/gz_image_bridge",

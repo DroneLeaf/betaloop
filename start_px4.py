@@ -52,6 +52,7 @@ from common import (
     add_lens_args,
     compute_model_vars,
     compute_world_vars,
+    camera_visualization_step,
     configure_display,
     lens_kwargs_from_args,
     default_path,
@@ -631,14 +632,7 @@ def main():
         **lens_kwargs_from_args(args),
         chase_cam_enabled=getattr(args, "chase_cam", False),
     )
-        # Sim step = 1/max(enabled camera fps): the render pass with every due
-    # camera must fit in one step (lock-stepped sim) — measured 88 -> 90.0 fps
-    # for two 90 Hz trackers. Never coarser than 30 Hz, never finer than 4 ms.
-    _cam_fps = [float(getattr(args, a, 0) or 0) for a, en in (
-        ("fpv_cam_fps", "pilot_cam"), ("tracker_wide_cam_fps", "tracker_wide_cam"),
-        ("tracker_narrow_cam_fps", "tracker_narrow_cam"), ("thermal_cam_fps", "thermal_cam"),
-        ("utility_cam_fps", "utility_cam")) if getattr(args, en, False)]
-    _sim_step = min(max(1.0 / max(_cam_fps), 0.004), 1.0 / 30.0) if _cam_fps and max(_cam_fps) > 0 else 0.004
+    _sim_step = camera_visualization_step(args)
     world_vars = compute_world_vars(
         args.drone, args.world,
         target_altitude=args.target_altitude,
