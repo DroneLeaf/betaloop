@@ -948,6 +948,14 @@ def parse_args():
              "tilt->pitch (roll=0) drive the pedestal attitude (0=off)",
     )
     slk.add_argument(
+        "--gps-delay-ms",
+        type=float,
+        default=0.0,
+        help="Artificial GPS latency in ms (0-5000, 0 = off): bf_sim_bridge hands BF's "
+             "virtual GPS the position/velocity of this much sim time earlier; IMU and "
+             "baro stay current. For calibrating the INS GPS delay.",
+    )
+    slk.add_argument(
         "--home-lat",
         type=float,
         default=None,
@@ -1466,6 +1474,9 @@ def main():
             bridge_args += ["--home-lon", str(args.home_lon)]
         if args.home_alt is not None:
             bridge_args += ["--home-alt", str(args.home_alt)]
+        if args.gps_delay_ms > 0.0:
+            bridge_args += ["--gps-delay-ms", f"{args.gps_delay_ms:g}"]
+            log.warning("Artificial GPS delay: %g ms (BF virtual GPS only)", args.gps_delay_ms)
         L = args.single_spec
         if L:
             # The drone rides its launcher: placed at the pivot (the only bay,
