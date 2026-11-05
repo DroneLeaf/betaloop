@@ -1123,6 +1123,11 @@ def compute_model_vars(
     camera_shm_export: bool = True,
     gpu_warp: bool = False,
     chase_cam_enabled: bool = False,
+    # Simulated camera gimbal (bf_sim_bridge --gimbal): the onboard cameras move
+    # from base_link to the gimbal's payload link (gimbal_link) — same poses at
+    # neutral — and ExternalPosePlugin drives its two joints from the pose
+    # datagram. The chase camera is a 3rd-person view and stays on base_link.
+    gimbal_enabled: bool = False,
 ) -> dict:
     """Compute model template variables from drone ref and overrides.
 
@@ -1466,6 +1471,7 @@ def compute_model_vars(
             utility_img_width, utility_hfov_deg),
         # Chase camera — rectilinear, 3rd-person
         "chase_cam_enabled": bool(chase_cam_enabled),
+        "gimbal_enabled": bool(gimbal_enabled),
         "camera_shm_export": bool(camera_shm_export),
         # GPU fisheye warp specs for ShmCameraExportPlugin (<warp> elements).
         "shm_warp": _shm_warp,
@@ -2313,12 +2319,23 @@ def _shm_source_flags(args):
     return ["--shm-source"] if getattr(args, "camera_transport", "shm") == "shm" else []
 
 
-def fleet_camera_topic(gz_world: str, model: str, sensor: str) -> str:
+# Link that carries the onboard cameras: the camera gimbal's payload link when
+# the gimbal is simulated (compute_model_vars gimbal_enabled), else base_link.
+# Only topic PATHS change with it — SHM segment names are model + sensor.
+GIMBAL_CAMERA_LINK = "gimbal_link"
+
+
+def camera_link(args) -> str:
+    return GIMBAL_CAMERA_LINK if getattr(args, "gimbal", False) else "base_link"
+
+
+def fleet_camera_topic(gz_world: str, model: str, sensor: str, link: str = "base_link") -> str:
     """Explicit camera topic of a fleet drone (drone_<id>). Fleet mode never
     substring-discovers: "drone_15" would match drone_151's topics. In SHM
     mode the bridge only derives the segment name from it:
-    /gz_cam_<model>_<sensor> (raw input: the same + "_raw")."""
-    return f"/world/{gz_world}/model/{model}/link/base_link/sensor/{sensor}/image"
+    /gz_cam_<model>_<sensor> (raw input: the same + "_raw"). `link` =
+    camera_link(args) (the gimbal's payload link when it is simulated)."""
+    return f"/world/{gz_world}/model/{model}/link/{link}/sensor/{sensor}/image"
 
 
 def start_tracker_bridges(args, pm: ProcessManager, model=None, gz_world=None,
@@ -2353,7 +2370,7 @@ def start_tracker_bridges(args, pm: ProcessManager, model=None, gz_world=None,
         if not getattr(args, enable_attr, False):
             continue
         if model:
-            topic = fleet_camera_topic(gz_world, model, name_hint)
+            topic = fleet_camera_topic(gz_world, model, name_hint, camera_link(args))
         else:
             log.info("Discovering %s camera topic …", label.lower())
             topic = discover_camera_topic(name_hint=name_hint, timeout=30, model_hint=model_hint)

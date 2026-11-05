@@ -1,5 +1,18 @@
 # CLAUDE.md — Agent Handover (`betaloop/`)
 
+## Session Addendum (2026-11-04) — `--gimbal` (simulated camera gimbal)
+
+- start.py: `--gimbal/--no-gimbal`, `--gimbal-link` (default
+  `/dev/shm/leaffc/gimbal` — a private dir, NOT /dev/shm itself: protected
+  symlinks), `--gimbal-{pan,tilt}-{delay,tau}-ms` (5/8) → bf_sim_bridge;
+  DroneLeaf axis names, never roll/pitch (pan = C-40D pitch, tilt = C-40D roll;
+  root CLAUDE.md 2026-11-05);
+  `compute_model_vars(gimbal_enabled=)` → the drone templates. Fleet mode only
+  renders the models (drone bridges get it via drone_ctl).
+- `common.camera_link(args)` / `GIMBAL_CAMERA_LINK`: the cameras' link for topic
+  PATHS (`fleet_camera_topic(..., link)`, tracker + fleet pilot bridges); SHM
+  names are model + sensor, unchanged. start_px4.py untouched (no gimbal on PX4).
+
 ## Session Addendum (2026-10-25) — camera FPS controls the normal pipeline
 
 - `common.camera_visualization_step(args)` is shared by BF and PX4 launchers:

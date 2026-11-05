@@ -75,6 +75,7 @@ from common import (
     render_fleet_models,
     start_udp_fanout,
     fleet_camera_topic,
+    camera_link,
     TARGET_MIRROR_PORT,
     setup_gazebo_env,
     start_balloon_thread,
@@ -279,6 +280,7 @@ def _render_all_templates(drone, world_name, args):
         utility_fisheye=getattr(args, "utility_fisheye", True),
         **lens_kwargs_from_args(args),
         chase_cam_enabled=getattr(args, "chase_cam", False),
+        gimbal_enabled=getattr(args, "gimbal", False),
     )
 
     log.info("CTW=%.1f mass=%.3fkg Ixx=%.6f Iyy=%.6f Izz=%.6f standoff=%.3fm cam_pitch=%.1f°",
@@ -955,6 +957,26 @@ def parse_args():
              "virtual GPS the position/velocity of this much sim time earlier; IMU and "
              "baro stay current. For calibrating the INS GPS delay.",
     )
+    # Simulated camera gimbal (bf_sim_bridge gimbal.h): an AllXF C-40D 2-axis
+    # gimbal carrying every onboard camera, driven over a virtual serial port
+    # in the manufacturer's protocol (HEAR_FC / gimbal_test.py). DroneLeaf axis
+    # names, like the launcher: pan = the C-40D's pitch axis, tilt = its roll.
+    slk.add_argument(
+        "--gimbal", action=argparse.BooleanOptionalAction, default=False,
+        help="Mount every onboard camera on a simulated C-40D pan/tilt gimbal "
+             "(per-axis first-order-plus-dead-time dynamics; virtual serial port "
+             "speaking its private protocol, see --gimbal-link). Chase cam excluded.",
+    )
+    slk.add_argument(
+        "--gimbal-link", default="/dev/shm/leaffc/gimbal",
+        help="Symlink to the gimbal's virtual serial port (default /dev/shm/leaffc/gimbal: "
+             "user-writable on the host and visible in the LeafFC container via its /dev mount)",
+    )
+    for _ax in ("pan", "tilt"):
+        slk.add_argument(f"--gimbal-{_ax}-delay-ms", type=float, default=5.0,
+                         help=f"Gimbal {_ax} axis dead time in ms (0-1000, default 5)")
+        slk.add_argument(f"--gimbal-{_ax}-tau-ms", type=float, default=8.0,
+                         help=f"Gimbal {_ax} axis time constant in ms (0-10000, default 8)")
     slk.add_argument(
         "--home-lat",
         type=float,
@@ -1430,7 +1452,8 @@ def main():
             for d in args.fleet_spec["drones"]:
                 if getattr(args, "pilot_cam", True):
                     cmd = [IMAGE_BRIDGE,
-                           fleet_camera_topic(gz_world_name, d["name"], "fpv_cam"),
+                           fleet_camera_topic(gz_world_name, d["name"], "fpv_cam",
+                                              camera_link(args)),
                            *_shm_source_flags(args),
                            # OSD reads MSP from THIS drone's BF SITL
                            "--osd", "--msp-host", d["ip"], "--msp-port", str(args.msp_port),
@@ -1477,6 +1500,15 @@ def main():
         if args.gps_delay_ms > 0.0:
             bridge_args += ["--gps-delay-ms", f"{args.gps_delay_ms:g}"]
             log.warning("Artificial GPS delay: %g ms (BF virtual GPS only)", args.gps_delay_ms)
+        if args.gimbal:
+            bridge_args += ["--gimbal", "--gimbal-link", args.gimbal_link,
+                            "--gimbal-pan-delay-ms", f"{args.gimbal_pan_delay_ms:g}",
+                            "--gimbal-pan-tau-ms", f"{args.gimbal_pan_tau_ms:g}",
+                            "--gimbal-tilt-delay-ms", f"{args.gimbal_tilt_delay_ms:g}",
+                            "--gimbal-tilt-tau-ms", f"{args.gimbal_tilt_tau_ms:g}"]
+            log.info("Camera gimbal: virtual serial port %s (pan d=%g tau=%g ms, "
+                     "tilt d=%g tau=%g ms)", args.gimbal_link, args.gimbal_pan_delay_ms,
+                     args.gimbal_pan_tau_ms, args.gimbal_tilt_delay_ms, args.gimbal_tilt_tau_ms)
         L = args.single_spec
         if L:
             # The drone rides its launcher: placed at the pivot (the only bay,
