@@ -1883,6 +1883,51 @@ def boost_gz_priority(pid: int, nice_level: int = -10) -> None:
             (r.stderr or r.stdout or "sudo -n refused").strip().splitlines()[-1], script)
 
 
+def _root_helper() -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "boost_sim_priority.sh")
+
+
+def device_link_needs_root(path: str) -> bool:
+    """True when this user cannot create `path` itself (e.g. /dev/leaf_c40d):
+    its directory exists but isn't writable."""
+    d = os.path.dirname(path) or "."
+    return os.path.isdir(d) and not os.access(d, os.W_OK)
+
+
+def link_sim_device(link: str, target: str) -> bool:
+    """Make the root-owned name `link` (/dev/leaf*) point at a sim pty's
+    link `target` (/dev/shm/leaffc/*) through boost_sim_priority.sh
+    --device-link (the same NOPASSWD sudoers line as the gz priority boost).
+    The script never replaces a real device. Best-effort: False + a warning."""
+    try:
+        r = subprocess.run(["sudo", "-n", _root_helper(), "--device-link", link, target],
+                           capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        log.warning("Could not create %s (%s)", link, e)
+        return False
+    msg = (r.stderr or r.stdout or "").strip().splitlines()
+    if r.returncode == 0:
+        log.info("%s", msg[-1] if msg else f"{link} -> {target}")
+        return True
+    if r.returncode == 2:   # a real device already owns the name
+        log.warning("%s", msg[-1] if msg else f"{link} is a real device")
+    else:
+        log.warning("Could not create %s -> %s (%s). Needs the NOPASSWD sudoers line for "
+                    "%s (HOST_SETUP §8).", link, target,
+                    msg[-1] if msg else "sudo -n refused", _root_helper())
+    return False
+
+
+def unlink_sim_device(link: str, target: str) -> None:
+    """Remove `link` if it still points at `target` (best-effort, silent)."""
+    try:
+        subprocess.run(["sudo", "-n", _root_helper(), "--remove-device-link", link, target],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
 def warn_stale_builds() -> list:
     """Log every compiled sim piece that is missing or older than its source
     (build_check.py) — after a `git pull` the launch would otherwise run the

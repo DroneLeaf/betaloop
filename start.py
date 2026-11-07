@@ -29,6 +29,7 @@ Usage:
     python3 start.py --world moving_target --ctw 5 --angular-damping 0.05
 """
 
+import atexit
 import argparse
 import fcntl
 import logging
@@ -56,6 +57,9 @@ from common import (
     TOPIC_MODEL_HINT_DEFAULT,
     ProcessManager,
     boost_gz_priority,
+    device_link_needs_root,
+    link_sim_device,
+    unlink_sim_device,
     warn_stale_builds,
     DEFAULT_OGRE_WORKERS,
     gz_spawn_env,
@@ -972,6 +976,14 @@ def parse_args():
         help="Symlink to the gimbal's virtual serial port (default /dev/shm/leaffc/gimbal: "
              "user-writable on the host and visible in the LeafFC container via its /dev mount)",
     )
+    slk.add_argument(
+        "--gimbal-port", default="",
+        help="The name LeafFC opens for the gimbal, e.g. /dev/leaf_c40d (SimControl's "
+             "Camera gimbal card). In a directory this user can't write (/dev), the bridge "
+             "keeps its link at --gimbal-link and the port is a root-made link to it "
+             "(boost_sim_priority.sh --device-link); a real device there is never replaced. "
+             "Empty = --gimbal-link only.",
+    )
     for _ax in ("pan", "tilt"):
         slk.add_argument(f"--gimbal-{_ax}-delay-ms", type=float, default=5.0,
                          help=f"Gimbal {_ax} axis dead time in ms (0-1000, default 5)")
@@ -1501,13 +1513,23 @@ def main():
             bridge_args += ["--gps-delay-ms", f"{args.gps_delay_ms:g}"]
             log.warning("Artificial GPS delay: %g ms (BF virtual GPS only)", args.gps_delay_ms)
         if args.gimbal:
-            bridge_args += ["--gimbal", "--gimbal-link", args.gimbal_link,
+            port = (args.gimbal_port or "").strip()
+            bridge_link = args.gimbal_link
+            if port and port != args.gimbal_link:
+                if device_link_needs_root(port):
+                    # e.g. /dev/leaf_c40d: root links it to the bridge's own
+                    # link; undone at exit (only if it still points there).
+                    if link_sim_device(port, args.gimbal_link):
+                        atexit.register(unlink_sim_device, port, args.gimbal_link)
+                else:
+                    bridge_link = port
+            bridge_args += ["--gimbal", "--gimbal-link", bridge_link,
                             "--gimbal-pan-delay-ms", f"{args.gimbal_pan_delay_ms:g}",
                             "--gimbal-pan-tau-ms", f"{args.gimbal_pan_tau_ms:g}",
                             "--gimbal-tilt-delay-ms", f"{args.gimbal_tilt_delay_ms:g}",
                             "--gimbal-tilt-tau-ms", f"{args.gimbal_tilt_tau_ms:g}"]
             log.info("Camera gimbal: virtual serial port %s (pan d=%g tau=%g ms, "
-                     "tilt d=%g tau=%g ms)", args.gimbal_link, args.gimbal_pan_delay_ms,
+                     "tilt d=%g tau=%g ms)", port or bridge_link, args.gimbal_pan_delay_ms,
                      args.gimbal_pan_tau_ms, args.gimbal_tilt_delay_ms, args.gimbal_tilt_tau_ms)
         L = args.single_spec
         if L:
