@@ -65,6 +65,8 @@ from common import (
     gz_spawn_env,
     cleanup_before_start,
     add_lens_args,
+    add_sensor_error_args,
+    sensor_error_args,
     compute_model_vars,
     compute_world_vars,
     camera_visualization_step,
@@ -961,6 +963,9 @@ def parse_args():
              "virtual GPS the position/velocity of this much sim time earlier; IMU and "
              "baro stay current. For calibrating the INS GPS delay.",
     )
+    # Injected GPS noise + baro delay / noise (bf_sim_bridge sensor_errors.h):
+    # one flag per common.sensor_error_keys() entry, passed to the bridge as is.
+    add_sensor_error_args(slk)
     # Simulated camera gimbal (bf_sim_bridge gimbal.h): an AllXF C-40D 2-axis
     # gimbal carrying every onboard camera, driven over a virtual serial port
     # in the manufacturer's protocol (HEAR_FC / gimbal_test.py). DroneLeaf axis
@@ -1512,6 +1517,10 @@ def main():
         if args.gps_delay_ms > 0.0:
             bridge_args += ["--gps-delay-ms", f"{args.gps_delay_ms:g}"]
             log.warning("Artificial GPS delay: %g ms (BF virtual GPS only)", args.gps_delay_ms)
+        sens_args = sensor_error_args(vars(args))
+        if sens_args:
+            bridge_args += sens_args
+            log.warning("Injected sensor errors (BF GPS/baro only): %s", " ".join(sens_args))
         if args.gimbal:
             port = (args.gimbal_port or "").strip()
             bridge_link = args.gimbal_link

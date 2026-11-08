@@ -2364,6 +2364,96 @@ def _shm_source_flags(args):
     return ["--shm-source"] if getattr(args, "camera_transport", "shm") == "shm" else []
 
 
+# ── Injected sensor errors (bf_sim_bridge sensor_errors.h) ─────────────────
+# ONE table for every hop: the SimControl settings keys, start.py's flags (=
+# bf_sim_bridge's flags), drone_ctl's fleet file `sensor_errors` and the
+# drone.env SENSOR_ERRORS string. Each source gets a white 1-sigma (fresh every
+# packet), a random-walk bias intensity (unit/sqrt(s)) and the bias correlation
+# time (0 = pure random walk, > 0 = first-order Gauss-Markov with steady
+# 1-sigma rw*sqrt(tau/2)). Only Betaflight's GPS + baro fields are corrupted;
+# ground truth (9020 telemetry, Gazebo, redis) stays exact. All 0 = off, and
+# no flag is emitted, so the bridge command is unchanged.
+SENSOR_NOISE_SOURCES = (
+    # (key prefix, label, unit)
+    ("gps_pos_h", "GPS position, horizontal (E and N, each)", "m"),
+    ("gps_pos_v", "GPS position, vertical", "m"),
+    ("gps_vel_h", "GPS velocity, horizontal (E and N, each)", "m/s"),
+    ("gps_vel_v", "GPS velocity, vertical", "m/s"),
+    ("baro", "Barometric altitude", "m"),
+)
+SENSOR_NOISE_FIELDS = ("noise", "rw", "rw_tau_s")   # key suffixes = flag suffixes
+SENSOR_BARO_DELAY_KEY = "baro_delay_ms"
+SENSOR_SEED_KEY = "sensor_noise_seed"
+
+
+def sensor_error_keys() -> list:
+    """Every settings / fleet-file key of the injected sensor errors (GPS delay
+    keeps its own older `gps_delay_ms` path)."""
+    keys = [f"{src}_{f}" for src, _l, _u in SENSOR_NOISE_SOURCES for f in SENSOR_NOISE_FIELDS]
+    return keys + [SENSOR_BARO_DELAY_KEY, SENSOR_SEED_KEY]
+
+
+def sensor_errors_from(values: dict | None) -> dict:
+    """The sensor-error values of a settings dict / fleet file block, every key
+    present, negatives and junk clamped to 0 (seed: a non-negative int)."""
+    v = dict(values or {})
+    out = {}
+    for k in sensor_error_keys():
+        try:
+            x = float(v.get(k, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            x = 0.0
+        x = x if math.isfinite(x) and x > 0.0 else 0.0
+        out[k] = int(x) if k == SENSOR_SEED_KEY else x
+    return out
+
+
+def sensor_errors_active(values: dict | None) -> bool:
+    """True when any error source or the baro delay is on (a seed alone is not)."""
+    v = sensor_errors_from(values)
+    return any(v[f"{src}_{f}"] > 0.0 for src, _l, _u in SENSOR_NOISE_SOURCES
+               for f in ("noise", "rw")) or v[SENSOR_BARO_DELAY_KEY] > 0.0
+
+
+def sensor_error_args(values: dict | None, seed_offset: int = 0) -> list:
+    """bf_sim_bridge / start.py argv for the non-zero sensor errors ([] when
+    off). `seed_offset` (fleet: the drone id) gives every drone its own noise
+    under one fixed seed; a seed of 0 stays 0 = the bridge draws a fresh one."""
+    v = sensor_errors_from(values)
+    if not sensor_errors_active(v):
+        return []
+    args = []
+    for src, _l, _u in SENSOR_NOISE_SOURCES:
+        for f in SENSOR_NOISE_FIELDS:
+            x = v[f"{src}_{f}"]
+            if x > 0.0:
+                args += [f"--{src}-{f}".replace("_", "-"), f"{x:g}"]
+    if v[SENSOR_BARO_DELAY_KEY] > 0.0:
+        args += ["--baro-delay-ms", f"{v[SENSOR_BARO_DELAY_KEY]:g}"]
+    if v[SENSOR_SEED_KEY] > 0:
+        args += ["--sensor-noise-seed", str(v[SENSOR_SEED_KEY] + int(seed_offset))]
+    return args
+
+
+def add_sensor_error_args(group) -> None:
+    """start.py: one float flag per sensor-error key (dest = the key)."""
+    for src, label, unit in SENSOR_NOISE_SOURCES:
+        group.add_argument(f"--{src}-noise".replace("_", "-"), dest=f"{src}_noise",
+                           type=float, default=0.0,
+                           help=f"{label}: white-noise 1-sigma in {unit}, BF only (0 = off)")
+        group.add_argument(f"--{src}-rw".replace("_", "-"), dest=f"{src}_rw",
+                           type=float, default=0.0,
+                           help=f"{label}: random-walk bias intensity in {unit}/sqrt(s) (0 = off)")
+        group.add_argument(f"--{src}-rw-tau-s".replace("_", "-"), dest=f"{src}_rw_tau_s",
+                           type=float, default=0.0,
+                           help=f"{label}: bias correlation time in s (0 = pure random walk)")
+    group.add_argument("--baro-delay-ms", dest=SENSOR_BARO_DELAY_KEY, type=float, default=0.0,
+                       help="Barometer latency in ms (0-5000, 0 = off): BF's pressure is the "
+                            "one of this much sim time earlier")
+    group.add_argument("--sensor-noise-seed", dest=SENSOR_SEED_KEY, type=int, default=0,
+                       help="Sensor-noise RNG seed (0 = a fresh random seed each run)")
+
+
 # Link that carries the onboard cameras: the camera gimbal's payload link when
 # the gimbal is simulated (compute_model_vars gimbal_enabled), else base_link.
 # Only topic PATHS change with it — SHM segment names are model + sensor.
